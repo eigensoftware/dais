@@ -274,7 +274,7 @@ class TestPanelApp(unittest.TestCase):
         app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
         self.assertFalse(app.handle(ord("q"), app.left_rows(), 0, None))
 
-    def test_a_on_work_selection_dispatches_engine(self):
+    def test_a_on_work_selection_ships_in_panel_overlay(self):
         app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
                           "https://x/y/pull/7")])
         app.pane_focus = "work"; app._confirm = lambda *a: True
@@ -283,9 +283,17 @@ class TestPanelApp(unittest.TestCase):
         i, row = next((i, r) for i, r in enumerate(rows)
                       if r["kind"] == "task" and r["status"] == "ready_to_merge")
         with mock.patch.object(d, "subprocess") as sub:
-            sub.call.return_value = 0
+            sub.run.return_value = mock.Mock(returncode=0, stdout="✓ lyr-1 → done.", stderr="")
             app.handle(ord("a"), rows, i, row)
-            sub.call.assert_called_once_with(["dais", "ship", "beacon", "7"])
+            # ship runs via captured subprocess.run (no endwin/console drop)
+            sub.run.assert_called_once_with(["dais", "ship", "beacon", "7"],
+                                            capture_output=True, text=True, stdin=sub.DEVNULL)
+        # it ran IN the panel: an overlay is up carrying the captured output
+        self.assertTrue(app.show_overlay)
+        self.assertTrue(any("done" in ln for ln in app._overlay["lines"]))
+        # any key dismisses the overlay (modal, like help)
+        app.handle(ord(" "), app.left_rows(), 0, None)
+        self.assertFalse(app.show_overlay)
 
     def test_q_does_not_quit_while_filtering(self):
         """I2: pressing q while filtering must feed q into the filter, not quit."""

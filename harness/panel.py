@@ -419,6 +419,23 @@ _HELP_LINES = [
 ]
 
 
+def render_overlay(scr, h, w, ov):
+    """Centered reverse-video modal showing a captured command's output (a bold title row, then the
+    output tailed to fit so the footer stays visible). Lets actions like `ship` run IN the panel
+    instead of dropping to the console. Any key dismisses it."""
+    bw = min(max(0, w - 4), 100)
+    lines = ov.get("lines", []) if ov else []
+    max_body = max(1, min(h - 2, len(lines) + 1) - 1)    # leave a row for the title
+    body = lines[-max_body:] if len(lines) > max_body else lines
+    box = [ov.get("title", "") if ov else ""] + body
+    bh = min(max(0, h - 2), len(box))
+    y0 = max(0, (h - bh) // 2)
+    x0 = max(0, (w - bw) // 2)
+    for i in range(bh):
+        attr = curses.A_REVERSE | (curses.A_BOLD if i == 0 else 0)
+        _add(scr, y0 + i, x0, pad_cols(clip_cols(box[i], bw), bw), x0 + bw, attr)
+
+
 def render_help(scr, h, w):
     """Centered keymap overlay."""
     bw = min(w - 4, 56)
@@ -451,6 +468,8 @@ class PanelApp(d.App):
         self.project_filter = None
         self.show_help = False
         self.show_logwall = False
+        self.show_overlay = False        # an action's captured output, shown in-panel (e.g. ship)
+        self._overlay = None
 
     def left_rows(self):
         rows = panel_work_rows(self.snap, project=self.project_filter,
@@ -459,6 +478,35 @@ class PanelApp(d.App):
             rows = [r for r in rows if r["kind"] in ("task", "running")]
             rows = d.filter_rows(rows, self.filter, key=_row_search_text)
         return rows
+
+    def _capture(self, cmd):
+        """Run a non-interactive `dais …` command capturing its output. Returns (rc, text)."""
+        r = d.subprocess.run([self._dais()] + [str(c) for c in cmd],
+                             capture_output=True, text=True, stdin=d.subprocess.DEVNULL)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+    def _ship_pr(self, row, cmd):
+        """Override the inherited console-drop: run ship IN the panel by capturing its output into a
+        dismissible overlay. ship is non-interactive, so this can't hang; the merge itself (argv, QA
+        gate, the prior _confirm) is unchanged — only the output presentation differs."""
+        tid = (self._task_of(row) or {}).get("id") or "?"
+        label = "dais " + " ".join(str(c) for c in cmd)
+        self._overlay = {"title": f"shipping {tid} …",
+                         "lines": [f"running: {label}", "", "please wait — merging…"]}
+        self.show_overlay = True
+        try:                                     # paint the 'running' frame; the capture below blocks
+            h, w = self.scr.getmaxyx()
+            render_overlay(self.scr, h, w, self._overlay)
+            self.scr.refresh()
+        except curses.error:
+            pass
+        rc, out = self._capture(cmd)
+        verdict = "done" if rc == 0 else f"FAILED (exit {rc})"
+        self._overlay = {"title": f"ship {tid} — {verdict}",
+                         "lines": (out.splitlines() or ["(no output)"])
+                         + ["", f"[exit {rc}]  press any key to return to dais top"]}
+        self.show_overlay = True
+        return rc
 
     def draw(self):
         scr = self.scr
@@ -481,6 +529,8 @@ class PanelApp(d.App):
                 render_bar(scr, rect, self, self.pane_focus)
             else:
                 _RENDER[pid](scr, rect, self, pid == self.pane_focus)
+        if self.show_overlay and self._overlay:
+            render_overlay(scr, h, w, self._overlay)
         if self.show_help:
             render_help(scr, h, w)
         scr.refresh()
@@ -489,6 +539,9 @@ class PanelApp(d.App):
         # filtering takes priority — all keystrokes route to the inherited filter handler
         if self.filtering:
             return super().handle(ch, rows, sel_i, sel_row)
+        if self.show_overlay:                   # action-output overlay (e.g. ship): any key returns
+            self.show_overlay = False
+            return True
         if self.show_help:                      # any key dismisses the overlay
             self.show_help = False
             return True
