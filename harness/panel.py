@@ -87,6 +87,14 @@ _DIM_STATUSES = {"done", "cancelled", "backlog", "deferred"}
 _RAIL_HUES = [3, 5, 4, 1, 2, 6]                              # cyan magenta yellow green red white
 
 
+def _row_search_text(r):
+    """Searchable text for a panel WORK row (used by the `/` filter)."""
+    if r["kind"] == "running":
+        return f"{r.get('task_id', '')} {r['project']} {r.get('agent', '')}"
+    t = r.get("task")
+    return f"{r.get('tag', '')} {r['id']} {r['project']} {t.title if t else ''}"
+
+
 def _tag_attr(app, status):
     if status in _DIM_STATUSES:
         return curses.A_DIM                                  # archive/parked recede
@@ -194,7 +202,7 @@ def render_inspector(scr, rect, app, focused):
     # Show the running agent's header instead (full live-log streaming is the log phase).
     if sel_row and sel_row.get("kind") == "running":
         lines = app.running_header(sel_row, app._now()) + \
-            ["", "(live log: press L — coming in the log phase)"]
+            ["", "(press l to open this agent's log)"]
     else:
         lines = _panel_detail_lines(app, sel_row)
     wrapped = []
@@ -352,8 +360,12 @@ class PanelApp(d.App):
         self.show_help = False
 
     def left_rows(self):
-        return panel_work_rows(self.snap, project=self.project_filter,
+        rows = panel_work_rows(self.snap, project=self.project_filter,
                                expanded=self._panel_expanded, show_parked=self.show_parked)
+        if self.filter:                          # honest filter: narrow to matching task/running rows
+            rows = [r for r in rows if r["kind"] in ("task", "running")]
+            rows = d.filter_rows(rows, self.filter, key=_row_search_text)
+        return rows
 
     def draw(self):
         scr = self.scr
@@ -449,6 +461,8 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
         for p in projects:
             for st in statuses:
                 for t in p.tasks_by_status.get(st, []):
+                    if (p.name, t.id) in running_ids:    # a running task shows only in RUNNING
+                        continue
                     out.append((p.name, t))
         return out
 
@@ -461,6 +475,7 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
     now = "9999-12-31 00:00:00"            # elapsed not needed for the model; render computes it
     threads = [t for t in d.running_threads(snap, now)
                if project is None or t["project"] == project]
+    running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
     add_band("RUNNING", len(threads))
     if threads:
         for t in threads:
@@ -488,7 +503,7 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
         for proj, t in loop:
             rows.append(_task_row(proj, t, t.status))
     else:
-        seg = d.loop_summary(snap) if project is None else _proj_loop_summary(projects)
+        seg = _proj_loop_summary(projects)       # panel-local: no emoji, no duplicate "g for full board"
         rows.append({"kind": "info", "id": "__loop_sum", "sel": False,
                      "label": "  " + (seg or "0 in flight") + "   (press g to expand)"})
 

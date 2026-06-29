@@ -705,3 +705,65 @@ class TestBandSpacing(unittest.TestCase):
         papp = self._papp([("a-1", "p", "t", "needs_review", "high", None)])
         rows = papp.left_rows()
         self.assertTrue(all(not r["sel"] for r in rows if r["kind"] == "spacer"))
+
+
+class TestFinalReviewFixes(unittest.TestCase):
+    def _papp(self, rows, project=None):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb8-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp.project_filter = project
+        return papp
+
+    def test_slash_filter_narrows_rows(self):                       # I-1
+        papp = self._papp([("lyr-1", "beacon", "ship it", "ready_to_merge", "high", "https://x/pull/1"),
+                           ("cou-1", "acme", "other", "ready_to_merge", "high", "https://x/pull/2")])
+        papp.filter = "lyr"
+        rows = papp.left_rows()
+        ids = [r.get("id") for r in rows if r["kind"] == "task"]
+        self.assertIn("lyr-1", ids)
+        self.assertNotIn("cou-1", ids)
+        self.assertTrue(all(r["kind"] in ("task", "running") for r in rows))   # filtering flattens
+
+    def test_default_loop_summary_has_no_emoji(self):              # I-2
+        papp = self._papp([("a-1", "p", "t", "ready", "med", None)])          # default (all-projects) view
+        rows = papp.left_rows()
+        loop = next(r for r in rows if r.get("id") == "__loop_sum")
+        self.assertNotIn("⚙", loop["label"])                  # no ⚙ gear
+        self.assertNotIn("for full board", loop["label"])          # no duplicate of "(press g to expand)"
+        self.assertIn("the loop", loop["label"])
+
+    def test_running_gate_task_not_double_counted(self):           # I-3
+        papp = self._papp([("cou-5a", "acme", "review", "needs_review", "high", None)])
+        thread = {"project": "acme", "task": "cou-5a", "agent": "lead",
+                  "since": "2026-06-29 00:00:00", "secs": 5, "log_path": "/tmp/x.log"}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            rows = papp.left_rows()
+        self.assertTrue(any(r["kind"] == "running" and r.get("task_id") == "cou-5a" for r in rows))
+        self.assertFalse(any(r["kind"] == "task" and r.get("id") == "cou-5a" for r in rows))
+
+    def test_running_loop_task_not_double_counted(self):          # I-3 (loop band variant)
+        papp = self._papp([("w-9", "cedar", "qa", "needs_qa", "high", None)])
+        thread = {"project": "cedar", "task": "w-9", "agent": "qa",
+                  "since": "2026-06-29 00:00:00", "secs": 5, "log_path": "/tmp/x.log"}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            rows = papp.left_rows()
+        self.assertFalse(any(r["kind"] == "task" and r.get("id") == "w-9" for r in rows))
+
+    def test_inspector_running_hint_uses_lowercase_l(self):        # M-1
+        papp = self._papp([("w-1", "cedar", "build", "ready", "high", None)])
+        thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": "/tmp/x.log"}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            rows = papp.left_rows()
+            run_row = next(r for r in rows if r["kind"] == "running")
+            papp.sel_id = run_row["id"]
+            scr = FakeScr(40, 200)
+            pn.render_inspector(scr, pn.Rect(1, 0, 30, 80), papp, focused=False)
+            text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("press l", text)
+        self.assertNotIn("press L", text)
+        self.assertNotIn("coming in the log phase", text)
