@@ -820,3 +820,26 @@ class TestPaneFocusIndicator(unittest.TestCase):
                   if "▶" in c[2] and any(t in c[2] for t in ("WORK", "PROJECTS", "INSPECTOR"))]
         self.assertEqual(len(titles), 1)
         self.assertIn("WORK", titles[0][2])
+
+
+class TestSplitBands(unittest.TestCase):
+    def test_even_split(self):
+        self.assertEqual(pn.split_bands(1, 9, 3), [(1, 3), (4, 3), (7, 3)])
+
+    def test_remainder_frontloaded_and_contiguous(self):
+        self.assertEqual(pn.split_bands(1, 20, 3), [(1, 7), (8, 7), (15, 6)])
+
+    def test_zero_agents(self):
+        self.assertEqual(pn.split_bands(1, 10, 0), [])
+
+    def test_one_agent_full_height(self):
+        self.assertEqual(pn.split_bands(2, 10, 1), [(2, 10)])
+
+    def test_height_less_than_n_is_contiguous_and_sums(self):
+        bands = pn.split_bands(0, 2, 5)
+        self.assertEqual(len(bands), 5)
+        self.assertEqual(sum(h for _, h in bands), 2)
+        ys = [y for y, _ in bands]
+        hs = [h for _, h in bands]
+        for i in range(1, 5):
+            self.assertEqual(ys[i], ys[i - 1] + hs[i - 1])

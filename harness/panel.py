@@ -73,6 +73,22 @@ def cycle_focus(current, order, direction=1):
     return order[(order.index(current) + direction) % len(order)]
 
 
+def split_bands(top, height, n):
+    """Divide `height` rows starting at `top` into `n` contiguous (y, h) bands. Heights are as even
+    as possible with the remainder given to the top bands; n <= 0 -> []. When height < n the trailing
+    bands get h == 0. Sum of heights == max(0, height)."""
+    if n <= 0:
+        return []
+    base, extra = divmod(max(0, height), n)
+    out = []
+    y = top
+    for i in range(n):
+        h = base + (1 if i < extra else 0)
+        out.append((y, h))
+        y += h
+    return out
+
+
 def render_pane_title(scr, rect, title, focused, app):
     """Draw a pane's title row. The FOCUSED pane gets a magenta accent bar with a ▶ marker; unfocused
     panes recede to plain dim text — so the active pane is unmistakable. Returns the inner Rect below."""
