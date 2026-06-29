@@ -808,7 +808,7 @@ class App:
         self.root = root
         self.conn = conn or connect()
         self.snap = None
-        self.mode = "project"          # "project" | "queue"
+        self.mode = "queue"            # "queue" = the cockpit (default) | "project" = the board
         self.expanded = set()           # project names expanded in project mode
         self.show_parked = False        # reveal backlog+deferred rows (toggled by `b`)
         self.focus = "left"            # "left" | "right"
@@ -883,6 +883,11 @@ class App:
 
     def _row_attr(self, r):
         if r["kind"] == "header":
+            lab = r.get("label", "").lstrip()
+            if lab.startswith("⚡"):                 # the NEEDS YOU banner — make it pop
+                return curses.A_BOLD | self._cp(7)
+            if lab.startswith(("⚙", "✓")):           # loop summary / all-clear — calm
+                return curses.A_DIM | self._cp(6)
             return curses.A_DIM | self._cp(STATUS_PAIR.get(r["status"], 6))
         if r["kind"] == "project":
             return curses.A_BOLD | (self._cp(1) if r.get("running") else self._cp(6))
@@ -959,16 +964,37 @@ class App:
             for (proj, task, st) in action_queue(self.snap, order):
                 if keep(proj, task):
                     byst.setdefault(st, []).append((proj, task))
-            for st in order:
-                items = byst.get(st)
-                if not items:
-                    continue
-                rows.append(self._header_row(f"{st} ({len(items)})", st))
+
+            def emit_group(label, st, items):
+                rows.append(self._header_row(label, st))
                 for (proj, task) in items:
                     title = truncate_words(task.title, 40)
                     rows.append(dict(id=task.id, kind="task", project=proj, task=task,
                                      status=st, running=False, sel=True,
                                      label=f"  {task.id:<7} {proj[:9]:<9} {title}"))
+
+            # Band B — ⚡ NEEDS YOU (the four founder gates), or the all-clear line.
+            gate_items = [(st, byst.get(st, [])) for st in GATE_ORDER]
+            if any(items for _st, items in gate_items):
+                rows.append(self._header_row(
+                    f"⚡ NEEDS YOU ({gate_count(self.snap)})", "ready_to_merge"))
+                for st, items in gate_items:
+                    if items:
+                        emit_group(f"{GATE_ICON[st]} {st} ({len(items)})", st, items)
+            else:
+                rows.append(self._header_row(allclear_line(len(threads)), "ready"))
+
+            # Band C — ⚙ the loop (collapsed; its tasks are summarised, never listed).
+            summary = loop_summary(self.snap, running_ids)
+            if summary:
+                rows.append(self._header_row(summary, "ready"))
+
+            # Founder-parked work (backlog/deferred) — revealed only by `b`, as rows.
+            if self.show_parked:
+                for st in PARKED_ORDER:
+                    items = byst.get(st, [])
+                    if items:
+                        emit_group(f"{st} ({len(items)})", st, items)
         else:
             for p in self.snap.projects:
                 run = ""

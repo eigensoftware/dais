@@ -410,5 +410,71 @@ class TestCockpitHelpers(unittest.TestCase):
         self.assertEqual(d.allclear_line(0), "✓ nothing needs you — loop idle")
 
 
+class TestCockpitRows(unittest.TestCase):
+    def _app(self, tasks):
+        """tasks: list of (id, project, title, status, priority, pr_url)."""
+        conn = _conn()
+        conn.executemany(
+            "INSERT INTO tasks(id,project,title,status,priority,pr_url) "
+            "VALUES(?,?,?,?,?,?)", tasks)
+        conn.commit()
+        return make_app(conn=conn)        # mode defaults to the cockpit ("queue")
+
+    def _labels(self, rows):
+        return [r["label"] for r in rows]
+
+    def test_default_mode_is_cockpit(self):
+        self.assertEqual(make_app().mode, "queue")
+
+    def test_needs_you_banner_and_gate_rows(self):
+        app = self._app([
+            ("lyr-1", "beacon", "ship it", "ready_to_merge", "high", "https://x/pull/9"),
+            ("cou-1", "acme", "approve me", "proposed", "high", None),
+        ])
+        rows = app.left_rows()
+        labels = self._labels(rows)
+        self.assertTrue(any("⚡ NEEDS YOU (2)" in l for l in labels), labels)
+        self.assertTrue(any("⏳ ready_to_merge (1)" in l for l in labels), labels)
+        self.assertTrue(any("🧭 proposed (1)" in l for l in labels), labels)
+        # the gate tasks are present as selectable task rows
+        gate_task_ids = {r["id"] for r in rows
+                         if r["kind"] == "task" and r["status"] in d.GATE_ORDER}
+        self.assertEqual(gate_task_ids, {"lyr-1", "cou-1"})
+
+    def test_loop_work_is_collapsed_not_listed(self):
+        app = self._app([
+            ("cou-1", "acme", "approve me", "proposed", "high", None),
+            ("win-1", "cedar", "build a", "ready", "high", None),
+            ("win-2", "cedar", "build b", "ready", "medium", None),
+            ("win-3", "cedar", "verify", "needs_qa", "high", None),
+        ])
+        rows = app.left_rows()
+        # NO individual loop-status task rows
+        self.assertFalse(any(r["kind"] == "task" and r["status"] in d.LOOP_SUMMARY_ORDER
+                             for r in rows))
+        # instead, exactly one collapsed summary line with the counts
+        summaries = [r["label"] for r in rows if "⚙ the loop:" in r["label"]]
+        self.assertEqual(len(summaries), 1, rows)
+        self.assertIn("2 ready", summaries[0])
+        self.assertIn("1 needs_qa", summaries[0])
+
+    def test_all_clear_when_no_gates(self):
+        app = self._app([
+            ("win-1", "cedar", "build", "ready", "high", None),
+        ])
+        rows = app.left_rows()
+        labels = self._labels(rows)
+        self.assertFalse(any("⚡ NEEDS YOU" in l for l in labels), labels)
+        self.assertTrue(any(l.startswith("✓ nothing needs you") for l in labels), labels)
+
+    def test_g_toggles_to_board(self):
+        app = make_app()
+        self.assertEqual(app.mode, "queue")
+        app.handle(ord("g"), [], 0, None)
+        self.assertEqual(app.mode, "project")
+        app.handle(ord("g"), [], 0, None)
+        self.assertEqual(app.mode, "queue")
+
+
 if __name__ == "__main__":
     unittest.main()
