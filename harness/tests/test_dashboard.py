@@ -268,6 +268,62 @@ class TestDataLayer(unittest.TestCase):
         self.assertEqual(done.dur_min, 3)
 
 
+class TestWorkspaceName(unittest.TestCase):
+    """workspace_name reads the `workspace:` value from a workspace's dais.yaml
+    (the line-based reader mirrors stage_goal), or None when absent."""
+
+    def _ws(self, contents):
+        root = tempfile.mkdtemp(prefix="dais-ws-")
+        self.addCleanup(__import__("shutil").rmtree, root, ignore_errors=True)
+        if contents is not None:
+            with open(os.path.join(root, "dais.yaml"), "w") as fh:
+                fh.write(contents)
+        return root
+
+    def test_reads_workspace_value(self):
+        root = self._ws("workspace: acme\nagent_repos: /work\n")
+        self.assertEqual(d.workspace_name(root), "acme")
+
+    def test_missing_yaml_is_none(self):
+        root = self._ws(None)                       # no dais.yaml at all
+        self.assertIsNone(d.workspace_name(root))
+
+    def test_missing_key_is_none(self):
+        root = self._ws("agent_repos: /work\n")     # yaml present, no workspace: key
+        self.assertIsNone(d.workspace_name(root))
+
+    def test_empty_value_is_none(self):
+        root = self._ws("workspace:\n")
+        self.assertIsNone(d.workspace_name(root))
+
+
+class TestWorkspaceHeader(unittest.TestCase):
+    """The plain header shows the workspace identity when present, else falls back
+    to the generic STATUS banner; the workspace flows in via Snapshot.workspace."""
+
+    def _snap(self, workspace):
+        return d.Snapshot(projects=[], recent_runs=[], cap_state=False,
+                          ts="2026-06-26 20:45:00", workspace=workspace)
+
+    def test_header_shows_workspace_name(self):
+        text = d.render_plain(self._snap("acme"), color=False)
+        self.assertIn("DAIS · acme", text)
+        self.assertNotIn("DAIS · STATUS", text)
+
+    def test_header_falls_back_to_status(self):
+        text = d.render_plain(self._snap(None), color=False)
+        self.assertIn("DAIS · STATUS", text)
+
+    def test_load_snapshot_populates_workspace_from_yaml(self):
+        root = tempfile.mkdtemp(prefix="dais-ws-")
+        self.addCleanup(__import__("shutil").rmtree, root, ignore_errors=True)
+        with open(os.path.join(root, "dais.yaml"), "w") as fh:
+            fh.write("workspace: demo\n")
+        snap = d.load_snapshot(_seed(), root=root, now="2026-06-26 20:45:00")
+        self.assertEqual(snap.workspace, "demo")
+        self.assertIn("DAIS · demo", d.render_plain(snap, color=False))
+
+
 class TestRenderPlain(unittest.TestCase):
     def test_plain_no_color_and_collapses(self):
         conn = _seed()

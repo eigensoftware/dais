@@ -50,11 +50,18 @@ trap cleanup EXIT
 trap 'echo "  ⏹ interrupted — task left in place, will resume next tick"; exit 130' INT TERM
 
 STAGE_GOAL="$(pcfg "$PROJECT" stage_goal)"
+# Workspace context: company-wide rules + founder decisions that apply to EVERY project. Injected
+# (by reference, like the project line) ahead of the project context so agents honor it every run.
+# Empty when the workspace has no CONTEXT.md, so single-project / bare workspaces are unaffected.
+WS_CONTEXT=""
+[ -f "$DAIS_HOME/CONTEXT.md" ] && WS_CONTEXT="Workspace context: FIRST read $DAIS_HOME/CONTEXT.md — company-wide rules and founder decisions that apply to EVERY project (honor them). THEN read the project's $PDIR/CONTEXT.md.
+
+"
 STANDING="You are running headless as the **$AGENT** for the '$PROJECT' project.
 
 Stage goal: $STAGE_GOAL
 
-Project context + memory: FIRST read $PDIR/CONTEXT.md — the goal, targets/metrics, founder decisions (honor them), and hard-won gotchas. If you discover something durable this run (a decision, a gotcha, a recurring fix), record it with: $DAIS_ROOT/dais learn $PROJECT \"one concise line\".
+${WS_CONTEXT}Project context + memory: FIRST read $PDIR/CONTEXT.md — the goal, targets/metrics, founder decisions (honor them), and hard-won gotchas. If you discover something durable this run (a decision, a gotcha, a recurring fix), record it with: $DAIS_ROOT/dais learn $PROJECT \"one concise line\".
 
 Coordination runs through the dais CLI (at $DAIS_ROOT/dais) backed by a shared SQLite db — that is the single source of truth for what to work on and how to hand off:
   - Your queue:      $DAIS_ROOT/dais tasks $PROJECT --assignee $AGENT
@@ -67,6 +74,13 @@ Two founder gates, pick by whether there's a PR: use ready_to_merge ONLY for a Q
 
 Do ONE unit of work this run, then stop. Follow your role file exactly. Code work happens in the repo at $REPO (open PRs with gh — as ready-for-review, NOT draft; mark the PR ready BEFORE you handoff to QA, since a draft can't be merged at the founder gate). Do not start more than one task. When done, update the task's status / hand it off per your role.
 Base any new branch on the freshly-fetched origin/main, never on local refs you happen to find. A just-merged PR is squash-merged and its branch DELETED on the remote, but a stale local branch/worktree may linger — the dais board is the source of truth for what's merged: if a task is 'done', its work IS on origin/main, so build on top of main, never stack on that task's old branch."
+
+# Debug seam: dump the assembled agent prompt and exit, WITHOUT calling claude. Lets tests
+# assert prompt wiring (e.g. workspace-context injection) without an end-to-end model run.
+if [ "${DAIS_SHOW_PROMPT:-0}" = 1 ]; then
+  printf '%s\n' "$STANDING"
+  exit 0
+fi
 
 # Permissions come from the role's `access` in the project's roles config:
 #   edit  -> may modify the repo (bypass).

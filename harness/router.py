@@ -121,6 +121,9 @@ def lint_project(root, project):
     return errors, warnings
 
 
+WORKSPACE_CONTEXT_MAX_LINES = 120  # injected into EVERY agent run -> must stay tight
+
+
 def lint(root, project):
     if project:
         projects = [project]
@@ -129,6 +132,15 @@ def lint(root, project):
         projects = sorted(d for d in os.listdir(pdir)
                           if os.path.exists(os.path.join(pdir, d, "roles")))
     any_err = False
+    # workspace-level check (once, not per project): the workspace CONTEXT.md is injected into
+    # every agent run, so an oversized one bloats every prompt. Warn (don't fail) past the cap.
+    ws_context = os.path.join(root, "CONTEXT.md")
+    if os.path.exists(ws_context):
+        with open(ws_context) as fh:
+            n = sum(1 for _ in fh)
+        if n > WORKSPACE_CONTEXT_MAX_LINES:
+            print("• workspace: warn   workspace CONTEXT.md is %d lines — keep it tight "
+                  "(injected into every agent run)" % n)
     for proj in projects:
         errors, warnings = lint_project(root, proj)
         if not errors and not warnings:

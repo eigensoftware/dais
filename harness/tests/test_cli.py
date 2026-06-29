@@ -270,6 +270,76 @@ class TestRunAgentRepoPath(CliTest):
         self.assertIn("repo not found: %s" % os.path.join(base, "demo"), out)
 
 
+class TestWorkspaceContextInjection(CliTest):
+    """run-agent.sh injects the WORKSPACE CONTEXT.md (company-wide rules) ahead of
+    the project's CONTEXT.md, so every agent run honors workspace-level decisions.
+    Tested through the DAIS_SHOW_PROMPT=1 debug seam: it dumps the assembled prompt
+    and exits before any claude call, so we assert wiring without a model run."""
+
+    def _run_agent(self, repo_base, env_extra=None):
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_AGENT_REPOS": repo_base, "DAIS_SHOW_PROMPT": "1"})
+        if env_extra:
+            e.update(env_extra)
+        return subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"),
+                               "demo", "engineer"],
+                              capture_output=True, text=True, env=e, cwd=self.root)
+
+    def _scaffold_with_repo(self):
+        # scaffold a project whose RELATIVE repo: resolves to an existing dir, so
+        # run-agent.sh gets past its `[ -d "$REPO" ]` guard to assemble the prompt.
+        dais(self.root, "scaffold", "demo")
+        base = tempfile.mkdtemp(prefix="dais-repos-")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        os.makedirs(os.path.join(base, "demo"))
+        return base
+
+    def test_workspace_context_injected_when_present(self):
+        base = self._scaffold_with_repo()
+        # `dais init` (CliTest.setUp) created the workspace CONTEXT.md at self.root
+        self.assertTrue(os.path.exists(os.path.join(self.root, "CONTEXT.md")))
+        r = self._run_agent(base)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Workspace context:", r.stdout)
+        self.assertIn(os.path.join(self.root, "CONTEXT.md"), r.stdout)
+        # the project context line is still there, AFTER the workspace one
+        self.assertIn("Project context", r.stdout)
+        self.assertLess(r.stdout.index("Workspace context:"),
+                        r.stdout.index("Project context"))
+
+    def test_no_workspace_line_when_file_absent(self):
+        base = self._scaffold_with_repo()
+        os.remove(os.path.join(self.root, "CONTEXT.md"))   # drop the workspace context
+        r = self._run_agent(base)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Workspace context:", r.stdout)
+        self.assertIn("Project context", r.stdout)         # project line unaffected
+
+
+class TestWorkspaceContextBloatLint(CliTest):
+    """`dais lint` (no project arg) warns — but does not error — when the workspace
+    CONTEXT.md grows too large, since it is injected into every agent run."""
+
+    def _write_context(self, nlines):
+        with open(os.path.join(self.root, "CONTEXT.md"), "w") as fh:
+            fh.write("\n".join("line %d" % i for i in range(nlines)) + "\n")
+
+    def test_bloated_workspace_context_warns_but_passes(self):
+        self._write_context(200)
+        r = dais(self.root, "lint")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # warning, not error
+        out = r.stdout + r.stderr
+        self.assertIn("CONTEXT.md is 200 lines", out)
+        self.assertIn("keep it tight", out)
+
+    def test_short_workspace_context_no_warning(self):
+        self._write_context(20)
+        r = dais(self.root, "lint")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("keep it tight", r.stdout + r.stderr)
+
+
 class TestSchedulePortable(CliTest):
     def test_linux_prints_cron_line(self):
         r = dais(self.root, "schedule", "install", "600", env={"DAIS_FORCE_OS": "Linux"})

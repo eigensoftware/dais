@@ -136,6 +136,7 @@ class Snapshot:
     recent_runs: list
     cap_state: bool
     ts: str
+    workspace: str = None          # workspace identity (dais.yaml `workspace:`), or None
 
 
 def connect(db=DB):
@@ -182,6 +183,20 @@ def stage_goal(root, name):
     except OSError:
         pass
     return ""
+
+
+def workspace_name(home=HOME):
+    """The `workspace:` value from the workspace's dais.yaml (line-based, mirroring
+    stage_goal), or None when the file or key is absent / the value is empty."""
+    path = os.path.join(home, "dais.yaml")
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.startswith("workspace:"):
+                    return line.split(":", 1)[1].strip() or None
+    except OSError:
+        pass
+    return None
 
 
 _PRIO = ("CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
@@ -234,7 +249,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
         "SELECT COUNT(*) c FROM runs WHERE status='capped' "
         "AND started_at > datetime(?, '-90 minutes')", (now,)).fetchone()["c"]
     return Snapshot(projects=projects, recent_runs=recent_runs,
-                    cap_state=capped > 0, ts=now)
+                    cap_state=capped > 0, ts=now, workspace=workspace_name(root))
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +277,15 @@ def _ids(tasks):
     return [t.id for t in tasks]
 
 
+def _banner(label, width=45):
+    """Center ` label ` in a rule of `═` `width` display columns wide. width=45 with
+    label='DAIS · STATUS' reproduces the original banner exactly."""
+    mid = f" {label} "
+    pad = max(0, width - disp_width(mid))
+    left = pad // 2
+    return "═" * left + mid + "═" * (pad - left)
+
+
 def render_plain(snap, color=None):
     if color is None:
         color = color_enabled()
@@ -272,7 +296,8 @@ def render_plain(snap, color=None):
         out.append(s)
 
     P()
-    P(f"{c['CB']}{c['CM']}═══════════════ DAIS · STATUS ═══════════════{c['C0']}")
+    label = f"DAIS · {snap.workspace}" if snap.workspace else "DAIS · STATUS"
+    P(f"{c['CB']}{c['CM']}{_banner(label)}{c['C0']}")
     P()
     for p in snap.projects:
         bs = p.tasks_by_status
@@ -984,7 +1009,9 @@ class App:
             badge = "○ watch stopped"
         threads = running_threads(self.snap, now) if self.snap else []
         run = f" · ▶ {len(threads)} running" if threads else ""
-        head = f" DAIS · LIVE  {clk} · ↻{self.interval:g}s · {badge}{run}{cap}"
+        ws = self.snap.workspace if self.snap else None
+        ident = f"DAIS · {ws} · LIVE" if ws else "DAIS · LIVE"   # show where you are
+        head = f" {ident}  {clk} · ↻{self.interval:g}s · {badge}{run}{cap}"
         if self.filtering:
             head += f"   /{self.filter}_"
         elif self.flash and time.monotonic() < self._flash_until:
