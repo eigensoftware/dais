@@ -358,5 +358,57 @@ class TestDrawSmoke(unittest.TestCase):
                                  f"row overruns the pane: {s!r}")
 
 
+# --------------------------------------------------------------------------- #
+# cockpit helpers (pure: counts, loop summary, all-clear)
+# --------------------------------------------------------------------------- #
+def _task(tid, status, priority="medium"):
+    return d.Task(id=tid, title="t", status=status, priority=priority)
+
+
+def _proj(name, **counts):
+    """A Project with `counts` tasks per status, ids like 'name-ready-0'."""
+    tbs = {}
+    for st, n in counts.items():
+        tbs[st] = [_task(f"{name}-{st}-{i}", st) for i in range(n)]
+    return d.Project(name=name, stage_goal="", running=[], tasks_by_status=tbs,
+                     recent_runs=[])
+
+
+def _snap(*projects):
+    return d.Snapshot(projects=list(projects), recent_runs=[], cap_state=False,
+                      ts="2026-06-29 00:00:00")
+
+
+class TestCockpitHelpers(unittest.TestCase):
+    def test_gate_count_sums_only_gates(self):
+        snap = _snap(_proj("a", ready_to_merge=2, proposed=1, ready=5, needs_qa=3, done=9),
+                     _proj("b", blocked=1, needs_review=1, changes_requested=4))
+        # gates: 2 ready_to_merge + 1 proposed + 1 blocked + 1 needs_review = 5
+        self.assertEqual(d.gate_count(snap), 5)
+
+    def test_gate_count_zero(self):
+        self.assertEqual(d.gate_count(_snap(_proj("a", ready=3, needs_qa=1))), 0)
+
+    def test_loop_summary_text_omits_zero_segments(self):
+        snap = _snap(_proj("a", ready=3, needs_qa=1), _proj("b", ready=0))
+        # changes_requested=0 omitted; order is ready, needs_qa, changes_requested
+        self.assertEqual(d.loop_summary(snap),
+                         "⚙ the loop: 3 ready · 1 needs_qa — g for full board")
+
+    def test_loop_summary_none_when_empty(self):
+        self.assertIsNone(d.loop_summary(_snap(_proj("a", proposed=2, done=4))))
+
+    def test_loop_summary_excludes_running_task(self):
+        snap = _snap(_proj("a", needs_qa=2))
+        running = frozenset({("a", "a-needs_qa-0")})   # one is mid-run → not counted
+        self.assertEqual(d.loop_summary(snap, running),
+                         "⚙ the loop: 1 needs_qa — g for full board")
+
+    def test_allclear_line_running_vs_idle(self):
+        self.assertEqual(d.allclear_line(2),
+                         "✓ nothing needs you — the loop is running (2 in flight)")
+        self.assertEqual(d.allclear_line(0), "✓ nothing needs you — loop idle")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -435,6 +435,47 @@ def action_queue(snap, order=QUEUE_ORDER):
     return rows
 
 
+# --- the cockpit: founder gates vs the loop's own work -------------------- #
+# The four founder-gate statuses, in ⚡ NEEDS YOU display order, with icons.
+GATE_ORDER = ["ready_to_merge", "needs_review", "proposed", "blocked"]
+GATE_ICON = {"ready_to_merge": "⏳", "needs_review": "📋",
+             "proposed": "🧭", "blocked": "⛔"}
+# The loop's own in-progress statuses — collapsed to one summary line, never listed.
+LOOP_SUMMARY_ORDER = ["ready", "needs_qa", "changes_requested"]
+
+
+def gate_count(snap):
+    """Total founder-gate tasks across all projects (the ⚡ NEEDS YOU count). Gate
+    statuses are founder-idle (no reactive role runs them), so this equals the number
+    of gate rows the cockpit lists."""
+    return sum(len(p.tasks_by_status.get(st, []))
+               for p in snap.projects for st in GATE_ORDER)
+
+
+def loop_summary(snap, running_ids=frozenset()):
+    """One-line summary of the loop's own queued work — the statuses the founder does
+    NOT action — e.g. '⚙ the loop: 3 ready · 1 needs_qa — g for full board', or None
+    when there is none. Zero-count statuses are omitted. Tasks currently being run
+    (`running_ids`: a set of (project, task_id)) are excluded; they show in the
+    running band instead, so the summary doesn't double-count them."""
+    segs = []
+    for st in LOOP_SUMMARY_ORDER:
+        n = sum(1 for p in snap.projects for t in p.tasks_by_status.get(st, [])
+                if (p.name, t.id) not in running_ids)
+        if n:
+            segs.append(f"{n} {st}")
+    if not segs:
+        return None
+    return "⚙ the loop: " + " · ".join(segs) + " — g for full board"
+
+
+def allclear_line(running_count):
+    """The calm replacement for the ⚡ NEEDS YOU band when no gate items remain."""
+    if running_count > 0:
+        return f"✓ nothing needs you — the loop is running ({running_count} in flight)"
+    return "✓ nothing needs you — loop idle"
+
+
 def watch_args(interval, par):
     """Validated/clamped argv tail for `dais watch <interval> <par>`: par is clamped
     to 1–5, interval to a positive int (a non-int / non-positive value falls back to
