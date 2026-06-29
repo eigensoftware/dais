@@ -8,6 +8,7 @@ layout. Reached via DAIS_PANEL=1; the classic `dais top` is unchanged.
 from collections import namedtuple
 
 import curses
+import re
 import textwrap
 
 import dashboard as d
@@ -185,24 +186,27 @@ def render_work(scr, rect, app, focused):
              inner.x + inner.w, attr)
 
 
+_RUN_LINE_RE = re.compile(r"^\s*\d{1,2}:\d{2}\s")   # an inspector run row: a leading "HH:MM "
+
+
 def _inspector_attr(app, idx_in_doc, line):
-    """Color by line type: run 'succeeded' green; 'fail'/'error'/'blocked' red; 'pass'/'+ ' green;
-    section headers (':' / 'runs touching') cyan-bold; 'prio high/urgent' yellow; labels dim."""
+    """Color INSPECTOR lines by STRUCTURE, not by substrings in free text. Only a run row (a leading
+    HH:MM time) carries its status color; only the exact section headers are cyan; the generated
+    assignee/prio meta line is dim (yellow when prio is high). Titles and note-body prose stay plain
+    so text like 'password', 'NOTE:' or 'BLOCKED' is never miscolored."""
     s = line.strip()
     low = s.lower()
-    if "succeeded" in low:
-        return app._cp(_LIVE)
-    if "fail" in low or "error" in low or "blocked" in low:
-        return app._cp(_BAD)
-    if "pass" in low or s.startswith("+ "):
-        return app._cp(_LIVE)
-    if s.endswith(":") or s.startswith("runs touching"):
+    if _RUN_LINE_RE.match(line):                            # a run row -> color by its status word
+        if "succeeded" in low:
+            return app._cp(_LIVE)
+        if "fail" in low or "error" in low or "blocked" in low:
+            return app._cp(_BAD)
+        return 0
+    if s == "notes:" or s.startswith("runs touching"):      # the only real section headers
         return app._cp(_STRUCTURE) | curses.A_BOLD
-    if "prio high" in low or "prio urgent" in low:
-        return app._cp(_NEEDS_YOU)
-    if s.startswith("assignee") or s.startswith("prio"):
-        return curses.A_DIM
-    return 0
+    if s.startswith("assignee ") and " · prio " in low:     # the generated meta line, matched precisely
+        return app._cp(_NEEDS_YOU) if ("· prio high" in low or "· prio urgent" in low) else curses.A_DIM
+    return 0                                                # title + note body: plain
 
 
 def _panel_detail_lines(app, sel_row):

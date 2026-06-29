@@ -640,6 +640,15 @@ class TestRolePalette(unittest.TestCase):
         self.assertEqual(pn._inspector_attr(papp, 0,
                          "assignee founder · prio high · pr (none)"), 4000)         # yellow
 
+    def test_inspector_note_body_and_title_stay_plain(self):
+        # free-text must NOT be miscolored by substring matches (the founder's redline)
+        papp = self._papp([("z-1", "z", "t", "ready", "med", None)])
+        for ln in ("  email/password OPEN signup",          # 'pass' inside 'password' -> NOT green
+                   "  ...then Step-8 verification. NOTE:",   # trailing ':' is NOT a section header
+                   "  LEAD CALL: BLOCKED until win-103",     # 'blocked' in prose -> NOT red
+                   '"fix the failing test"'):                # a title containing 'fail' -> NOT red
+            self.assertEqual(pn._inspector_attr(papp, 7, ln), 0, ln)
+
     def test_inspector_head_line_is_structure_cyan(self):
         # the inspector's "<id> <status>" head line is a header → cyan-bold, not a per-status hue
         papp = self._papp([("cou-5a", "acme", "review", "needs_review", "high", None)],
