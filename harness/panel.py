@@ -509,7 +509,7 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
         for proj, t in loop:
             rows.append(_task_row(proj, t, t.status))
     else:
-        seg = _proj_loop_summary(projects)       # panel-local: no emoji, no duplicate "g for full board"
+        seg = _loop_seg(loop)                    # count from the deduped loop list → matches the band header
         rows.append({"kind": "info", "id": "__loop_sum", "sel": False,
                      "label": "  " + (seg or "0 in flight") + "   (press g to expand)"})
 
@@ -533,11 +533,12 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
     return rows
 
 
-def _proj_loop_summary(projects):
-    """loop_summary text for a single-project subset (loop_summary takes a whole snap)."""
-    segs = []
-    for st in _LOOP_STATUSES:
-        n = sum(len(p.tasks_by_status.get(st, [])) for p in projects)
-        if n:
-            segs.append(f"{n} {st}")
+def _loop_seg(loop_tasks):
+    """Collapsed THE-LOOP summary text built from the already running-deduped loop task list, so the
+    count here always matches the THE LOOP band header. `loop_tasks` is a list of (project, task)
+    tuples. No emoji, no "g for full board" suffix. Returns None when empty."""
+    counts = {}
+    for _, t in loop_tasks:
+        counts[t.status] = counts.get(t.status, 0) + 1
+    segs = [f"{counts[st]} {st}" for st in _LOOP_STATUSES if counts.get(st)]
     return "the loop: " + " · ".join(segs) if segs else None

@@ -753,6 +753,21 @@ class TestFinalReviewFixes(unittest.TestCase):
             rows = papp.left_rows()
         self.assertFalse(any(r["kind"] == "task" and r.get("id") == "w-9" for r in rows))
 
+    def test_loop_summary_count_matches_band_when_task_running(self):   # M-NEW-1
+        # one needs_qa task running, one not: the THE LOOP band header AND the collapsed summary text
+        # must BOTH exclude the running one (count = 1), or they contradict during live watch.
+        papp = self._papp([("w-9", "cedar", "qa", "needs_qa", "high", None),
+                           ("w-8", "cedar", "qa2", "needs_qa", "high", None)])
+        thread = {"project": "cedar", "task": "w-9", "agent": "qa",
+                  "since": "2026-06-29 00:00:00", "secs": 5, "log_path": "/tmp/x.log"}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            rows = papp.left_rows()
+        band = next(r for r in rows if r["kind"] == "band" and "THE LOOP" in r["label"])
+        summ = next(r for r in rows if r.get("id") == "__loop_sum")
+        self.assertIn("THE LOOP · 1", band["label"])   # header excludes the running task
+        self.assertIn("1 needs_qa", summ["label"])     # summary agrees
+        self.assertNotIn("2 needs_qa", summ["label"])
+
     def test_inspector_running_hint_uses_lowercase_l(self):        # M-1
         papp = self._papp([("w-1", "cedar", "build", "ready", "high", None)])
         thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
