@@ -53,3 +53,20 @@ def layout(w, h, *, show_rail=True, show_inspector=True, show_feed=True):
     else:
         out["work"] = Rect(mid_y, x, mid_h, w - x)
     return out
+
+
+# panes that can take selection/scroll focus, in tab order (feed/vitals/bar are passive)
+_FOCUS_TABS = ("rail", "work", "inspector")
+
+
+def focus_order(rects):
+    """Focusable pane ids present in this layout, in stable tab order."""
+    return [p for p in _FOCUS_TABS if p in rects]
+
+
+def cycle_focus(current, order, direction=1):
+    if not order:
+        return None
+    if current not in order:
+        return order[0]
+    return order[(order.index(current) + direction) % len(order)]

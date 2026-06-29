@@ -62,3 +62,25 @@ class TestLayout(unittest.TestCase):
         L = pn.layout(200, 50, show_rail=False, show_inspector=False, show_feed=False)
         self.assertEqual(set(L), {"vitals", "work", "bar"})
         _covers_no_overlap(L, 200, 50)
+
+
+class TestFocus(unittest.TestCase):
+    def test_focus_order_wide(self):
+        L = pn.layout(200, 50)
+        self.assertEqual(pn.focus_order(L), ["rail", "work", "inspector"])
+
+    def test_focus_order_narrow_is_work_only(self):
+        L = pn.layout(80, 24)
+        self.assertEqual(pn.focus_order(L), ["work"])
+
+    def test_cycle_wraps(self):
+        order = ["rail", "work", "inspector"]
+        self.assertEqual(pn.cycle_focus("rail", order, +1), "work")
+        self.assertEqual(pn.cycle_focus("inspector", order, +1), "rail")
+        self.assertEqual(pn.cycle_focus("rail", order, -1), "inspector")
+
+    def test_cycle_unknown_current_returns_first(self):
+        self.assertEqual(pn.cycle_focus("nope", ["work", "inspector"], +1), "work")
+
+    def test_cycle_empty_returns_none(self):
+        self.assertIsNone(pn.cycle_focus("work", [], +1))
