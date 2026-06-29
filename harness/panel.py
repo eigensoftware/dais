@@ -104,6 +104,8 @@ def render_work(scr, rect, app, focused):
     base = max(0, sel_i - inner.h + 1) if rows else 0
     for idx, r in enumerate(rows[base:base + inner.h]):
         y = inner.y + idx
+        if r["kind"] == "spacer":
+            continue
         if r["kind"] == "band":
             name = r["label"].rsplit(" · ", 1)[0]       # "NEEDS YOU · 1" -> "NEEDS YOU"
             bar = pad_cols(f"▌ {r['label']} ", inner.w)
@@ -153,6 +155,35 @@ def _inspector_attr(app, idx_in_doc, line):
     return 0
 
 
+def _panel_detail_lines(app, sel_row):
+    """Inspector content as RAW logical lines. Unlike the inherited App.detail_lines (which
+    pre-wraps notes to a fixed 56 cols and collapses the author's newlines), this preserves the
+    author's own line breaks and does NOT wrap — render_inspector reflows once to the pane width."""
+    snap = app.snap
+    if not sel_row or not snap:
+        return ["(nothing selected)"]
+    by_name = {p.name: p for p in snap.projects}
+    task = sel_row.get("task")
+    p = by_name.get(sel_row.get("project"))
+    if task is None or p is None:
+        return app.detail_lines(sel_row)            # non-task rows: defer to the classic formatter
+    out = [f"{task.id}  {task.status}",
+           f'"{task.title}"',
+           f"assignee {task.assignee or '-'} · prio {task.priority} · "
+           f"pr {task.pr_url or '(none)'}",
+           ""]
+    if task.notes:
+        out.append("notes:")
+        for ln in task.notes.split("\n"):           # keep the author's structure; blanks stay blank
+            out.append("  " + ln if ln.strip() else "")
+        out.append("")
+    out.append(f"runs touching {task.id}:")
+    for r in d.runs_touching(p.recent_runs, task.id):
+        dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
+        out.append(f"  {d.to_local_hhmm(r.started_at):<5} {r.agent:<10} {r.status:<11} {dur:<4}")
+    return out
+
+
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
     Running selections (task=None) show the agent header instead of crashing on task.id."""
@@ -165,13 +196,16 @@ def render_inspector(scr, rect, app, focused):
         lines = app.running_header(sel_row, app._now()) + \
             ["", "(live log: press L — coming in the log phase)"]
     else:
-        lines = app.detail_lines(sel_row)
+        lines = _panel_detail_lines(app, sel_row)
     wrapped = []
     for ln in lines:
         if disp_width(ln) <= inner.w:
             wrapped.append(ln)
         else:
-            wrapped.extend(textwrap.wrap(ln, inner.w) or [""])
+            stripped = ln.lstrip(" ")
+            lead = len(ln) - len(stripped)
+            sub = " " * (lead + (2 if stripped.startswith("- ") else 0))   # align continuation
+            wrapped.extend(textwrap.wrap(ln, inner.w, subsequent_indent=sub) or [""])
     start = max(0, min(app.detail_scroll, max(0, len(wrapped) - 1)))
     # first wrapped line is the "<id>  <status>" header — color it by the selection's status
     head_attr = 0
@@ -418,11 +452,16 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
                     out.append((p.name, t))
         return out
 
+    def add_band(name, count):
+        if rows:                                    # no leading spacer above the very first band
+            rows.append({"kind": "spacer", "id": f"__sp::{name}", "sel": False, "label": ""})
+        rows.append(_band(name, count))
+
     # RUNNING
     now = "9999-12-31 00:00:00"            # elapsed not needed for the model; render computes it
     threads = [t for t in d.running_threads(snap, now)
                if project is None or t["project"] == project]
-    rows.append(_band("RUNNING", len(threads)))
+    add_band("RUNNING", len(threads))
     if threads:
         for t in threads:
             rows.append({"kind": "running", "id": f"run::{t['project']}",
@@ -434,7 +473,7 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
 
     # NEEDS YOU (the founder gates)
     gates = tasks_in(d.GATE_ORDER)
-    rows.append(_band("NEEDS YOU", len(gates)))
+    add_band("NEEDS YOU", len(gates))
     if gates:
         for proj, t in gates:
             rows.append(_task_row(proj, t, GATE_TAG.get(t.status, t.status.upper())))
@@ -444,7 +483,7 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
 
     # THE LOOP — collapsed summary, or rows when expanded
     loop = tasks_in(_LOOP_STATUSES)
-    rows.append(_band("THE LOOP", len(loop)))
+    add_band("THE LOOP", len(loop))
     if expanded and loop:
         for proj, t in loop:
             rows.append(_task_row(proj, t, t.status))
@@ -456,7 +495,7 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
     # ARCHIVE — only when expanded or a project is picked
     if expanded or project is not None:
         arch = tasks_in(_ARCHIVE_STATUSES)
-        rows.append(_band("ARCHIVE", len(arch)))
+        add_band("ARCHIVE", len(arch))
         for proj, t in arch[:_ARCHIVE_CAP]:
             tag = "DONE" if t.status == "done" else "CANC"
             rows.append(_task_row(proj, t, tag))
@@ -467,7 +506,7 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
     # PARKED — backlog + deferred, only on `b`
     if show_parked:
         parked = tasks_in(d.PARKED_ORDER)
-        rows.append(_band("PARKED", len(parked)))
+        add_band("PARKED", len(parked))
         for proj, t in parked:
             rows.append(_task_row(proj, t, t.status.upper()[:6]))
     return rows

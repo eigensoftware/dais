@@ -604,3 +604,104 @@ class TestFullChromatic(unittest.TestCase):
             if needle in c[2]:
                 return c[3]
         return None
+
+
+class TestInspectorReflow(unittest.TestCase):
+    def _papp(self, notes):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb7-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn()
+        conn.execute("INSERT INTO tasks(id,project,title,status,priority,pr_url,notes) "
+                     "VALUES(?,?,?,?,?,?,?)",
+                     ("t-1", "p", "title", "ready_to_merge", "med", "https://x/pull/1", notes))
+        conn.commit()
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp.sel_id = "t-1"
+        return papp
+
+    def test_notes_preserve_author_line_breaks(self):
+        # the author wrote a bulleted list; the panel must keep the bullets as separate lines
+        papp = self._papp("summary line\n- first bullet\n- second bullet")
+        lines = pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1])
+        body = "\n".join(lines)
+        self.assertIn("notes:", body)
+        # each bullet is its own logical line (not collapsed into one paragraph)
+        self.assertTrue(any(l.strip() == "- first bullet" for l in lines))
+        self.assertTrue(any(l.strip() == "- second bullet" for l in lines))
+
+    def test_notes_are_not_prewrapped_at_56(self):
+        # a single long logical note line must come back un-wrapped (one line), so render can wrap
+        # it to the REAL pane width — not the classic fixed 56
+        long_line = "x" * 120
+        papp = self._papp(long_line)
+        lines = pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1])
+        self.assertTrue(any(len(l) >= 110 for l in lines))   # still ~120 wide, not chopped to 56
+
+    def test_render_inspector_wraps_to_pane_width_not_56(self):
+        long_line = "word " * 40                              # ~200 chars, one logical line
+        papp = self._papp(long_line.strip())
+        papp._cp = lambda n: 0
+        scr = FakeScr(40, 200)
+        pn.render_inspector(scr, pn.Rect(1, 0, 30, 100), papp, focused=False)  # inner.w ~98
+        note_calls = [c for c in scr.calls if "word" in c[2]]
+        # a 98-wide pane must produce a wrapped note line well over 56 chars
+        self.assertTrue(any(len(c[2]) > 70 for c in note_calls))
+
+    def test_render_inspector_narrow_no_midword_overflow(self):
+        papp = self._papp("supercalifragilistic " * 10)
+        papp._cp = lambda n: 0
+        scr = FakeScr(40, 60)
+        pn.render_inspector(scr, pn.Rect(1, 0, 30, 46), papp, focused=False)   # inner.w ~44
+        note_calls = [c for c in scr.calls if "supercali" in c[2]]
+        self.assertTrue(note_calls)
+        # nothing the renderer emits exceeds the pane width (no overflow that _add must hard-clip)
+        for c in note_calls:
+            self.assertLessEqual(pn.disp_width(c[2]), 44)
+
+    def test_running_selection_still_uses_header(self):
+        # regression: a running row must NOT go through _panel_detail_lines (task is None)
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb7r-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": "/tmp/x.log"}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            rows = papp.left_rows()
+            run_row = next(r for r in rows if r["kind"] == "running")
+            papp.sel_id = run_row["id"]
+            scr = FakeScr(40, 200)
+            pn.render_inspector(scr, pn.Rect(1, 0, 30, 60), papp, focused=False)  # must not raise
+            self.assertIn("engineer", "\n".join(c[2] for c in scr.calls))
+
+
+class TestBandSpacing(unittest.TestCase):
+    def _papp(self, rows, project=None):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb7b-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp.project_filter = project
+        return papp
+
+    def test_spacer_between_bands(self):
+        papp = self._papp([("a-1", "p", "t", "needs_review", "high", None)])
+        rows = papp.left_rows()
+        kinds = [r["kind"] for r in rows]
+        # the first band has no leading spacer; every later band is immediately preceded by a spacer
+        band_idxs = [i for i, k in enumerate(kinds) if k == "band"]
+        self.assertGreaterEqual(len(band_idxs), 2)
+        self.assertNotEqual(kinds[0], "spacer")                 # no leading spacer at the very top
+        for bi in band_idxs[1:]:
+            self.assertEqual(kinds[bi - 1], "spacer")
+
+    def test_spacer_rows_are_not_selectable(self):
+        papp = self._papp([("a-1", "p", "t", "needs_review", "high", None)])
+        rows = papp.left_rows()
+        self.assertTrue(all(not r["sel"] for r in rows if r["kind"] == "spacer"))
