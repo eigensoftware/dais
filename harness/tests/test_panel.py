@@ -312,8 +312,20 @@ class TestPanelWorkRows(unittest.TestCase):
         tags = {r["tag"] for r in rows if r["kind"] == "task"}
         self.assertIn("MERGE", tags)
         self.assertIn("REVIEW", tags)
-        # collapsed: loop tasks are NOT individual task rows
-        self.assertFalse(any(r["kind"] == "task" and r["status"] == "ready" for r in rows))
+        # the loop is shown by default: loop tasks ARE their own rows (no g needed)
+        self.assertTrue(any(r["kind"] == "task" and r["status"] == "ready" for r in rows))
+
+    def test_g_uncaps_the_archive(self):
+        # project picked, not expanded: archive capped + "+N older"; expanded (g): ALL archive rows
+        snap = self._snap(self._proj("z", done=pn._ARCHIVE_CAP + 5))
+        capped = pn.panel_work_rows(snap, project="z")
+        n_capped = sum(1 for r in capped if r["kind"] == "task" and r["status"] == "done")
+        self.assertEqual(n_capped, pn._ARCHIVE_CAP)
+        self.assertTrue(any("older" in r.get("label", "") for r in capped))
+        full = pn.panel_work_rows(snap, project="z", expanded=True)
+        n_full = sum(1 for r in full if r["kind"] == "task" and r["status"] == "done")
+        self.assertEqual(n_full, pn._ARCHIVE_CAP + 5)               # all of them, no cap
+        self.assertFalse(any("older" in r.get("label", "") for r in full))
 
     def test_expanded_shows_loop_rows_and_archive(self):
         snap = self._snap(self._proj("cedar", ready=2, done=3, proposed=1))
@@ -749,13 +761,12 @@ class TestFinalReviewFixes(unittest.TestCase):
         self.assertNotIn("cou-1", ids)
         self.assertTrue(all(r["kind"] in ("task", "running") for r in rows))   # filtering flattens
 
-    def test_default_loop_summary_has_no_emoji(self):              # I-2
+    def test_loop_shown_as_rows_by_default(self):
+        # the loop now shows its tasks as rows in the default view — there is no collapsed summary
         papp = self._papp([("a-1", "p", "t", "ready", "med", None)])          # default (all-projects) view
         rows = papp.left_rows()
-        loop = next(r for r in rows if r.get("id") == "__loop_sum")
-        self.assertNotIn("⚙", loop["label"])                  # no ⚙ gear
-        self.assertNotIn("for full board", loop["label"])          # no duplicate of "(press g to expand)"
-        self.assertIn("the loop", loop["label"])
+        self.assertFalse(any(r.get("id") == "__loop_sum" for r in rows))      # summary row is gone
+        self.assertTrue(any(r["kind"] == "task" and r.get("id") == "a-1" for r in rows))
 
     def test_running_gate_task_not_double_counted(self):           # I-3
         papp = self._papp([("cou-5a", "acme", "review", "needs_review", "high", None)])
@@ -774,9 +785,9 @@ class TestFinalReviewFixes(unittest.TestCase):
             rows = papp.left_rows()
         self.assertFalse(any(r["kind"] == "task" and r.get("id") == "w-9" for r in rows))
 
-    def test_loop_summary_count_matches_band_when_task_running(self):   # M-NEW-1
-        # one needs_qa task running, one not: the THE LOOP band header AND the collapsed summary text
-        # must BOTH exclude the running one (count = 1), or they contradict during live watch.
+    def test_loop_band_count_and_rows_exclude_running_task(self):   # M-NEW-1
+        # one needs_qa task running, one not: the THE LOOP band header excludes the running one
+        # (count = 1) AND the loop rows show only the non-running task (no double-count).
         papp = self._papp([("w-9", "cedar", "qa", "needs_qa", "high", None),
                            ("w-8", "cedar", "qa2", "needs_qa", "high", None)])
         thread = {"project": "cedar", "task": "w-9", "agent": "qa",
@@ -784,10 +795,9 @@ class TestFinalReviewFixes(unittest.TestCase):
         with mock.patch.object(d, "running_threads", return_value=[thread]):
             rows = papp.left_rows()
         band = next(r for r in rows if r["kind"] == "band" and "THE LOOP" in r["label"])
-        summ = next(r for r in rows if r.get("id") == "__loop_sum")
         self.assertIn("THE LOOP · 1", band["label"])   # header excludes the running task
-        self.assertIn("1 needs_qa", summ["label"])     # summary agrees
-        self.assertNotIn("2 needs_qa", summ["label"])
+        loop_ids = [r.get("id") for r in rows if r["kind"] == "task" and r.get("status") == "needs_qa"]
+        self.assertEqual(loop_ids, ["w-8"])            # only the non-running loop task is a row
 
     def test_inspector_running_hint_uses_lowercase_l(self):        # M-1
         papp = self._papp([("w-1", "cedar", "build", "ready", "high", None)])

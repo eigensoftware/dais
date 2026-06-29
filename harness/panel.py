@@ -377,7 +377,7 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    keys = "tab pane · / filter · b parked · g expand · L logs · ? help · q quit"
+    keys = "tab pane · / filter · b parked · g archive · L logs · ? help · q quit"
     if getattr(app, "filtering", False):
         hint = f" /{app.filter}_  ·  {keys}"
     else:
@@ -396,7 +396,7 @@ _HELP_LINES = [
     "  enter             action menu for the selection",
     "  / filter          filter; type, enter to keep, esc to clear",
     "  b parked          show/hide backlog + deferred",
-    "  g expand          expand the loop + archive (history)",
+    "  g archive         show the full archive (otherwise only the latest are listed)",
     "  rail + j/k        pick a project (ALL clears the filter)",
     "  l                 open the log pager for the selection",
     "  L logs            live log wall - all running agents (esc back)",
@@ -592,27 +592,27 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
         rows.append({"kind": "info", "id": "__gate_none", "sel": False,
                      "label": "  (nothing needs you)"})
 
-    # THE LOOP — collapsed summary, or rows when expanded
+    # THE LOOP — the in-flight work, always shown as rows (like RUNNING / NEEDS YOU; no g needed)
     loop = tasks_in(_LOOP_STATUSES)
     add_band("THE LOOP", len(loop))
-    if expanded and loop:
+    if loop:
         for proj, t in loop:
             rows.append(_task_row(proj, t, t.status))
     else:
-        seg = _loop_seg(loop)                    # count from the deduped loop list → matches the band header
-        rows.append({"kind": "info", "id": "__loop_sum", "sel": False,
-                     "label": "  " + (seg or "0 in flight") + "   (press g to expand)"})
+        rows.append({"kind": "info", "id": "__loop_none", "sel": False,
+                     "label": "  (nothing in flight)"})
 
-    # ARCHIVE — only when expanded or a project is picked
+    # ARCHIVE — shown when a project is picked or history is expanded; g (expanded) UNCAPS it
     if expanded or project is not None:
         arch = tasks_in(_ARCHIVE_STATUSES)
         add_band("ARCHIVE", len(arch))
-        for proj, t in arch[:_ARCHIVE_CAP]:
+        shown = arch if expanded else arch[:_ARCHIVE_CAP]    # g shows the full history
+        for proj, t in shown:
             tag = "DONE" if t.status == "done" else "CANC"
             rows.append(_task_row(proj, t, tag))
-        if len(arch) > _ARCHIVE_CAP:
+        if len(arch) > len(shown):
             rows.append({"kind": "info", "id": "__arch_more", "sel": False,
-                         "label": f"  +{len(arch) - _ARCHIVE_CAP} older"})
+                         "label": f"  +{len(arch) - len(shown)} older   (press g to show all)"})
 
     # PARKED — backlog + deferred, only on `b`
     if show_parked:
@@ -621,14 +621,3 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
         for proj, t in parked:
             rows.append(_task_row(proj, t, t.status.upper()[:6]))
     return rows
-
-
-def _loop_seg(loop_tasks):
-    """Collapsed THE-LOOP summary text built from the already running-deduped loop task list, so the
-    count here always matches the THE LOOP band header. `loop_tasks` is a list of (project, task)
-    tuples. No emoji, no "g for full board" suffix. Returns None when empty."""
-    counts = {}
-    for _, t in loop_tasks:
-        counts[t.status] = counts.get(t.status, 0) + 1
-    segs = [f"{counts[st]} {st}" for st in _LOOP_STATUSES if counts.get(st)]
-    return "the loop: " + " · ".join(segs) if segs else None
