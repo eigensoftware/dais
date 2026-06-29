@@ -100,9 +100,22 @@ def _seed(conn, rows):
     conn.commit()
 
 
+def _seed_with_notes(conn, rows_with_notes):
+    """rows_with_notes: list of (id, project, title, status, priority, pr_url, notes)"""
+    conn.executemany(
+        "INSERT INTO tasks(id,project,title,status,priority,pr_url,notes) "
+        "VALUES(?,?,?,?,?,?,?)",
+        rows_with_notes)
+    conn.commit()
+
+
 class TestPaneRenderers(unittest.TestCase):
     def _app(self, rows):
         conn = _conn(); _seed(conn, rows)
+        return make_app(conn=conn, h=40, w=200)
+
+    def _app_with_notes(self, rows_with_notes):
+        conn = _conn(); _seed_with_notes(conn, rows_with_notes)
         return make_app(conn=conn, h=40, w=200)
 
     def test_work_renders_rows_within_rect(self):
@@ -135,6 +148,31 @@ class TestPaneRenderers(unittest.TestCase):
             self.assertLess(y, rect.y + rect.h)
             self.assertGreaterEqual(x, rect.x)
             self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)
+
+    def test_inspector_scroll_offsets_visible_window(self):
+        """I1: detail_scroll must advance the visible window in render_inspector."""
+        long_notes = "  ".join(f"note-line-{i}" for i in range(30))
+        app = self._app_with_notes([
+            ("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
+             "https://x/pull/9", long_notes),
+        ])
+        # Use a small rect so there are more wrapped lines than inner height
+        rect = pn.Rect(0, 0, 6, 40)   # inner.h = 5 after title row
+
+        scr0 = FakeScr(40, 200)
+        app.detail_scroll = 0
+        pn.render_inspector(scr0, rect, app, focused=False)
+        lines0 = [c[2] for c in scr0.calls if c[0] > rect.y]  # skip title row
+
+        scr3 = FakeScr(40, 200)
+        app.detail_scroll = 3
+        pn.render_inspector(scr3, rect, app, focused=False)
+        lines3 = [c[2] for c in scr3.calls if c[0] > rect.y]  # skip title row
+
+        # The two renders must produce different first content lines
+        self.assertTrue(lines0 and lines3, "inspector rendered nothing")
+        self.assertNotEqual(lines0[0], lines3[0],
+                            "detail_scroll had no effect on inspector render")
 
 
 class TestChromePanes(unittest.TestCase):
@@ -221,3 +259,23 @@ class TestPanelApp(unittest.TestCase):
             sub.call.return_value = 0
             app.handle(ord("a"), rows, i, row)
             sub.call.assert_called_once_with(["dais", "ship", "beacon", "7"])
+
+    def test_q_does_not_quit_while_filtering(self):
+        """I2: pressing q while filtering must feed q into the filter, not quit."""
+        app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
+        app.filtering = True
+        app.filter = ""
+        rows = app.left_rows()
+        result = app.handle(ord("q"), rows, 0, None)
+        self.assertTrue(result, "handle returned False (quit) while filtering — should stay alive")
+        self.assertIn("q", app.filter, "q was not appended to filter while filtering")
+
+    def test_render_bar_shows_filter_prompt_while_filtering(self):
+        """I2: render_bar must show /<filter> when app.filtering is True."""
+        app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
+        app.filtering = True
+        app.filter = "win"
+        scr = FakeScr(40, 200)
+        pn.render_bar(scr, pn.Rect(39, 0, 1, 200), app, focus="work")
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("/win", text, "filter prompt /win not shown in bar while filtering")

@@ -107,7 +107,8 @@ def render_inspector(scr, rect, app, focused):
             wrapped.append(ln)
         else:
             wrapped.extend(textwrap.wrap(ln, inner.w) or [""])
-    for idx, ln in enumerate(wrapped[:inner.h]):
+    start = max(0, min(app.detail_scroll, max(0, len(wrapped) - 1)))
+    for idx, ln in enumerate(wrapped[start:start + inner.h]):
         _add(scr, inner.y + idx, inner.x, ln, inner.x + inner.w)
 
 
@@ -158,7 +159,10 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    hint = f" {acts}  ·  : command · tab pane · ? help · q quit"
+    if getattr(app, "filtering", False):
+        hint = f" /{app.filter}_  ·  : command · tab pane · ? help · q quit"
+    else:
+        hint = f" {acts}  ·  : command · tab pane · ? help · q quit"
     _add(scr, rect.y, rect.x, pad_cols(hint, rect.w), rect.x + rect.w,
          curses.A_REVERSE)
 
@@ -195,6 +199,9 @@ class PanelApp(d.App):
         scr.refresh()
 
     def handle(self, ch, rows, sel_i, sel_row):
+        # filtering takes priority — all keystrokes route to the inherited filter handler
+        if self.filtering:
+            return super().handle(ch, rows, sel_i, sel_row)
         # global panel keys first
         if ch == ord("q"):
             return False
