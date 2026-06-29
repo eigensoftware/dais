@@ -161,3 +161,60 @@ def render_bar(scr, rect, app, focus):
     hint = f" {acts}  ·  : command · tab pane · ? help · q quit"
     _add(scr, rect.y, rect.x, pad_cols(hint, rect.w), rect.x + rect.w,
          curses.A_REVERSE)
+
+
+_RENDER = {
+    "vitals": lambda scr, r, app, foc: render_vitals(scr, r, app),
+    "rail": render_rail,
+    "work": render_work,
+    "inspector": render_inspector,
+    "feed": lambda scr, r, app, foc: render_feed(scr, r, app),
+}
+
+
+class PanelApp(d.App):
+    """The control panel: App's data/engine/log/selection, a multi-pane responsive view."""
+
+    def __init__(self, scr, interval=2.0, root=d.HOME, conn=None):
+        super().__init__(scr, interval=interval, root=root, conn=conn)
+        self.pane_focus = "work"
+
+    def draw(self):
+        scr = self.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        rects = layout(w, h, show_rail=True, show_inspector=True, show_feed=True)
+        order = focus_order(rects)
+        if self.pane_focus not in order:
+            self.pane_focus = order[0] if order else "work"
+        for pid, rect in rects.items():
+            if pid == "bar":
+                render_bar(scr, rect, self, self.pane_focus)
+            else:
+                _RENDER[pid](scr, rect, self, pid == self.pane_focus)
+        scr.refresh()
+
+    def handle(self, ch, rows, sel_i, sel_row):
+        # global panel keys first
+        if ch == ord("q"):
+            return False
+        if ch in (9,):                          # tab -> next focusable pane
+            h, w = self.scr.getmaxyx()
+            order = focus_order(layout(w, h))
+            self.pane_focus = cycle_focus(self.pane_focus, order, +1) or "work"
+            return True
+        if ch == curses.KEY_BTAB:               # shift-tab -> previous
+            h, w = self.scr.getmaxyx()
+            order = focus_order(layout(w, h))
+            self.pane_focus = cycle_focus(self.pane_focus, order, -1) or "work"
+            return True
+        # navigation/actions route to the focused pane's selection via the inherited App
+        if self.pane_focus == "inspector" and ch in (ord("j"), ord("k"),
+                                                      curses.KEY_DOWN, curses.KEY_UP):
+            self.detail_scroll += 1 if ch in (ord("j"), curses.KEY_DOWN) else -1
+            self.detail_scroll = max(0, self.detail_scroll)
+            return True
+        # everything else (j/k select, a/x/+/-/n/o/enter, /, b, ...) reuses App.handle,
+        # which already drives selection + the action engine on `rows`/`sel_row`.
+        self.focus = "left"                     # App.handle's left-pane selection path
+        return super().handle(ch, rows, sel_i, sel_row)

@@ -1738,7 +1738,11 @@ def main(argv):
             print("dais top needs an interactive terminal; use `dais status`.",
                   file=sys.stderr)
             return 2
-        curses.wrapper(lambda scr: App(scr, args.interval).run())
+        if os.environ.get("DAIS_PANEL"):
+            import panel
+            curses.wrapper(lambda scr: panel.PanelApp(scr, args.interval).run())
+        else:
+            curses.wrapper(lambda scr: App(scr, args.interval).run())
         return 0
     with connect() as conn:
         print(render_plain(load_snapshot(conn)))

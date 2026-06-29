@@ -89,6 +89,7 @@ class TestFocus(unittest.TestCase):
 import sqlite3
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dashboard as d
 from test_cockpit import FakeScr, _conn, make_app   # reuse the wired-App helpers
 
 
@@ -169,3 +170,54 @@ class TestChromePanes(unittest.TestCase):
         self.assertIn("ship", text)           # contextual action bar reused
         self.assertIn(": command", text)
         self.assertIn("q quit", text)
+
+
+import tempfile
+
+class TestPanelApp(unittest.TestCase):
+    def _app(self, rows, h=40, w=200):
+        conn = _conn(); _seed(conn, rows)
+        root = tempfile.mkdtemp(prefix="dais-panel-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        app = pn.PanelApp(FakeScr(h, w), root=root, conn=conn)
+        app._dais = lambda: "dais"
+        app.snap = d.load_snapshot(conn, root=root)
+        return app
+
+    def test_full_frame_draws_within_bounds(self):
+        app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
+                          "https://x/pull/9"),
+                         ("win-1", "cedar", "build", "ready", "high", None)])
+        app.draw()
+        text = "\n".join(c[2] for c in app.scr.calls)
+        self.assertIn("DAIS", text)            # vitals
+        self.assertIn("NEEDS YOU", text)       # work
+        self.assertIn("q quit", text)          # bar
+        for (y, x, s, _a) in app.scr.calls:
+            self.assertLess(y, app.scr.h)
+            self.assertLessEqual(pn.disp_width(s), app.scr.w - x)
+
+    def test_tab_cycles_pane_focus(self):
+        app = self._app([("lyr-1", "beacon", "x", "ready_to_merge", "high",
+                          "https://x/pull/9")])
+        app.draw()                             # establishes layout/focus
+        start = app.pane_focus
+        app.handle(ord("\t"), app.left_rows(), 0, None)
+        self.assertNotEqual(app.pane_focus, start)
+
+    def test_q_quits(self):
+        app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
+        self.assertFalse(app.handle(ord("q"), app.left_rows(), 0, None))
+
+    def test_a_on_work_selection_dispatches_engine(self):
+        app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
+                          "https://x/y/pull/7")])
+        app.pane_focus = "work"; app._confirm = lambda *a: True
+        app.sel_id = "lyr-1"
+        rows = app.left_rows()
+        i, row = next((i, r) for i, r in enumerate(rows)
+                      if r["kind"] == "task" and r["status"] == "ready_to_merge")
+        with mock.patch.object(d, "subprocess") as sub:
+            sub.call.return_value = 0
+            app.handle(ord("a"), rows, i, row)
+            sub.call.assert_called_once_with(["dais", "ship", "beacon", "7"])
