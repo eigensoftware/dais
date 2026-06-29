@@ -279,3 +279,55 @@ class TestPanelApp(unittest.TestCase):
         pn.render_bar(scr, pn.Rect(39, 0, 1, 200), app, focus="work")
         text = "\n".join(c[2] for c in scr.calls)
         self.assertIn("/win", text, "filter prompt /win not shown in bar while filtering")
+
+
+class TestPanelWorkRows(unittest.TestCase):
+    def _snap(self, *projects):
+        return d.Snapshot(projects=list(projects), recent_runs=[], cap_state=False,
+                          ts="2026-06-29 00:00:00")
+
+    def _proj(self, name, **by):
+        tbs = {st: [d.Task(id=f"{name}-{st}-{i}", title="t", status=st, priority="medium")
+                    for i in range(n)] for st, n in by.items()}
+        return d.Project(name=name, stage_goal="", running=[], tasks_by_status=tbs,
+                         recent_runs=[])
+
+    def _kinds(self, rows):
+        return [(r["kind"], r.get("label", r.get("id"))) for r in rows]
+
+    def test_bands_present_with_gate_tags(self):
+        snap = self._snap(self._proj("beacon", ready_to_merge=1),
+                          self._proj("acme", needs_review=1, ready=2))
+        rows = pn.panel_work_rows(snap)
+        # a NEEDS YOU band bar, then tagged gate task rows
+        bands = [r["label"] for r in rows if r["kind"] == "band"]
+        self.assertTrue(any("NEEDS YOU" in b for b in bands), bands)
+        self.assertTrue(any("THE LOOP" in b for b in bands), bands)
+        tags = {r["tag"] for r in rows if r["kind"] == "task"}
+        self.assertIn("MERGE", tags)
+        self.assertIn("REVIEW", tags)
+        # collapsed: loop tasks are NOT individual task rows
+        self.assertFalse(any(r["kind"] == "task" and r["status"] == "ready" for r in rows))
+
+    def test_expanded_shows_loop_rows_and_archive(self):
+        snap = self._snap(self._proj("cedar", ready=2, done=3, proposed=1))
+        rows = pn.panel_work_rows(snap, expanded=True)
+        self.assertTrue(any(r["kind"] == "task" and r["status"] == "ready" for r in rows))
+        bands = [r["label"] for r in rows if r["kind"] == "band"]
+        self.assertTrue(any("ARCHIVE" in b for b in bands), bands)
+        self.assertTrue(any(r["kind"] == "task" and r["status"] == "done" for r in rows))
+
+    def test_project_filter_limits_rows(self):
+        snap = self._snap(self._proj("beacon", ready_to_merge=1),
+                          self._proj("acme", proposed=1))
+        rows = pn.panel_work_rows(snap, project="beacon")
+        projs = {r["project"] for r in rows if r["kind"] == "task"}
+        self.assertEqual(projs, {"beacon"})
+
+    def test_parked_only_when_requested(self):
+        snap = self._snap(self._proj("x", backlog=1, deferred=1, proposed=1))
+        self.assertFalse(any("PARKED" in r.get("label", "")
+                             for r in pn.panel_work_rows(snap)))
+        rows = pn.panel_work_rows(snap, show_parked=True)
+        self.assertTrue(any("PARKED" in r.get("label", "") for r in rows))
+        self.assertTrue(any(r["kind"] == "task" and r["status"] == "backlog" for r in rows))

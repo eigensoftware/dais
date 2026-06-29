@@ -225,3 +225,102 @@ class PanelApp(d.App):
         # which already drives selection + the action engine on `rows`/`sel_row`.
         self.focus = "left"                     # App.handle's left-pane selection path
         return super().handle(ch, rows, sel_i, sel_row)
+
+
+# WORK row model — bands of selectable rows; status → terminal-safe tag (no emoji)
+GATE_TAG = {"ready_to_merge": "MERGE", "needs_review": "REVIEW",
+            "proposed": "PROPOSE", "blocked": "BLOCKED"}
+_LOOP_STATUSES = d.LOOP_SUMMARY_ORDER          # ["ready","needs_qa","changes_requested"]
+_ARCHIVE_STATUSES = ["done", "cancelled"]
+_ARCHIVE_CAP = 12
+
+
+def _band(name, count):
+    return {"kind": "band", "id": f"__band::{name}", "sel": False,
+            "label": f"{name} · {count}"}
+
+
+def _task_row(proj, task, tag):
+    return {"kind": "task", "id": task.id, "project": proj, "task": task,
+            "status": task.status, "tag": tag, "sel": True}
+
+
+def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
+    """The panel's WORK list: ordered bands of selectable rows. `project` limits to one
+    project; `expanded` reveals loop rows + an ARCHIVE band; `show_parked` adds PARKED."""
+    rows = []
+    if not snap:
+        return rows
+    projects = [p for p in snap.projects if project is None or p.name == project]
+
+    def tasks_in(statuses):
+        out = []
+        for p in projects:
+            for st in statuses:
+                for t in p.tasks_by_status.get(st, []):
+                    out.append((p.name, t))
+        return out
+
+    # RUNNING
+    now = "9999-12-31 00:00:00"            # elapsed not needed for the model; render computes it
+    threads = [t for t in d.running_threads(snap, now)
+               if project is None or t["project"] == project]
+    rows.append(_band("RUNNING", len(threads)))
+    if threads:
+        for t in threads:
+            rows.append({"kind": "running", "id": f"run::{t['project']}",
+                         "project": t["project"], "task_id": t["task"], "task": None,
+                         "status": "doing", "sel": True, "agent": t["agent"],
+                         "since": t["since"], "log_path": t["log_path"]})
+    else:
+        rows.append({"kind": "info", "id": "__run_none", "sel": False, "label": "  (none running)"})
+
+    # NEEDS YOU (the founder gates)
+    gates = tasks_in(d.GATE_ORDER)
+    rows.append(_band("NEEDS YOU", len(gates)))
+    if gates:
+        for proj, t in gates:
+            rows.append(_task_row(proj, t, GATE_TAG.get(t.status, t.status.upper())))
+    else:
+        rows.append({"kind": "info", "id": "__gate_none", "sel": False,
+                     "label": "  (nothing needs you)"})
+
+    # THE LOOP — collapsed summary, or rows when expanded
+    loop = tasks_in(_LOOP_STATUSES)
+    rows.append(_band("THE LOOP", len(loop)))
+    if expanded and loop:
+        for proj, t in loop:
+            rows.append(_task_row(proj, t, t.status))
+    else:
+        seg = d.loop_summary(snap) if project is None else _proj_loop_summary(projects)
+        rows.append({"kind": "info", "id": "__loop_sum", "sel": False,
+                     "label": "  " + (seg or "0 in flight") + "   (press g to expand)"})
+
+    # ARCHIVE — only when expanded or a project is picked
+    if expanded or project is not None:
+        arch = tasks_in(_ARCHIVE_STATUSES)
+        rows.append(_band("ARCHIVE", len(arch)))
+        for proj, t in arch[:_ARCHIVE_CAP]:
+            tag = "DONE" if t.status == "done" else "CANC"
+            rows.append(_task_row(proj, t, tag))
+        if len(arch) > _ARCHIVE_CAP:
+            rows.append({"kind": "info", "id": "__arch_more", "sel": False,
+                         "label": f"  +{len(arch) - _ARCHIVE_CAP} older"})
+
+    # PARKED — backlog + deferred, only on `b`
+    if show_parked:
+        parked = tasks_in(d.PARKED_ORDER)
+        rows.append(_band("PARKED", len(parked)))
+        for proj, t in parked:
+            rows.append(_task_row(proj, t, t.status.upper()[:6]))
+    return rows
+
+
+def _proj_loop_summary(projects):
+    """loop_summary text for a single-project subset (loop_summary takes a whole snap)."""
+    segs = []
+    for st in _LOOP_STATUSES:
+        n = sum(len(p.tasks_by_status.get(st, [])) for p in projects)
+        if n:
+            segs.append(f"{n} {st}")
+    return "the loop: " + " · ".join(segs) if segs else None
