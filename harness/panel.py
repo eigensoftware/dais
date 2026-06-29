@@ -119,8 +119,8 @@ _NEEDS_YOU = 4      # yellow — founder-gated work: gate rows, counts, chips, "
 _BAD = 2            # red    — failed/error/blocked lines
 # focus/selection  = curses.A_REVERSE | curses.A_BOLD (a bright bar; no color pair)
 # inactive         = curses.A_DIM (history, parked, placeholders, labels)
-_BAND_DIM = {"ARCHIVE", "PARKED"}                            # history/parked headers recede (inactive)
-_DIM_STATUSES = {"done", "cancelled", "backlog", "deferred"}
+_BAND_DIM = {"ARCHIVE", "DEFERRED"}                          # history/parked headers recede (inactive)
+_DIM_STATUSES = {"done", "cancelled", "deferred"}            # backlog stays readable (it's the pull pool)
 
 
 def _row_search_text(r):
@@ -156,7 +156,7 @@ def render_work(scr, rect, app, focused):
             name = r["label"].rsplit(" · ", 1)[0]       # "NEEDS YOU · 1" -> "NEEDS YOU"
             bar = pad_cols(f"▌ {r['label']} ", inner.w)
             if name in _BAND_DIM:
-                battr = curses.A_DIM                          # ARCHIVE/PARKED recede (inactive)
+                battr = curses.A_DIM                          # ARCHIVE/DEFERRED recede (inactive)
             else:                                            # every active band: one structure color
                 battr = app._cp(_STRUCTURE) | curses.A_REVERSE | curses.A_BOLD
             _add(scr, y, inner.x, bar, inner.x + inner.w, battr)
@@ -385,7 +385,7 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    keys = "tab pane · / filter · b parked · g archive · L logs · ? help · q quit"
+    keys = "tab pane · / filter · g expand · L logs · ? help · q quit"
     if getattr(app, "filtering", False):
         hint = f" /{app.filter}_  ·  {keys}"
     else:
@@ -403,8 +403,7 @@ _HELP_LINES = [
     "  n                 new task",
     "  enter             action menu for the selection",
     "  / filter          filter; type, enter to keep, esc to clear",
-    "  b parked          show/hide backlog + deferred",
-    "  g archive         show the full archive (otherwise only the latest are listed)",
+    "  g expand          show the full backlog, deferred + archive (else compact)",
     "  rail + j/k        pick a project (ALL clears the filter)",
     "  l                 open the log pager for the selection",
     "  L logs            live log wall - all running agents (esc back)",
@@ -448,7 +447,7 @@ class PanelApp(d.App):
 
     def left_rows(self):
         rows = panel_work_rows(self.snap, project=self.project_filter,
-                               expanded=self._panel_expanded, show_parked=self.show_parked)
+                               expanded=self._panel_expanded)
         if self.filter:                          # honest filter: narrow to matching task/running rows
             rows = [r for r in rows if r["kind"] in ("task", "running")]
             rows = d.filter_rows(rows, self.filter, key=_row_search_text)
@@ -539,7 +538,10 @@ GATE_TAG = {"ready_to_merge": "MERGE", "needs_review": "REVIEW",
             "proposed": "PROPOSE", "blocked": "BLOCKED"}
 _LOOP_STATUSES = d.LOOP_SUMMARY_ORDER          # ["ready","needs_qa","changes_requested"]
 _ARCHIVE_STATUSES = ["done", "cancelled"]
+_BACKLOG_STATUSES = ["backlog"]
+_DEFERRED_STATUSES = ["deferred"]
 _ARCHIVE_CAP = 12
+_PARKED_CAP = 8
 
 
 def _band(name, count):
@@ -552,9 +554,10 @@ def _task_row(proj, task, tag):
             "status": task.status, "tag": tag, "sel": True}
 
 
-def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
-    """The panel's WORK list: ordered bands of selectable rows. `project` limits to one
-    project; `expanded` reveals loop rows + an ARCHIVE band; `show_parked` adds PARKED."""
+def panel_work_rows(snap, *, project=None, expanded=False):
+    """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · THE LOOP ·
+    BACKLOG · DEFERRED · ARCHIVE). `project` limits to one project. `expanded` (the g key) shows
+    the full BACKLOG, reveals DEFERRED rows, and uncaps the ARCHIVE."""
     rows = []
     if not snap:
         return rows
@@ -610,7 +613,31 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
         rows.append({"kind": "info", "id": "__loop_none", "sel": False,
                      "label": "  (nothing in flight)"})
 
-    # ARCHIVE — shown when a project is picked or history is expanded; g (expanded) UNCAPS it
+    # BACKLOG — the queue-able pool, always visible so you can pull from it (a promotes -> ready)
+    backlog = tasks_in(_BACKLOG_STATUSES)
+    add_band("BACKLOG", len(backlog))
+    if backlog:
+        shown = backlog if expanded else backlog[:_PARKED_CAP]
+        for proj, t in shown:
+            rows.append(_task_row(proj, t, "BACK"))
+        if len(backlog) > len(shown):
+            rows.append({"kind": "info", "id": "__backlog_more", "sel": False,
+                         "label": f"  +{len(backlog) - len(shown)} more   (press g to show all)"})
+    else:
+        rows.append({"kind": "info", "id": "__backlog_none", "sel": False,
+                     "label": "  (backlog empty)"})
+
+    # DEFERRED — founder-parked; its own section, collapsed to a count until expanded (g)
+    deferred = tasks_in(_DEFERRED_STATUSES)
+    add_band("DEFERRED", len(deferred))
+    if expanded:
+        for proj, t in deferred:
+            rows.append(_task_row(proj, t, "DEFER"))
+    elif deferred:
+        rows.append({"kind": "info", "id": "__deferred_sum", "sel": False,
+                     "label": f"  {len(deferred)} parked   (press g to show)"})
+
+    # ARCHIVE — history at the very bottom; shown when a project is picked or expanded; g UNCAPS it
     if expanded or project is not None:
         arch = tasks_in(_ARCHIVE_STATUSES)
         add_band("ARCHIVE", len(arch))
@@ -621,11 +648,4 @@ def panel_work_rows(snap, *, project=None, expanded=False, show_parked=False):
         if len(arch) > len(shown):
             rows.append({"kind": "info", "id": "__arch_more", "sel": False,
                          "label": f"  +{len(arch) - len(shown)} older   (press g to show all)"})
-
-    # PARKED — backlog + deferred, only on `b`
-    if show_parked:
-        parked = tasks_in(d.PARKED_ORDER)
-        add_band("PARKED", len(parked))
-        for proj, t in parked:
-            rows.append(_task_row(proj, t, t.status.upper()[:6]))
     return rows

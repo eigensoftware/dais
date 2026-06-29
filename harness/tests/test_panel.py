@@ -363,13 +363,35 @@ class TestPanelWorkRows(unittest.TestCase):
         projs = {r["project"] for r in rows if r["kind"] == "task"}
         self.assertEqual(projs, {"beacon"})
 
-    def test_parked_only_when_requested(self):
-        snap = self._snap(self._proj("x", backlog=1, deferred=1, proposed=1))
-        self.assertFalse(any("PARKED" in r.get("label", "")
-                             for r in pn.panel_work_rows(snap)))
-        rows = pn.panel_work_rows(snap, show_parked=True)
-        self.assertTrue(any("PARKED" in r.get("label", "") for r in rows))
+    def test_backlog_visible_deferred_collapsed_archive_last(self):
+        snap = self._snap(self._proj("x", backlog=2, deferred=1, done=1, proposed=1))
+        rows = pn.panel_work_rows(snap, project="x")        # default (not expanded)
+        bands = [r["label"].rsplit(" · ", 1)[0] for r in rows if r["kind"] == "band"]
+        # BACKLOG and DEFERRED are their own sections; ARCHIVE is the LAST band
+        self.assertIn("BACKLOG", bands)
+        self.assertIn("DEFERRED", bands)
+        self.assertEqual(bands[-1], "ARCHIVE")
+        self.assertLess(bands.index("BACKLOG"), bands.index("DEFERRED"))
+        self.assertLess(bands.index("DEFERRED"), bands.index("ARCHIVE"))
+        # backlog rows are visible by default; deferred rows stay collapsed until g
         self.assertTrue(any(r["kind"] == "task" and r["status"] == "backlog" for r in rows))
+        self.assertFalse(any(r["kind"] == "task" and r["status"] == "deferred" for r in rows))
+        self.assertFalse(any("PARKED" in r.get("label", "") for r in rows))   # old band is gone
+
+    def test_g_expands_deferred_rows(self):
+        snap = self._snap(self._proj("x", deferred=2))
+        rows = pn.panel_work_rows(snap, expanded=True)
+        self.assertTrue(any(r["kind"] == "task" and r["status"] == "deferred" for r in rows))
+
+    def test_backlog_caps_then_g_shows_all(self):
+        snap = self._snap(self._proj("x", backlog=pn._PARKED_CAP + 4))
+        capped = pn.panel_work_rows(snap)                   # default: capped + "+N more"
+        n_capped = sum(1 for r in capped if r["kind"] == "task" and r["status"] == "backlog")
+        self.assertEqual(n_capped, pn._PARKED_CAP)
+        self.assertTrue(any("more" in r.get("label", "") for r in capped))
+        full = pn.panel_work_rows(snap, expanded=True)      # g shows all backlog
+        n_full = sum(1 for r in full if r["kind"] == "task" and r["status"] == "backlog")
+        self.assertEqual(n_full, pn._PARKED_CAP + 4)
 
 
 class TestRenderWorkNative(unittest.TestCase):
@@ -506,8 +528,9 @@ class TestBarAndHelp(unittest.TestCase):
         pn.render_bar(scr, pn.Rect(39, 0, 1, 200), papp, focus="work")
         text = scr.calls[-1][2]
         self.assertNotIn(": command", text)        # palette not built → not advertised
-        for k in ("tab", "b parked", "g ", "/ filter", "? help", "q quit"):
+        for k in ("tab", "g expand", "/ filter", "? help", "q quit"):
             self.assertIn(k, text)
+        self.assertNotIn("b parked", text)          # backlog/deferred are first-class now
 
     def test_question_mark_toggles_help_and_draw_shows_it(self):
         papp = self._papp([("lyr-1","beacon","x","ready","high",None)])
