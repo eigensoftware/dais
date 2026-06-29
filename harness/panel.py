@@ -16,43 +16,49 @@ from dashboard import _add, clip_cols, pad_cols, disp_width  # width-aware primi
 Rect = namedtuple("Rect", "y x h w")
 
 PANES = ("vitals", "rail", "work", "inspector", "feed", "bar")
-RAIL_W = 22
 _MIN_FEED_H = 14          # below this terminal height, the feed is dropped
+_TWO_COL_MIN_W = 76       # below this width the columns stack into one (nothing is dropped)
+_INSP_MIN_W = 36          # the inspector is never narrower than this in two-column mode
+_INSP_MAX_W = 90          # ... nor wider than this (extra width goes to WORK)
+_INSP_PCT = 45            # inspector target width ≈ 45% of the screen
+_PROJ_MAX_H = 12          # cap the PROJECTS block so WORK always keeps room
+_MIN_WORK_H = 5           # ... and leave WORK at least this many rows when possible
 
 
-def breakpoint(w):
-    if w >= 160:
-        return "wide"
-    if w >= 100:
-        return "medium"
-    return "narrow"
+def _projects_h(n_rail_items, mid_h):
+    """Height of the PROJECTS block (a title row + one row per rail item), capped so WORK keeps
+    room and never taller than the middle band."""
+    want = 1 + max(1, n_rail_items)
+    ceiling = max(1, mid_h - _MIN_WORK_H)
+    return max(1, min(want, _PROJ_MAX_H, ceiling, mid_h))
 
 
-def layout(w, h, *, show_rail=True, show_inspector=True, show_feed=True):
-    """Terminal size + toggles -> {pane_id: Rect}. Rects tile the screen, no overlap.
-    Header is row 0; bar is the last row; feed (when shown and there's height) is the
-    row above the bar; the middle band splits into columns by breakpoint."""
-    bp = breakpoint(w)
+def layout(w, h, *, n_rail_items=1, show_feed=True):
+    """Terminal size -> {pane_id: Rect}, tiling the screen with no overlap. The control panel is
+    TWO columns that never drop a pane: the left column stacks PROJECTS over WORK, the right column
+    is the INSPECTOR (full middle height). Vitals is row 0, the bar the last row, the feed (when
+    there's height) the row above it. Below _TWO_COL_MIN_W the three middle panes stack into one
+    full-width column (PROJECTS -> WORK -> INSPECTOR) instead of side-by-side -- nothing is hidden.
+    `n_rail_items` (passed by draw as len(_rail_items)) sizes the PROJECTS block."""
     out = {"vitals": Rect(0, 0, 1, w), "bar": Rect(h - 1, 0, 1, w)}
     feed_on = show_feed and h >= _MIN_FEED_H
     if feed_on:
         out["feed"] = Rect(h - 2, 0, 1, w)
     mid_y = 1
-    mid_h = (h - 2 if not feed_on else h - 3)     # rows between vitals and feed/bar
-    mid_h = max(1, mid_h)
-    rail_on = show_rail and bp == "wide"
-    insp_on = show_inspector and bp in ("wide", "medium")
-    x = 0
-    if rail_on:
-        out["rail"] = Rect(mid_y, 0, mid_h, RAIL_W)
-        x = RAIL_W
-    if insp_on:
-        insp_w = max(36, (w - x) // 2)
-        work_w = w - x - insp_w
-        out["work"] = Rect(mid_y, x, mid_h, work_w)
-        out["inspector"] = Rect(mid_y, x + work_w, mid_h, insp_w)
-    else:
-        out["work"] = Rect(mid_y, x, mid_h, w - x)
+    mid_h = max(1, (h - 3 if feed_on else h - 2))     # rows between vitals and feed/bar
+    proj_h = _projects_h(n_rail_items, mid_h)
+    if w >= _TWO_COL_MIN_W:
+        insp_w = min(_INSP_MAX_W, max(_INSP_MIN_W, w * _INSP_PCT // 100))
+        left_w = w - insp_w
+        out["rail"] = Rect(mid_y, 0, proj_h, left_w)
+        out["work"] = Rect(mid_y + proj_h, 0, max(0, mid_h - proj_h), left_w)
+        out["inspector"] = Rect(mid_y, left_w, mid_h, insp_w)
+    else:                                             # too narrow to go side-by-side: stack them
+        out["rail"] = Rect(mid_y, 0, proj_h, w)
+        rest = max(0, mid_h - proj_h)
+        work_h = rest * 6 // 10                       # WORK gets the larger share of the leftover
+        out["work"] = Rect(mid_y + proj_h, 0, work_h, w)
+        out["inspector"] = Rect(mid_y + proj_h + work_h, 0, rest - work_h, w)
     return out
 
 
@@ -458,7 +464,7 @@ class PanelApp(d.App):
                 render_help(scr, h, w)
             scr.refresh()
             return
-        rects = layout(w, h, show_rail=True, show_inspector=True, show_feed=True)
+        rects = layout(w, h, n_rail_items=len(_rail_items(self)), show_feed=True)
         order = focus_order(rects)
         if self.pane_focus not in order:
             self.pane_focus = order[0] if order else "work"

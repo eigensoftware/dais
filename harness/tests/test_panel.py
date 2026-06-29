@@ -16,63 +16,67 @@ def _covers_no_overlap(rects, w, h):
     return seen
 
 
-class TestBreakpoint(unittest.TestCase):
-    def test_thresholds(self):
-        self.assertEqual(pn.breakpoint(200), "wide")
-        self.assertEqual(pn.breakpoint(160), "wide")
-        self.assertEqual(pn.breakpoint(159), "medium")
-        self.assertEqual(pn.breakpoint(100), "medium")
-        self.assertEqual(pn.breakpoint(99), "narrow")
-        self.assertEqual(pn.breakpoint(80), "narrow")
-
-
 class TestLayout(unittest.TestCase):
-    def test_wide_has_all_columns(self):
-        L = pn.layout(200, 50)
+    def test_two_columns_when_wide(self):
+        L = pn.layout(200, 50, n_rail_items=6)
         self.assertEqual(set(L), {"vitals", "rail", "work", "inspector", "feed", "bar"})
         _covers_no_overlap(L, 200, 50)
         self.assertEqual(L["vitals"].y, 0)
         self.assertEqual(L["bar"].y, 49)
-        # columns left-to-right: rail, work, inspector
-        self.assertLess(L["rail"].x, L["work"].x)
-        self.assertLess(L["work"].x, L["inspector"].x)
-
-    def test_medium_drops_rail(self):
-        L = pn.layout(120, 40)
-        self.assertNotIn("rail", L)
-        self.assertEqual(set(L), {"vitals", "work", "inspector", "feed", "bar"})
-        _covers_no_overlap(L, 120, 40)
-
-    def test_narrow_work_only(self):
-        L = pn.layout(80, 24)
-        self.assertNotIn("rail", L)
-        self.assertNotIn("inspector", L)
-        self.assertIn("work", L)
-        self.assertIn("bar", L)
-        _covers_no_overlap(L, 80, 24)
-        # work spans the full width
+        # left column stacks PROJECTS over WORK (same x); INSPECTOR is the right column
+        self.assertEqual(L["rail"].x, 0)
         self.assertEqual(L["work"].x, 0)
-        self.assertEqual(L["work"].w, 80)
+        self.assertLess(L["rail"].y, L["work"].y)
+        self.assertGreater(L["inspector"].x, 0)
+        self.assertEqual(L["inspector"].x, L["rail"].w)     # inspector starts where the left col ends
+
+    def test_medium_keeps_rail_and_inspector(self):
+        # the whole point: at 105 cols the rail no longer vanishes
+        L = pn.layout(105, 40, n_rail_items=6)
+        self.assertEqual(set(L), {"vitals", "rail", "work", "inspector", "feed", "bar"})
+        _covers_no_overlap(L, 105, 40)
+        self.assertEqual(L["rail"].x, 0)
+        self.assertEqual(L["work"].x, 0)
+        self.assertGreater(L["inspector"].x, 0)
+
+    def test_narrow_stacks_all_three_no_drop(self):
+        L = pn.layout(70, 30, n_rail_items=4)
+        self.assertEqual(set(L), {"vitals", "rail", "work", "inspector", "feed", "bar"})
+        _covers_no_overlap(L, 70, 30)
+        # single column: all at x=0, stacked PROJECTS -> WORK -> INSPECTOR
+        self.assertEqual(L["rail"].x, 0)
+        self.assertEqual(L["work"].x, 0)
+        self.assertEqual(L["inspector"].x, 0)
+        self.assertLess(L["rail"].y, L["work"].y)
+        self.assertLess(L["work"].y, L["inspector"].y)
 
     def test_short_height_drops_feed(self):
-        L = pn.layout(120, 12)
+        L = pn.layout(120, 12, n_rail_items=4)
         self.assertNotIn("feed", L)
         _covers_no_overlap(L, 120, 12)
 
-    def test_toggles_force_panes_off(self):
-        L = pn.layout(200, 50, show_rail=False, show_inspector=False, show_feed=False)
-        self.assertEqual(set(L), {"vitals", "work", "bar"})
+    def test_show_feed_false_drops_feed(self):
+        L = pn.layout(200, 50, show_feed=False)
+        self.assertNotIn("feed", L)
         _covers_no_overlap(L, 200, 50)
+
+    def test_projects_block_sized_to_items_work_gets_rest(self):
+        few = pn.layout(200, 50, n_rail_items=3)
+        many = pn.layout(200, 50, n_rail_items=10)
+        self.assertLess(few["rail"].h, many["rail"].h)       # more projects -> taller PROJECTS block
+        self.assertGreater(few["work"].h, many["work"].h)    # ... and shorter WORK
+        self.assertGreater(many["work"].h, 0)                # WORK never vanishes
+        self.assertEqual(few["rail"].h + few["work"].h, few["inspector"].h)  # left col fills the band
 
 
 class TestFocus(unittest.TestCase):
-    def test_focus_order_wide(self):
+    def test_focus_order_two_col(self):
         L = pn.layout(200, 50)
         self.assertEqual(pn.focus_order(L), ["rail", "work", "inspector"])
 
-    def test_focus_order_narrow_is_work_only(self):
-        L = pn.layout(80, 24)
-        self.assertEqual(pn.focus_order(L), ["work"])
+    def test_focus_order_narrow_still_all_three(self):
+        L = pn.layout(70, 24)
+        self.assertEqual(pn.focus_order(L), ["rail", "work", "inspector"])
 
     def test_cycle_wraps(self):
         order = ["rail", "work", "inspector"]
@@ -424,10 +428,11 @@ class TestRailSelection(unittest.TestCase):
 
 
 class TestInspectorWideColor(unittest.TestCase):
-    def test_inspector_is_wider_than_before(self):
+    def test_inspector_is_a_wide_right_column(self):
         L = pn.layout(200, 50)
-        # inspector should be ~half of (w - rail), i.e. notably wider than the old 2/5
-        self.assertGreaterEqual(L["inspector"].w, (200 - pn.RAIL_W) // 2 - 2)
+        # the inspector is a generous right column (the founder wanted it wide), within its bounds
+        self.assertGreaterEqual(L["inspector"].w, 80)
+        self.assertLessEqual(L["inspector"].w, pn._INSP_MAX_W)
 
     def test_inspector_colorizes_status_and_sections(self):
         # has_color path: stub _cp to tag lines so we can assert color was applied
