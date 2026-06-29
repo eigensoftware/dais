@@ -80,7 +80,18 @@ def render_pane_title(scr, rect, title, focused):
     return Rect(rect.y + 1, rect.x, max(0, rect.h - 1), rect.w)
 
 
+# panel-local color system (does NOT touch dashboard.STATUS_PAIR, which the classic UI shares)
+_BAND_PAIR = {"RUNNING": 1, "NEEDS YOU": 4, "THE LOOP": 3}   # green / yellow / cyan
+_BAND_DIM = {"ARCHIVE", "PARKED"}                            # history/parked recede
+_DIM_STATUSES = {"done", "cancelled", "backlog", "deferred"}
+_RAIL_HUES = [3, 5, 4, 1, 2, 6]                              # cyan magenta yellow green red white
+
+
 def _tag_attr(app, status):
+    if status in _DIM_STATUSES:
+        return curses.A_DIM                                  # archive/parked recede
+    if status == "needs_review":
+        return app._cp(3)                                    # cyan gate (override white)
     return app._cp(d.STATUS_PAIR.get(status, 6))
 
 
@@ -94,8 +105,13 @@ def render_work(scr, rect, app, focused):
     for idx, r in enumerate(rows[base:base + inner.h]):
         y = inner.y + idx
         if r["kind"] == "band":
+            name = r["label"].rsplit(" · ", 1)[0]       # "NEEDS YOU · 1" -> "NEEDS YOU"
             bar = pad_cols(f"▌ {r['label']} ", inner.w)
-            _add(scr, y, inner.x, bar, inner.x + inner.w, curses.A_REVERSE | curses.A_BOLD)
+            if name in _BAND_DIM:
+                battr = curses.A_DIM
+            else:
+                battr = app._cp(_BAND_PAIR.get(name, 6)) | curses.A_REVERSE | curses.A_BOLD
+            _add(scr, y, inner.x, bar, inner.x + inner.w, battr)
             continue
         if r["kind"] == "info":
             _add(scr, y, inner.x, clip_cols(r["label"], inner.w), inner.x + inner.w,
@@ -106,26 +122,32 @@ def render_work(scr, rect, app, focused):
         if r["kind"] == "running":
             tag, tid, proj = "RUN", (r.get("task_id") or "—"), r["project"]
             title = f"{r.get('agent','')}"
+            base_attr = app._cp(1)                           # live = green
         else:
             tag, tid, proj = r["tag"], r["id"], r["project"]
             title = r["task"].title
+            base_attr = _tag_attr(app, r.get("status", ""))
         line = f"  {tag:<7} {tid:<8} {proj[:11]:<11} {title}"
-        attr = curses.A_REVERSE if selected else _tag_attr(app, r.get("status", ""))
+        attr = (base_attr | curses.A_REVERSE) if selected else base_attr
         _add(scr, y, inner.x, pad_cols(clip_cols(line, inner.w), inner.w),
              inner.x + inner.w, attr)
 
 
 def _inspector_attr(app, idx_in_doc, line):
-    """Color: first line (status) in its status color+bold; section headers bold; PASS green,
-    FAIL red; field labels dim; else default."""
+    """Color by line type: run 'succeeded' green; 'fail'/'error'/'blocked' red; 'pass'/'+ ' green;
+    section headers (':' / 'runs touching') cyan-bold; 'prio high/urgent' yellow; labels dim."""
     s = line.strip()
     low = s.lower()
-    if "fail" in low:
-        return app._cp(2)                                   # red
+    if "succeeded" in low:
+        return app._cp(1)
+    if "fail" in low or "error" in low or "blocked" in low:
+        return app._cp(2)
     if "pass" in low or s.startswith("+ "):
-        return app._cp(1)                                   # green
+        return app._cp(1)
     if s.endswith(":") or s.startswith("runs touching"):
-        return curses.A_BOLD
+        return app._cp(3) | curses.A_BOLD
+    if "prio high" in low or "prio urgent" in low:
+        return app._cp(4)
     if s.startswith("assignee") or s.startswith("prio"):
         return curses.A_DIM
     return 0
@@ -162,8 +184,8 @@ def render_inspector(scr, rect, app, focused):
 
 
 def render_vitals(scr, rect, app):
-    """Honest org vitals: identity · watch state · running/idle · cooling · gates · clock.
-    NO budget bar (no usage data exists)."""
+    """Honest org vitals: identity · watch · running/idle · cooling · gates · clock. NO budget bar.
+    The 'N need you' token is highlighted yellow when N>0."""
     snap = app.snap
     ws = snap.workspace if snap else None
     ident = f"DAIS · {ws} · LIVE" if ws else "DAIS · LIVE"
@@ -179,10 +201,15 @@ def render_vitals(scr, rect, app):
     clk = d.to_local_hhmm(snap.ts, with_secs=True) if snap else ""
     pf = getattr(app, "project_filter", None)
     proj_seg = " · all projects" if pf is None else f" · {pf}"
-    head = (f" {ident}  {badge} · >{len(threads)} running · {nproj} proj"
-            f" · {ng} need you{proj_seg}{cool}  {clk}")
-    _add(scr, rect.y, rect.x, pad_cols(head, rect.w), rect.x + rect.w,
-         curses.A_REVERSE | curses.A_BOLD)
+    left = f" {ident}  {badge} · >{len(threads)} running · {nproj} proj · "
+    mid = f"{ng} need you"
+    right = f"{proj_seg}{cool}  {clk}"
+    _add(scr, rect.y, rect.x, pad_cols(left + mid + right, rect.w),
+         rect.x + rect.w, curses.A_REVERSE | curses.A_BOLD)
+    if ng > 0:
+        x = rect.x + disp_width(left)
+        _add(scr, rect.y, x, mid, rect.x + rect.w,
+             app._cp(4) | curses.A_REVERSE | curses.A_BOLD)
 
 
 def _rail_items(app):
@@ -191,20 +218,29 @@ def _rail_items(app):
 
 
 def render_rail(scr, rect, app, focused):
-    """Project navigator: ALL + per-project rows, with running/gate chips and filter mark."""
+    """Project navigator: ALL + per-project rows, each a distinct hue; the live (running) project is
+    green; the active filter is bold with a » mark; the focused cursor is reverse."""
     inner = render_pane_title(scr, rect, "PROJECTS", focused)
     items = _rail_items(app)
     ri = getattr(app, "_rail_i", 0)
     pf = getattr(app, "project_filter", None)
     for idx, name in enumerate(items[:inner.h]):
         active = (name == "ALL" and pf is None) or name == pf
-        mark = "\xbb" if active else " "        # » (terminal-safe)
-        attr = curses.A_REVERSE if (focused and idx == ri) else (
-            curses.A_BOLD if active else 0)
-        if app.snap and name != "ALL":
-            p = next((x for x in app.snap.projects if x.name == name), None)
-            ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER) if p else 0
-            run = ">" if (p and p.running) else " "
+        mark = "\xbb" if active else " "                    # »
+        p = (next((x for x in app.snap.projects if x.name == name), None)
+             if (app.snap and name != "ALL") else None)
+        running = bool(p and getattr(p, "running", False))
+        if name == "ALL":
+            hue = 0
+        elif running:
+            hue = app._cp(1)                                # live project = green
+        else:
+            hue = app._cp(_RAIL_HUES[(idx - 1) % len(_RAIL_HUES)])
+        attr = hue | (curses.A_BOLD if (active and name != "ALL") else 0) | \
+            (curses.A_REVERSE if (focused and idx == ri) else 0)
+        if p is not None:
+            ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER)
+            run = ">" if running else " "
             label = f"{mark}{run}{name}" + (f" !{ng}" if ng else "")
         else:
             label = f"{mark} {name}"

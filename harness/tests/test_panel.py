@@ -1,3 +1,4 @@
+import curses
 import os, sys, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import panel as pn
@@ -190,7 +191,7 @@ class TestChromePanes(unittest.TestCase):
         app = self._app([("cou-1", "acme", "approve", "proposed", "high", None)])
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
-        text = scr.calls[-1][2]
+        text = scr.calls[0][2]               # full header is first call; ng>0 adds a yellow overlay
         self.assertIn("DAIS", text)
         self.assertIn("1 need you", text)     # honest gate count
         self.assertNotIn("5h", text)          # NO fake budget bar
@@ -486,3 +487,120 @@ class TestBarAndHelp(unittest.TestCase):
         # any key closes
         papp.handle(ord("x"), papp.left_rows(), 0, None)
         self.assertFalse(papp.show_help)
+
+
+class TestFullChromatic(unittest.TestCase):
+    def _papp(self, rows, project=None):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb6-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp.project_filter = project
+        papp._cp = lambda n: n * 1000          # make color pairs identifiable by value
+        return papp
+
+    @staticmethod
+    def _band_attr(scr, name):
+        for c in scr.calls:
+            if name in c[2] and c[2].lstrip().startswith("▌"):   # ▌ band bar
+                return c[3]
+        return None
+
+    @staticmethod
+    def _row_attr(scr, needle):
+        for c in scr.calls:
+            if needle in c[2] and not c[2].lstrip().startswith("▌"):
+                return c[3]
+        return None
+
+    def _board(self):
+        # acme filtered: 1 needs_review (gate) + 1 done + 1 cancelled (archive)
+        return self._papp([("cou-5a", "acme", "review", "needs_review", "high", None),
+                           ("cou-1", "acme", "done1", "done", "med", None),
+                           ("cou-2", "acme", "cancelled1", "cancelled", "med", None)],
+                          project="acme")
+
+    def test_bands_are_urgency_colored(self):
+        papp = self._board()
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
+        self.assertEqual(self._band_attr(scr, "NEEDS YOU"),
+                         4000 | curses.A_REVERSE | curses.A_BOLD)     # yellow
+        self.assertEqual(self._band_attr(scr, "RUNNING"),
+                         1000 | curses.A_REVERSE | curses.A_BOLD)     # green
+        self.assertEqual(self._band_attr(scr, "THE LOOP"),
+                         3000 | curses.A_REVERSE | curses.A_BOLD)     # cyan
+        self.assertEqual(self._band_attr(scr, "ARCHIVE"), curses.A_DIM)  # recedes
+
+    def test_archive_rows_are_dim(self):
+        papp = self._board()
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=False)
+        self.assertEqual(self._row_attr(scr, "cou-1"), curses.A_DIM)
+
+    def test_needs_review_row_is_cyan_not_white(self):
+        papp = self._board()
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=False)  # no selection highlight
+        self.assertEqual(self._row_attr(scr, "cou-5a"), 3000)            # cyan, not 6000 white
+
+    def test_selected_row_keeps_status_hue(self):
+        papp = self._board()
+        papp.sel_id = "cou-5a"
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
+        self.assertEqual(self._row_attr(scr, "cou-5a"), 3000 | curses.A_REVERSE)
+
+    def test_inspector_attr_rules(self):
+        papp = self._papp([("z-1", "z", "t", "ready", "med", None)])
+        self.assertEqual(pn._inspector_attr(papp, 5, "12:59 gc      succeeded   2m"), 1000)  # green
+        self.assertEqual(pn._inspector_attr(papp, 5, "07:07 lead    failed      3m"), 2000)  # red
+        self.assertEqual(pn._inspector_attr(papp, 0, "notes:"), 3000 | curses.A_BOLD)        # header
+        self.assertEqual(pn._inspector_attr(papp, 0, "runs touching z-1:"), 3000 | curses.A_BOLD)
+        self.assertEqual(pn._inspector_attr(papp, 0,
+                         "assignee founder · prio high · pr (none)"), 4000)         # yellow
+
+    def test_vitals_need_you_is_yellow_when_positive(self):
+        papp = self._papp([("g-1", "g", "t", "ready_to_merge", "high", "https://x/pull/1")])
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        hits = [c for c in scr.calls
+                if "need you" in c[2] and c[3] == (4000 | curses.A_REVERSE | curses.A_BOLD)]
+        self.assertTrue(hits)
+
+    def test_vitals_no_yellow_overlay_when_zero(self):
+        papp = self._papp([("g-1", "g", "t", "ready", "low", None)])   # 'ready' is loop, not a gate
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        self.assertFalse([c for c in scr.calls
+                          if c[3] == (4000 | curses.A_REVERSE | curses.A_BOLD)])
+
+    def test_rail_projects_get_distinct_hues_and_running_is_green(self):
+        papp = self._papp([("a-1", "alpha", "x", "ready", "med", None),
+                           ("b-1", "bravo", "y", "ready", "med", None)])
+        # if the snapshot derives projects differently, adapt the seed so snap.projects has >=2 names
+        names = [p.name for p in papp.snap.projects]
+        self.assertGreaterEqual(len(names), 2)
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 20), papp, focused=False)
+        # ALL row carries no hue; the two project rows carry different non-zero hues
+        all_attr = self._row_attr_rail(scr, "ALL")
+        self.assertEqual(all_attr, 0)
+        a_attr = self._row_attr_rail(scr, names[0])
+        b_attr = self._row_attr_rail(scr, names[1])
+        self.assertNotEqual(a_attr, 0)
+        self.assertNotEqual(a_attr, b_attr)
+        # mark the first project running -> its row turns green (cp 1)
+        papp.snap.projects[0].running = True
+        scr2 = FakeScr(40, 200)
+        pn.render_rail(scr2, pn.Rect(1, 0, 20, 20), papp, focused=False)
+        self.assertEqual(self._row_attr_rail(scr2, names[0]) & 1000, 1000)
+
+    @staticmethod
+    def _row_attr_rail(scr, needle):
+        for c in scr.calls:
+            if needle in c[2]:
+                return c[3]
+        return None
