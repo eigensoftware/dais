@@ -222,12 +222,43 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
+    keys = "tab pane · / filter · b parked · g expand · ? help · q quit"
     if getattr(app, "filtering", False):
-        hint = f" /{app.filter}_  ·  : command · tab pane · ? help · q quit"
+        hint = f" /{app.filter}_  ·  {keys}"
     else:
-        hint = f" {acts}  ·  : command · tab pane · ? help · q quit"
-    _add(scr, rect.y, rect.x, pad_cols(hint, rect.w), rect.x + rect.w,
-         curses.A_REVERSE)
+        hint = f" {acts}  ·  {keys}"
+    _add(scr, rect.y, rect.x, pad_cols(hint, rect.w), rect.x + rect.w, curses.A_REVERSE)
+
+
+_HELP_LINES = [
+    "  KEYS",
+    "  tab / shift-tab   move focus between panes",
+    "  j / k             move selection (or scroll inspector)",
+    "  a / x             advance / reverse the selected task",
+    "  + / -             raise / lower priority",
+    "  o                 open the PR in a browser",
+    "  n                 new task",
+    "  enter             action menu for the selection",
+    "  / filter          filter; type, enter to keep, esc to clear",
+    "  b parked          show/hide backlog + deferred",
+    "  g expand          expand the loop + archive (history)",
+    "  rail + j/k        pick a project (ALL clears the filter)",
+    "  l                 open the log pager for the selection",
+    "  ? help            this overlay (any key closes)",
+    "  q                 quit",
+]
+
+
+def render_help(scr, h, w):
+    """Centered keymap overlay."""
+    bw = min(w - 4, 56)
+    bh = min(h - 2, len(_HELP_LINES) + 2)
+    y0 = max(0, (h - bh) // 2)
+    x0 = max(0, (w - bw) // 2)
+    for i in range(bh):
+        line = _HELP_LINES[i] if i < len(_HELP_LINES) else ""
+        attr = curses.A_REVERSE | (curses.A_BOLD if i == 0 else 0)
+        _add(scr, y0 + i, x0, pad_cols(line, bw), x0 + bw, attr)
 
 
 _RENDER = {
@@ -248,6 +279,7 @@ class PanelApp(d.App):
         self._panel_expanded = False
         self._rail_i = 0
         self.project_filter = None
+        self.show_help = False
 
     def left_rows(self):
         return panel_work_rows(self.snap, project=self.project_filter,
@@ -266,12 +298,20 @@ class PanelApp(d.App):
                 render_bar(scr, rect, self, self.pane_focus)
             else:
                 _RENDER[pid](scr, rect, self, pid == self.pane_focus)
+        if self.show_help:
+            render_help(scr, h, w)
         scr.refresh()
 
     def handle(self, ch, rows, sel_i, sel_row):
         # filtering takes priority — all keystrokes route to the inherited filter handler
         if self.filtering:
             return super().handle(ch, rows, sel_i, sel_row)
+        if self.show_help:                      # any key dismisses the overlay
+            self.show_help = False
+            return True
+        if ch == ord("?"):
+            self.show_help = True
+            return True
         # global panel keys first
         if ch == ord("q"):
             return False

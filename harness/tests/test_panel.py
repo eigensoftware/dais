@@ -212,7 +212,6 @@ class TestChromePanes(unittest.TestCase):
         pn.render_bar(scr, pn.Rect(39, 0, 1, 200), app, focus="work")
         text = scr.calls[-1][2]
         self.assertIn("ship", text)           # contextual action bar reused
-        self.assertIn(": command", text)
         self.assertIn("q quit", text)
 
 
@@ -454,3 +453,36 @@ class TestInspectorWideColor(unittest.TestCase):
             pn.render_inspector(scr, pn.Rect(1, 0, 30, 60), papp, focused=False)  # must not raise
             text = "\n".join(c[2] for c in scr.calls)
             self.assertIn("engineer", text)
+
+
+class TestBarAndHelp(unittest.TestCase):
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb5-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def test_bar_only_advertises_working_keys(self):
+        papp = self._papp([("lyr-1","beacon","ship","ready_to_merge","high","https://x/pull/9")])
+        papp.sel_id = "lyr-1"
+        scr = FakeScr(40, 200)
+        pn.render_bar(scr, pn.Rect(39, 0, 1, 200), papp, focus="work")
+        text = scr.calls[-1][2]
+        self.assertNotIn(": command", text)        # palette not built → not advertised
+        for k in ("tab", "b parked", "g ", "/ filter", "? help", "q quit"):
+            self.assertIn(k, text)
+
+    def test_question_mark_toggles_help_and_draw_shows_it(self):
+        papp = self._papp([("lyr-1","beacon","x","ready","high",None)])
+        self.assertFalse(papp.show_help)
+        papp.handle(ord("?"), papp.left_rows(), 0, None)
+        self.assertTrue(papp.show_help)
+        papp.draw()
+        text = "\n".join(c[2] for c in papp.scr.calls)
+        self.assertIn("KEYS", text)                # the overlay title
+        self.assertIn("tab", text)
+        # any key closes
+        papp.handle(ord("x"), papp.left_rows(), 0, None)
+        self.assertFalse(papp.show_help)
