@@ -409,3 +409,48 @@ class TestRailSelection(unittest.TestCase):
         text = "\n".join(c[2] for c in scr.calls)
         self.assertIn("ALL", text)
         self.assertIn("beacon", text)
+
+
+class TestInspectorWideColor(unittest.TestCase):
+    def test_inspector_is_wider_than_before(self):
+        L = pn.layout(200, 50)
+        # inspector should be ~half of (w - rail), i.e. notably wider than the old 2/5
+        self.assertGreaterEqual(L["inspector"].w, (200 - pn.RAIL_W) // 2 - 2)
+
+    def test_inspector_colorizes_status_and_sections(self):
+        # has_color path: stub _cp to tag lines so we can assert color was applied
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb4-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn()
+        conn.execute("INSERT INTO tasks(id,project,title,status,priority,pr_url,notes) "
+                     "VALUES(?,?,?,?,?,?,?)",
+                     ("lyr-1","beacon","ship","ready_to_merge","high","https://x/pull/9",
+                      "QA PASS. all good. FAIL none."))
+        conn.commit()
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root); papp.sel_id = "lyr-1"
+        papp._cp = lambda n: n * 1000             # make attrs identifiable by value
+        scr = FakeScr(40, 200)
+        pn.render_inspector(scr, pn.Rect(1, 0, 30, 60), papp, focused=False)
+        # the status line carries a non-zero (colored) attr
+        status_calls = [c for c in scr.calls if "ready_to_merge" in c[2]]
+        self.assertTrue(status_calls and status_calls[0][3] != 0)
+
+    def test_inspector_running_selection_does_not_crash(self):
+        """A selected RUNNING row (task=None) must show the agent header, not crash
+        (detail_lines would do task.id on None)."""
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb4r-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": "/tmp/x.log"}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            rows = papp.left_rows()
+            run_row = next(r for r in rows if r["kind"] == "running")
+            papp.sel_id = run_row["id"]
+            scr = FakeScr(40, 200)
+            pn.render_inspector(scr, pn.Rect(1, 0, 30, 60), papp, focused=False)  # must not raise
+            text = "\n".join(c[2] for c in scr.calls)
+            self.assertIn("engineer", text)

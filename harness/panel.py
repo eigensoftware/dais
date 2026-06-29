@@ -47,7 +47,7 @@ def layout(w, h, *, show_rail=True, show_inspector=True, show_feed=True):
         out["rail"] = Rect(mid_y, 0, mid_h, RAIL_W)
         x = RAIL_W
     if insp_on:
-        insp_w = max(30, (w - x) * 2 // 5)
+        insp_w = max(36, (w - x) // 2)
         work_w = w - x - insp_w
         out["work"] = Rect(mid_y, x, mid_h, work_w)
         out["inspector"] = Rect(mid_y, x + work_w, mid_h, insp_w)
@@ -115,20 +115,50 @@ def render_work(scr, rect, app, focused):
              inner.x + inner.w, attr)
 
 
+def _inspector_attr(app, idx_in_doc, line):
+    """Color: first line (status) in its status color+bold; section headers bold; PASS green,
+    FAIL red; field labels dim; else default."""
+    s = line.strip()
+    low = s.lower()
+    if "fail" in low:
+        return app._cp(2)                                   # red
+    if "pass" in low or s.startswith("+ "):
+        return app._cp(1)                                   # green
+    if s.endswith(":") or s.startswith("runs touching"):
+        return curses.A_BOLD
+    if s.startswith("assignee") or s.startswith("prio"):
+        return curses.A_DIM
+    return 0
+
+
 def render_inspector(scr, rect, app, focused):
-    """Detail of the current selection (app.detail_lines), wrapped to the pane width."""
+    """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
+    Running selections (task=None) show the agent header instead of crashing on task.id."""
     inner = render_pane_title(scr, rect, "INSPECTOR", focused)
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
+    # A running selection has task=None — detail_lines() does task.id and would CRASH.
+    # Show the running agent's header instead (full live-log streaming is the log phase).
+    if sel_row and sel_row.get("kind") == "running":
+        lines = app.running_header(sel_row, app._now()) + \
+            ["", "(live log: press L — coming in the log phase)"]
+    else:
+        lines = app.detail_lines(sel_row)
     wrapped = []
-    for ln in app.detail_lines(sel_row):
+    for ln in lines:
         if disp_width(ln) <= inner.w:
             wrapped.append(ln)
         else:
             wrapped.extend(textwrap.wrap(ln, inner.w) or [""])
     start = max(0, min(app.detail_scroll, max(0, len(wrapped) - 1)))
+    # first wrapped line is the "<id>  <status>" header — color it by the selection's status
+    head_attr = 0
+    if sel_row and sel_row.get("status"):
+        head_attr = app._cp(d.STATUS_PAIR.get(sel_row["status"], 6)) | curses.A_BOLD
     for idx, ln in enumerate(wrapped[start:start + inner.h]):
-        _add(scr, inner.y + idx, inner.x, ln, inner.x + inner.w)
+        doc_i = start + idx
+        attr = head_attr if doc_i == 0 else _inspector_attr(app, doc_i, ln)
+        _add(scr, inner.y + idx, inner.x, ln, inner.x + inner.w, attr)
 
 
 def render_vitals(scr, rect, app):
