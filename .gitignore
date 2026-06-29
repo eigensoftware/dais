@@ -1,0 +1,10 @@
+# the board (created at runtime under DAIS_HOME)
+dais.db
+# a self-contained clone writes its workspace data here when DAIS_HOME is unset
+/projects/
+*.log
+# python
+__pycache__/
+*.pyc
+# dev scratch
+.superpowers/

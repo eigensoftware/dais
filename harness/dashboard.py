@@ -1,0 +1,1367 @@
+#!/usr/bin/env python3
+"""dais dashboard — shared data layer + two renderers.
+
+Powers `dais status` (plain one-shot) and `dais top` (curses TUI).
+Read-only: this module never writes dais.db.
+"""
+import curses
+import datetime as _dt
+import os
+import re
+import signal
+import sqlite3
+import subprocess
+import sys
+import textwrap
+import time
+import unicodedata
+from dataclasses import dataclass, field
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # tool code dir
+HOME = os.environ.get("DAIS_HOME") or ROOT                           # workspace (data) dir
+DB = os.path.join(HOME, "dais.db")
+
+
+# --------------------------------------------------------------------------- #
+# formatting primitives
+# --------------------------------------------------------------------------- #
+def truncate_words(s, width):
+    """Truncate `s` to <= width chars, breaking on a word boundary, with an ellipsis."""
+    s = (s or "").strip()
+    if len(s) <= width:
+        return s
+    if width <= 1:
+        return "…"
+    cut = s[:width - 1]
+    sp = cut.rfind(" ")
+    if sp > 0:
+        cut = cut[:sp]
+    return cut.rstrip() + "…"
+
+
+def collapse_ids(ids, limit=8, sep=", "):
+    """Join ids; past `limit`, show the first `limit` then ' (+N more)'."""
+    ids = list(ids)
+    if len(ids) <= limit:
+        return sep.join(ids)
+    return sep.join(ids[:limit]) + f" (+{len(ids) - limit} more)"
+
+
+def _parse(ts):
+    try:
+        return _dt.datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def minutes_between(a, b):
+    """Whole-minute gap between two 'YYYY-MM-DD HH:MM:SS' stamps, or None."""
+    pa, pb = _parse(a), _parse(b)
+    if pa is None or pb is None:
+        return None
+    return max(0, int((pb - pa).total_seconds() // 60))
+
+
+def seconds_between(a, b):
+    """Whole-second gap between two stamps, or None. Same UTC basis as the DB."""
+    pa, pb = _parse(a), _parse(b)
+    if pa is None or pb is None:
+        return None
+    return max(0, int((pb - pa).total_seconds()))
+
+
+def fmt_elapsed(secs):
+    """Compact live elapsed: '' / '45s' / '12:03' (m:ss) / '1h02m'."""
+    if secs is None:
+        return ""
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}:{secs % 60:02d}"
+    return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+
+def utc_now():
+    """DB-comparable 'now' — runs are stamped with SQLite datetime('now') = UTC, so
+    elapsed/cap math MUST use UTC too (mixing in local time was the 'always 0m' bug)."""
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def to_local_hhmm(utc_ts, with_secs=False):
+    """A UTC DB stamp -> local clock string for display (HH:MM or HH:MM:SS)."""
+    pa = _parse(utc_ts)
+    if pa is None:
+        return "--:--:--" if with_secs else "--:--"
+    local = pa.replace(tzinfo=_dt.timezone.utc).astimezone()
+    return local.strftime("%H:%M:%S" if with_secs else "%H:%M")
+
+
+# --------------------------------------------------------------------------- #
+# data layer
+# --------------------------------------------------------------------------- #
+@dataclass
+class Task:
+    id: str
+    title: str
+    status: str
+    priority: str
+    assignee: str = None
+    pr_url: str = None
+    notes: str = None
+
+
+@dataclass
+class Run:
+    started_at: str
+    agent: str
+    status: str
+    summary: str = None
+    log_path: str = None
+    dur_min: int = None
+    project: str = None
+
+
+@dataclass
+class Project:
+    name: str
+    stage_goal: str
+    running: list = field(default_factory=list)
+    tasks_by_status: dict = field(default_factory=dict)
+    recent_runs: list = field(default_factory=list)
+
+
+@dataclass
+class Snapshot:
+    projects: list
+    recent_runs: list
+    cap_state: bool
+    ts: str
+
+
+def connect(db=DB):
+    conn = sqlite3.connect(db, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def running_agents(project_dir, is_alive=_pid_alive):
+    out = []
+    try:
+        names = os.listdir(project_dir)
+    except OSError:
+        return out
+    for n in names:
+        if not n.startswith(".lock-"):
+            continue
+        agent = n[len(".lock-"):]
+        try:
+            with open(os.path.join(project_dir, n)) as fh:
+                pid = int(fh.read().strip())
+        except (OSError, ValueError):
+            continue
+        if is_alive(pid):
+            out.append(agent)
+    return sorted(out)
+
+
+def stage_goal(root, name):
+    path = os.path.join(root, "projects", name, "project.yaml")
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.startswith("stage_goal:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+_PRIO = ("CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
+         "WHEN 'medium' THEN 2 ELSE 3 END")
+
+
+def load_snapshot(conn, root=HOME, now=None, recent=6):
+    now = now or utc_now()
+    projects = []
+    names = [r["project"] for r in conn.execute(
+        "SELECT DISTINCT project FROM tasks ORDER BY project")]
+    for name in names:
+        rows = conn.execute(
+            "SELECT id,title,status,priority,assignee,pr_url,notes FROM tasks "
+            "WHERE project=? ORDER BY " + _PRIO + ", id", (name,)).fetchall()
+        by_status = {}
+        for r in rows:
+            by_status.setdefault(r["status"], []).append(Task(
+                id=r["id"], title=r["title"], status=r["status"],
+                priority=r["priority"], assignee=r["assignee"],
+                pr_url=r["pr_url"], notes=r["notes"]))
+        run_rows = conn.execute(
+            "SELECT started_at,ended_at,agent,status,summary,log_path FROM runs "
+            "WHERE project=? ORDER BY id DESC LIMIT ?", (name, recent)).fetchall()
+        proj_runs = [Run(started_at=r["started_at"], agent=r["agent"],
+                         status=r["status"], summary=r["summary"],
+                         log_path=r["log_path"], project=name,
+                         dur_min=minutes_between(r["started_at"], r["ended_at"]))
+                     for r in run_rows]
+        running = []
+        for agent in running_agents(os.path.join(root, "projects", name)):
+            since = conn.execute(
+                "SELECT started_at FROM runs WHERE project=? AND agent=? "
+                "AND status='running' ORDER BY id DESC LIMIT 1",
+                (name, agent)).fetchone()
+            running.append((agent, since["started_at"] if since else None))
+        projects.append(Project(name=name, stage_goal=stage_goal(root, name),
+                                running=running, tasks_by_status=by_status,
+                                recent_runs=proj_runs))
+    grows = conn.execute(
+        "SELECT started_at,ended_at,project,agent,status,summary,log_path FROM runs "
+        "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()
+    recent_runs = [Run(started_at=r["started_at"],
+                       agent=f"{r['project']}/{r['agent']}",
+                       status=r["status"], summary=r["summary"],
+                       log_path=r["log_path"], project=r["project"],
+                       dur_min=minutes_between(r["started_at"], r["ended_at"]))
+                   for r in grows]
+    capped = conn.execute(
+        "SELECT COUNT(*) c FROM runs WHERE status='capped' "
+        "AND started_at > datetime(?, '-90 minutes')", (now,)).fetchone()["c"]
+    return Snapshot(projects=projects, recent_runs=recent_runs,
+                    cap_state=capped > 0, ts=now)
+
+
+# --------------------------------------------------------------------------- #
+# plain renderer (the cleaned-up one-shot `dais status`)
+# --------------------------------------------------------------------------- #
+_CANON_NAMED = {"needs_qa", "ready", "changes_requested", "ready_to_merge",
+                "needs_review", "proposed", "blocked", "done", "deferred", "backlog",
+                "cancelled", "doing"}
+
+
+def color_enabled():
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def colors(enabled):
+    keys = ("C0", "CB", "CD", "CR", "CG", "CY", "CM", "CC", "CW")
+    if not enabled:
+        return {k: "" for k in keys}
+    return dict(C0="\033[0m", CB="\033[1m", CD="\033[2m", CR="\033[31m",
+                CG="\033[32m", CY="\033[33m", CM="\033[35m", CC="\033[36m",
+                CW="\033[97m")
+
+
+def _ids(tasks):
+    return [t.id for t in tasks]
+
+
+def render_plain(snap, color=None):
+    if color is None:
+        color = color_enabled()
+    c = colors(color)
+    out = []
+
+    def P(s=""):
+        out.append(s)
+
+    P()
+    P(f"{c['CB']}{c['CM']}═══════════════ DAIS · STATUS ═══════════════{c['C0']}")
+    P()
+    for p in snap.projects:
+        bs = p.tasks_by_status
+        P(f"{c['CB']}{c['CW']}▌ {p.name}{c['C0']}")
+        if p.stage_goal:
+            P(f"  {c['CD']}{truncate_words(p.stage_goal, 84)}{c['C0']}")
+        P()
+        if p.running:
+            for agent, since in p.running:
+                el = fmt_elapsed(seconds_between(since, snap.ts))
+                P(f"  {c['CG']}{c['CB']}▶ RUNNING NOW{c['C0']}  {agent}  "
+                  f"{c['CD']}({el} · since {to_local_hhmm(since)}){c['C0']}")
+        else:
+            P(f"  {c['CD']}▶ idle{c['C0']}")
+        if snap.cap_state:
+            P(f"  {c['CY']}⏸ cooling down — recent cap "
+              f"(resumes when the window frees){c['C0']}")
+        rtm = _ids(bs.get("ready_to_merge", []))
+        if rtm:
+            P(f"  {c['CG']}{c['CB']}⏳ MERGE{c['C0']} "
+              f"{c['CG']}— QA-approved, your call:{c['C0']} "
+              f"{c['CB']}{collapse_ids(rtm, 12)}{c['C0']}")
+        nr = _ids(bs.get("needs_review", []))
+        if nr:
+            P(f"  {c['CW']}{c['CB']}📋 REVIEW{c['C0']} "
+              f"{c['CW']}— deliverable ready (no PR), your call:{c['C0']} "
+              f"{c['CB']}{collapse_ids(nr, 12)}{c['C0']}")
+        prop = _ids(bs.get("proposed", []))
+        if prop:
+            P(f"  {c['CM']}{c['CB']}🧭 PROPOSED{c['C0']} "
+              f"{c['CM']}— Lead initiative awaiting your approve before build "
+              f"(dais approve <id>):{c['C0']} "
+              f"{c['CB']}{collapse_ids(prop, 12)}{c['C0']}")
+        blk = _ids(bs.get("blocked", []))
+        if blk:
+            P(f"  {c['CR']}⛔ BLOCKED on you:{c['C0']}  {collapse_ids(blk, 12)}")
+        nq = _ids(bs.get("needs_qa", []))
+        if nq:
+            P(f"  {c['CC']}🔍 awaiting QA:{c['C0']}  {collapse_ids(nq, 12)}")
+        eng = _ids(bs.get("ready", []) + bs.get("changes_requested", []))
+        if eng:
+            P(f"  {c['CY']}🔧 queued for Engineer:{c['C0']}  {collapse_ids(eng, 12)}")
+        for st in sorted(bs):
+            if st in _CANON_NAMED:
+                continue
+            ids = _ids(bs[st])
+            if not ids:
+                continue
+            if st == "needs_legal":
+                lbl, oc = "⚖️  awaiting legal review", c['CM']
+            else:
+                lbl, oc = f"• awaiting {st}", c['CC']
+            P(f"  {oc}{lbl}:{c['C0']}  {collapse_ids(ids, 12)}")
+        dn = _ids(bs.get("done", []))
+        if dn:
+            P(f"  {c['CG']}✅ DONE ({len(dn)}):{c['C0']}  "
+              f"{c['CD']}{collapse_ids(dn, 8)}{c['C0']}")
+        df = _ids(bs.get("deferred", []))
+        if df:
+            P(f"  {c['CM']}🔒 deferred (founder-parked):{c['C0']}  "
+              f"{c['CD']}{collapse_ids(df, 8)}{c['C0']}")
+        P(f"  {c['CD']}📦 backlog: {len(bs.get('backlog', []))}  ·  "
+          f"cancelled: {len(bs.get('cancelled', []))}{c['C0']}")
+        P()
+    P(f"  {c['CB']}recent runs{c['C0']} {c['CD']}"
+      f"(newest first · time · agent · result · dur · what it did){c['C0']}")
+    for r in snap.recent_runs:
+        t = to_local_hhmm(r.started_at)
+        if r.status == "succeeded":
+            rc = c['CG']
+        elif r.status in ("capped", "failed"):
+            rc = c['CR']
+        elif r.status == "interrupted":
+            rc = c['CY']
+        else:
+            rc = c['C0']
+        dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
+        summ = (r.summary or ("(running)" if r.status == "running" else "—")).replace("→", " → ")
+        P(f"    {c['CD']}{t}{c['C0']}  {r.agent:<20} {rc}{r.status:<12}{c['C0']} "
+          f"{c['CD']}{dur:<4}{c['C0']} {summ}")
+    P(f"  {c['CD']}history: git -C <project repo> log --oneline | head"
+      f"   ·   a run: dais logs <project>{c['C0']}")
+    P(f"{c['CB']}{c['CM']}"
+      f"═══════════════════════════════════════════════{c['C0']}")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------- #
+# TUI-support pure functions
+# --------------------------------------------------------------------------- #
+QUEUE_ORDER = ["ready_to_merge", "needs_review", "proposed", "blocked", "needs_qa",
+               "changes_requested", "ready"]
+
+# status -> curses color-pair id (pairs defined in App._init_colors). Mirrors the
+# plain renderer's palette: merge=green, blocked=red, qa=cyan, engineer=yellow,
+# deferred=magenta, review=white (a founder-gate, like merge, but for non-PR work).
+STATUS_PAIR = {"ready_to_merge": 1, "needs_review": 6, "proposed": 5, "blocked": 2,
+               "needs_qa": 3, "changes_requested": 4, "ready": 4, "deferred": 5}
+
+# a live-log line worth flagging red (a failed command, a raised error, a non-zero exit)
+_LOG_ERR_RE = re.compile(r"exit code [1-9]|\bfatal\b|traceback|exception|\berror\b", re.I)
+
+
+def action_queue(snap):
+    rows = []
+    for st in QUEUE_ORDER:
+        for p in snap.projects:
+            for t in p.tasks_by_status.get(st, []):
+                rows.append((p.name, t, st))
+    return rows
+
+
+def runs_touching(runs, task_id):
+    return [r for r in runs if r.summary and task_id in r.summary]
+
+
+def filter_rows(rows, term, key):
+    term = term.lower()
+    return [r for r in rows if term in (key(r) or "").lower()]
+
+
+def short_summary(summary, limit=1):
+    """Collapse a comma-joined run summary to first item + ' (+N more)', spacing arrows."""
+    if not summary:
+        return ""
+    parts = [p.strip() for p in summary.split(",") if p.strip()]
+    if len(parts) <= limit:
+        out = summary
+    else:
+        out = ", ".join(parts[:limit]) + f"  (+{len(parts) - limit} more)"
+    return out.replace("→", " → ")
+
+
+# --------------------------------------------------------------------------- #
+# running-visibility + list-clarity helpers (pure)
+# --------------------------------------------------------------------------- #
+# In-flight task heuristic: a builder parks its task in 'doing' while working; a
+# reviewer works its queue in place. First non-empty wins (one agent per project).
+_INFLIGHT_ORDER = ["doing", "needs_qa", "changes_requested", "needs_review"]
+
+
+def running_task_id(project):
+    """Best guess at the task a running agent is working, or '' (the live log is the
+    real signal). One agent per project, so this is project-scoped."""
+    for st in _INFLIGHT_ORDER:
+        tasks = project.tasks_by_status.get(st)
+        if tasks:
+            return tasks[0].id
+    return ""
+
+
+def running_threads(snap, now=None):
+    """Every concurrent agent across all projects -> dicts for the RUNNING band."""
+    now = now or utc_now()
+    out = []
+    for p in snap.projects:
+        live_log = (p.recent_runs[0].log_path
+                    if p.recent_runs and p.recent_runs[0].status == "running" else None)
+        for agent, since in p.running:
+            out.append(dict(project=p.name, agent=agent, since=since,
+                            secs=seconds_between(since, now),
+                            task=running_task_id(p), log_path=live_log))
+    return out
+
+
+def find_task(snap, project, task_id):
+    """The Task object for (project, task_id), or None."""
+    if not task_id:
+        return None
+    for p in snap.projects:
+        if p.name == project:
+            for lst in p.tasks_by_status.values():
+                for t in lst:
+                    if t.id == task_id:
+                        return t
+    return None
+
+
+def tail_lines(path, n=15, maxbytes=65536):
+    """Last n lines of a (possibly growing) log file; reads only the tail."""
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - maxbytes))
+            data = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    return data.splitlines()[-n:]
+
+
+def last_log_line(path, width=58):
+    """Last non-empty log line (trimmed) — the 'what is it doing right now' signal."""
+    for ln in reversed(tail_lines(path, 40)):
+        s = ln.strip()
+        if s:
+            return s[:width]
+    return ""
+
+
+def file_sig(path):
+    """(size, mtime) of a file, or None — a cheap change-token for caching."""
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime)
+    except OSError:
+        return None
+
+
+def log_lines(path, max_lines=20000, maxbytes=8_000_000):
+    """ALL lines of a log so it can be scrolled back to the first line. Reads the
+    whole file at normal sizes; only a pathologically huge log is clipped to its
+    last maxbytes (and last max_lines), in which case line 1 here isn't the run's
+    real first line — the scroll indicator flags that with a leading '…'."""
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            truncated = size > maxbytes
+            if truncated:
+                fh.seek(size - maxbytes)
+                fh.readline()             # drop the partial first line
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+        truncated = True
+    if truncated and lines:
+        lines = ["… (earlier output trimmed) …"] + lines
+    return lines
+
+
+def log_window(total, height, top, follow):
+    """Resolve the visible slice of a scrollable log.
+
+    Returns (start, top, follow, max_top). `follow` keeps the view pinned to the
+    live tail; scrolling down past the end re-pins it. `top` is the first visible
+    display line when not following; `max_top` is the furthest-back top (so Home
+    jumps to 0 and the indicator can show position)."""
+    height = max(1, height)
+    max_top = max(0, total - height)
+    if follow or top >= max_top:
+        return (max_top, max_top, True, max_top)
+    return (max(0, top), max(0, min(top, max_top)), False, max_top)
+
+
+# left-pane per-project shape badges: M=merge-ready R=review P=proposed B=blocked Q=qa E=eng-queue
+_BADGES = [("M", ("ready_to_merge",)), ("R", ("needs_review",)), ("P", ("proposed",)),
+           ("B", ("blocked",)), ("Q", ("needs_qa",)), ("E", ("ready", "changes_requested"))]
+
+
+def project_badges(project):
+    bs = project.tasks_by_status
+    parts = []
+    for letter, statuses in _BADGES:
+        n = sum(len(bs.get(s, [])) for s in statuses)
+        if n:
+            parts.append(f"{letter}{n}")
+    return " ".join(parts)
+
+
+def scroll_indicator(base, shown, total):
+    """'12-20/63' when the list overflows the viewport, else ''."""
+    if total <= shown or shown <= 0:
+        return ""
+    return f"{base + 1}-{min(base + shown, total)}/{total}"
+
+
+# --------------------------------------------------------------------------- #
+# control helpers (T1-T3) — pure; the App methods shell out to ./dais
+# --------------------------------------------------------------------------- #
+WATCH_PID = os.path.join("projects", ".watch.pid")
+WATCH_LOG = os.path.join("projects", ".watch.log")
+PAUSED = os.path.join("projects", ".paused")
+
+
+def parse_pr(pr_url):
+    """Extract a PR number from a pr_url ('/pull/42' or a trailing number), else ''."""
+    if not pr_url:
+        return ""
+    m = re.search(r"/pull/(\d+)", pr_url) or re.search(r"\b(\d+)\s*$", pr_url)
+    return m.group(1) if m else ""
+
+
+def project_roles(root, project):
+    """Role names declared in projects/<project>/roles, in file order (run-a-role picker)."""
+    roles = []
+    try:
+        with open(os.path.join(root, "projects", project, "roles")) as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    roles.append(line.split()[0])
+    except OSError:
+        pass
+    return roles
+
+
+def watch_state(root):
+    """Return (state, interval, par): 'paused' if the sentinel is set, else 'running'
+    if .watch.pid holds a live pid, else 'stopped'. interval/par come from the pidfile."""
+    paused = os.path.exists(os.path.join(root, PAUSED))
+    interval = par = None
+    alive = False
+    try:
+        with open(os.path.join(root, WATCH_PID)) as fh:
+            parts = fh.read().split()
+        pid = int(parts[0])
+        interval = parts[1] if len(parts) > 1 else None
+        par = parts[2] if len(parts) > 2 else None
+        alive = _pid_alive(pid)
+    except (OSError, ValueError, IndexError):
+        alive = False
+    if paused:
+        return ("paused", interval, par)
+    if alive:
+        return ("running", interval, par)
+    return ("stopped", interval, par)
+
+
+# --------------------------------------------------------------------------- #
+# curses TUI (`dais top`) — manual-smoke verified
+# --------------------------------------------------------------------------- #
+def _open_cmd():
+    if sys.platform == "darwin":
+        return "open"
+    from shutil import which
+    return "xdg-open" if which("xdg-open") else None
+
+
+def _wrap(text, width):
+    import textwrap
+    return textwrap.wrap(text, width) or [""]
+
+
+def _char_cols(ch):
+    """Display columns for one character: 0 for combining/zero-width/control,
+    2 for East-Asian wide/fullwidth, else 1."""
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def disp_width(s):
+    """Total display columns a string occupies in a monospace terminal."""
+    return sum(_char_cols(c) for c in s)
+
+
+def clip_cols(s, cols):
+    """Longest prefix of `s` that fits in `cols` display columns, with control
+    characters neutralised to spaces. Truncating by display WIDTH (not character
+    count) — and dropping escapes/tabs — is what stops a wide glyph or stray
+    control sequence from overrunning a pane and wrapping into the next row,
+    which is the source of the curses 'bleed' artifacts."""
+    if cols <= 0:
+        return ""
+    out, used = [], 0
+    for ch in s:
+        if ord(ch) < 32 or ord(ch) == 127:
+            ch = " "
+        cw = _char_cols(ch)
+        if used + cw > cols:
+            break
+        out.append(ch)
+        used += cw
+    return "".join(out)
+
+
+def pad_cols(s, cols):
+    """clip_cols, then pad with spaces to exactly `cols` display columns so the
+    row (and any reverse-video highlight) clears its full width every frame."""
+    clipped = clip_cols(s, cols)
+    return clipped + " " * max(0, cols - disp_width(clipped))
+
+
+def wrap_cols(s, cols, subsequent_indent=""):
+    """Wrap `s` into lines of at most `cols` display columns. Breaks on a space
+    near the right edge when one is there, hard-breaks an over-long token (paths,
+    URLs, JSON) otherwise, and prefixes continuation lines with `subsequent_indent`
+    so a wrapped entry still reads as one. Width-aware, so wrapping never overruns
+    the pane the way a naive char-count wrap would."""
+    if cols <= 0:
+        return [s]
+    s = s.rstrip()
+    if not s:
+        return [""]
+    out, indent = [], ""
+    while s:
+        budget = max(1, cols - disp_width(indent))
+        fit = clip_cols(s, budget)
+        if len(fit) >= len(s):
+            out.append(indent + s)
+            break
+        brk = s[:len(fit)].rfind(" ")
+        if brk > budget // 3:                 # only break on a space that isn't too early
+            line, s = s[:brk], s[brk + 1:]
+        else:
+            line, s = s[:len(fit)], s[len(fit):]
+        out.append(indent + line)
+        indent = subsequent_indent
+    return out or [""]
+
+
+def _add(scr, y, x, s, w, attr=0):
+    """Write `s` at (y, x), clipped to the columns available before the row's
+    last cell. Clipping by display width (and never writing the final column)
+    keeps a wide glyph or stray escape from overrunning into the next line."""
+    try:
+        scr.addstr(y, x, clip_cols(s, max(0, w - x - 1)), attr)
+    except curses.error:
+        pass
+
+
+class App:
+    def __init__(self, scr, interval=2.0, root=HOME):
+        self.scr = scr
+        self.interval = max(0.5, interval)
+        self.root = root
+        self.conn = connect()
+        self.snap = None
+        self.mode = "project"          # "project" | "queue"
+        self.expanded = set()           # project names expanded in project mode
+        self.focus = "left"            # "left" | "right"
+        self.sel_id = None              # selection tracked by id across refreshes
+        self.detail_scroll = 0
+        # live-log scrolling: follow the tail by default; scroll up to read history
+        self.log_follow = True
+        self.log_top = 0                # first visible display line when not following
+        self._log_h = 1                 # last log viewport height (for PgUp/Dn in handle)
+        self._log_total = 0             # last total display lines (for End/indicator)
+        self._log_cache_key = None      # (path, file_sig, dw) → cached wrapped+coloured lines
+        self._log_cache = []
+        self.filter = ""
+        self.filtering = False
+        self._flash_msg = ""
+        self._flash_until = 0.0
+        self.last_fetch = 0.0
+        self.has_color = False
+
+    def _reset_log_scroll(self):
+        self.log_follow = True
+        self.log_top = 0
+
+    def _log_disp(self, path, dw):
+        """Wrapped + colour-tagged display lines for a log, cached on (path, size,
+        mtime, width) so we only re-read/re-wrap when the file grows or the pane
+        resizes — not on every 250ms repaint."""
+        key = (path, file_sig(path), dw)
+        if key != self._log_cache_key:
+            disp = []
+            for ln in log_lines(path):
+                attr = self._log_attr(ln)
+                lead = len(ln) - len(ln.lstrip(" "))
+                cont = " " * min(lead + 3, 9)
+                for piece in wrap_cols(ln, dw, subsequent_indent=cont):
+                    disp.append((piece, attr))
+            self._log_cache, self._log_cache_key = disp, key
+        return self._log_cache
+
+    @property
+    def flash(self):
+        return self._flash_msg
+
+    @flash.setter
+    def flash(self, msg):
+        # any feedback message stays visible ~4s, surviving the 2s auto-refresh
+        self._flash_msg = msg
+        self._flash_until = (time.monotonic() + 4.0) if msg else 0.0
+
+    # ---- color ----
+    def _init_colors(self):
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+        except curses.error:
+            self.has_color = False
+            return
+        self.has_color = True
+        palette = {1: curses.COLOR_GREEN, 2: curses.COLOR_RED,
+                   3: curses.COLOR_CYAN, 4: curses.COLOR_YELLOW,
+                   5: curses.COLOR_MAGENTA, 6: curses.COLOR_WHITE}
+        for pid, col in palette.items():
+            curses.init_pair(pid, col, -1)
+        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
+
+    def _cp(self, n):
+        return curses.color_pair(n) if self.has_color else 0
+
+    def _now(self):
+        # UTC to match DB stamps; recomputed each frame so running clocks tick live.
+        return utc_now()
+
+    def _row_attr(self, r):
+        if r["kind"] == "header":
+            return curses.A_DIM | self._cp(STATUS_PAIR.get(r["status"], 6))
+        if r["kind"] == "project":
+            return curses.A_BOLD | (self._cp(1) if r.get("running") else self._cp(6))
+        return self._cp(STATUS_PAIR.get(r["status"], 6))
+
+    def _line_attr(self, ln):
+        s = ln.strip()
+        if s.startswith("▶"):
+            return self._cp(1)
+        head = s.split(":", 1)[0]
+        if head in STATUS_PAIR:
+            return self._cp(STATUS_PAIR[head])
+        words = s.split()
+        if len(words) >= 2 and words[1] in STATUS_PAIR:
+            return self._cp(STATUS_PAIR[words[1]])
+        return 0
+
+    def _log_attr(self, line):
+        """Colour a live-log line by its fmt-stream marker so the stream is
+        scannable: 💬 assistant narration (cyan), 🔧 tool call (yellow),
+        ↳ tool output (dim grey), ✓ done (green bold); anything that smells
+        like a failure (errors, non-zero exit) goes red so it jumps out."""
+        s = line.lstrip()
+        if s.startswith("💬"):
+            return self._cp(3)
+        if s.startswith("🔧"):
+            return self._cp(4)
+        if s.startswith("✓"):
+            return self._cp(1) | curses.A_BOLD
+        if s.startswith("↳"):
+            return self._cp(2) if _LOG_ERR_RE.search(s) else (self._cp(6) | curses.A_DIM)
+        return self._cp(2) if _LOG_ERR_RE.search(s) else 0
+
+    # ---- data ----
+    def refresh(self):
+        try:
+            self.snap = load_snapshot(self.conn, root=self.root)
+        except sqlite3.Error as e:
+            self.flash = f"db busy: {e}"      # keep last snapshot (flash auto-expires)
+        self.last_fetch = time.monotonic()
+
+    def _header_row(self, label, status):
+        return dict(id=f"__hdr::{label}", kind="header", project=None, task=None,
+                    status=status, running=False, sel=False, label=label)
+
+    def left_rows(self):
+        """Rows: dicts {id, kind, label, project, task, status, running, sel}.
+        kind in {running, project, task, header}; headers aren't selectable (sel=False).
+        Live threads lead as a '▶ running' group (select one to watch its log); the rest
+        is grouped by status with counts and project shape-badges (M/R/B/Q/E)."""
+        rows = []
+        if not self.snap:
+            return rows
+        now = self._now()
+        threads = running_threads(self.snap, now)
+        running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
+        if threads:
+            rows.append(self._header_row(f"▶ running ({len(threads)})", "ready_to_merge"))
+            for t in threads:
+                tid = t["task"] or "—"
+                rows.append(dict(id=f"run::{t['project']}", kind="running",
+                                 project=t["project"], agent=t["agent"], since=t["since"],
+                                 log_path=t["log_path"], task_id=t["task"], task=None,
+                                 status="doing", running=True, sel=True,
+                                 label=f"  {tid:<7} {t['project'][:9]:<9} "
+                                       f"{t['agent']} {fmt_elapsed(t['secs'])}"))
+
+        def keep(proj, task):                 # don't repeat a thread's task in its status group
+            return (proj, task.id) not in running_ids
+
+        if self.mode == "queue":
+            byst = {}
+            for (proj, task, st) in action_queue(self.snap):
+                if keep(proj, task):
+                    byst.setdefault(st, []).append((proj, task))
+            for st in QUEUE_ORDER:
+                items = byst.get(st)
+                if not items:
+                    continue
+                rows.append(self._header_row(f"{st} ({len(items)})", st))
+                for (proj, task) in items:
+                    title = truncate_words(task.title, 40)
+                    rows.append(dict(id=task.id, kind="task", project=proj, task=task,
+                                     status=st, running=False, sel=True,
+                                     label=f"  {task.id:<7} {proj[:9]:<9} {title}"))
+        else:
+            for p in self.snap.projects:
+                run = ""
+                if p.running:
+                    a, since = p.running[0]
+                    run = f"  ▶ {fmt_elapsed(seconds_between(since, now))}"
+                badges = project_badges(p)
+                bl = f"   {badges}" if badges else ""
+                rows.append(dict(id=p.name, kind="project", project=p.name, task=None,
+                                 status=None, running=bool(p.running), sel=True,
+                                 label=f"{p.name}{run}{bl}"))
+                if p.name in self.expanded:
+                    byst = {}
+                    for (proj, task, st) in action_queue(self.snap):
+                        if proj == p.name and keep(proj, task):
+                            byst.setdefault(st, []).append(task)
+                    for st in QUEUE_ORDER:
+                        items = byst.get(st)
+                        if not items:
+                            continue
+                        rows.append(self._header_row(f"  {st} ({len(items)})", st))
+                        for task in items:
+                            title = truncate_words(task.title, 44)
+                            rows.append(dict(id=task.id, kind="task", project=p.name,
+                                             task=task, status=st, running=False, sel=True,
+                                             label=f"    {task.id:<7} {title}"))
+        if self.filter:                       # filtering flattens to matching task rows
+            rows = [r for r in rows if r["kind"] in ("task", "running")]
+            rows = filter_rows(rows, self.filter, key=lambda r: r["label"])
+        return rows
+
+    def _selectable(self, rows):
+        return [i for i, r in enumerate(rows) if r.get("sel", True)]
+
+    def _selected(self, rows):
+        for i, r in enumerate(rows):
+            if r["id"] == self.sel_id and r.get("sel", True):
+                return i, r
+        sel = self._selectable(rows)
+        return (sel[0], rows[sel[0]]) if sel else (0, None)
+
+    def _move_sel(self, rows, sel_i, delta):
+        """Id of the next/prev SELECTABLE row (skips status-group headers)."""
+        sels = self._selectable(rows)
+        if not sels:
+            return self.sel_id
+        pos = sels.index(sel_i) if sel_i in sels else 0
+        pos = max(0, min(pos + delta, len(sels) - 1))
+        return rows[sels[pos]]["id"]
+
+    # ---- detail ----
+    def detail_lines(self, row):
+        if not row or not self.snap:
+            return ["(nothing selected)"]
+        now = self._now()
+        by_name = {p.name: p for p in self.snap.projects}
+        if row["kind"] == "header":
+            return [row["label"].strip(), "", "(status group — pick a task below)"]
+        if row["kind"] == "project":
+            p = by_name[row["project"]]
+            out = [p.name, truncate_words(p.stage_goal, 60), ""]
+            if p.running:
+                for a, since in p.running:
+                    el = fmt_elapsed(seconds_between(since, now))
+                    tid = running_task_id(p)
+                    suffix = f"  · {tid}  (↑/k to the ▶ running row up top for the live log)" if tid else ""
+                    out.append(f"▶ {a} running {el}{suffix}")
+            else:
+                out.append("idle")
+            out.append("")
+            for st in QUEUE_ORDER + ["done", "deferred", "backlog", "cancelled"]:
+                ids = [t.id for t in p.tasks_by_status.get(st, [])]
+                if ids:
+                    out.append(f"{st}: {collapse_ids(ids, 10)}")
+            out += ["", "recent runs:"]
+            for r in p.recent_runs:
+                dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
+                out.append(f"  {to_local_hhmm(r.started_at):<5} {r.agent:<10} "
+                           f"{r.status:<11} {dur:<4} {short_summary(r.summary)}")
+            return out
+        task = row["task"]
+        p = by_name[row["project"]]
+        out = [f"{task.id}  {task.status}",
+               f'"{task.title}"',
+               f"assignee {task.assignee or '-'} · prio {task.priority} · "
+               f"pr {task.pr_url or '(none)'}",
+               ""]
+        if task.notes:
+            out.append("notes:")
+            out += ["  " + ln for ln in _wrap(task.notes, 56)]
+            out.append("")
+        out.append(f"runs touching {task.id}:")
+        for r in runs_touching(p.recent_runs, task.id):
+            dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
+            out.append(f"  {to_local_hhmm(r.started_at):<5} {r.agent:<10} "
+                       f"{r.status:<11} {dur:<4}")
+        return out
+
+    def running_header(self, row, now):
+        """Fixed header lines shown above a running thread's live log (the log itself is
+        rendered separately so a streaming tail never pushes this around)."""
+        task = find_task(self.snap, row["project"], row.get("task_id"))
+        el = fmt_elapsed(seconds_between(row["since"], now))
+        tid = row.get("task_id") or "—"
+        head = [f"{tid}  {row['project']}/{row['agent']} · running {el}"]
+        if task:
+            head.append(f'"{truncate_words(task.title, 56)}"')
+        return head
+
+    # ---- draw ----
+    def draw(self):
+        scr = self.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        now = self._now()
+        cap = " · ⏸ COOLING" if (self.snap and self.snap.cap_state) else ""
+        clk = to_local_hhmm(self.snap.ts, with_secs=True) if self.snap else ""
+        wstate, wint, wpar = watch_state(self.root)
+        if wstate == "running":
+            badge = f"● watch {wint or '?'}s ×{wpar or '?'}"
+        elif wstate == "paused":
+            badge = "⏸ PAUSED"
+        else:
+            badge = "○ watch stopped"
+        threads = running_threads(self.snap, now) if self.snap else []
+        run = f" · ▶ {len(threads)} running" if threads else ""
+        head = f" DAIS · LIVE  {clk} · ↻{self.interval:g}s · {badge}{run}{cap}"
+        if self.filtering:
+            head += f"   /{self.filter}_"
+        elif self.flash and time.monotonic() < self._flash_until:
+            head += f"   — {self.flash}"
+        head_attr = (self._cp(7) | curses.A_BOLD) if self.has_color else curses.A_REVERSE
+        _add(scr, 0, 0, pad_cols(head, w - 1), w, head_attr)
+
+        rows = self.left_rows()
+        sel_i, sel_row = self._selected(rows)
+        self.sel_id = sel_row["id"] if sel_row else None
+        body_top = 1
+        body_h = max(1, h - body_top - 2)
+        wide = w >= 80
+        split = max(30, w * 2 // 5) if wide else w
+        # left pane (scrolls with selection)
+        base = max(0, sel_i - body_h + 1) if rows else 0
+        view = rows[base:][:body_h] if rows else []
+        for idx, r in enumerate(view):
+            attr = self._row_attr(r)
+            if (base + idx) == sel_i and self.focus == "left" and r.get("sel", True):
+                attr |= curses.A_REVERSE
+            _add(scr, body_top + idx, 0, pad_cols(r["label"], split - 1), split, attr)
+        # right pane (detail)
+        if wide:
+            dw = w - split - 2
+            for y in range(body_top, body_top + body_h):
+                _add(scr, y, split - 1, "│", w, curses.A_DIM)
+            if sel_row and sel_row.get("kind") == "running":
+                # fixed header + a divider/scroll-indicator row, then the live log:
+                # follows the newest line by default; scroll up (tab to the pane,
+                # then j/k · PgUp/Dn · Home/End) to read history back to line one.
+                yy = body_top
+                for ln in self.running_header(sel_row, now):
+                    if yy >= body_top + body_h:
+                        break
+                    _add(scr, yy, split + 1, ln, w, self._cp(1) | curses.A_BOLD)
+                    yy += 1
+                log_h = max(0, body_top + body_h - yy - 1)   # reserve a row for the divider
+                disp = self._log_disp(sel_row.get("log_path"), dw)
+                total = len(disp)
+                start, self.log_top, self.log_follow, max_top = log_window(
+                    total, log_h, self.log_top, self.log_follow)
+                self._log_h, self._log_total = log_h, total
+                hot = (self.focus == "right")               # is this pane taking scroll keys?
+                if total == 0:
+                    bar = "── live log ── (no output yet)"
+                elif self.log_follow:
+                    bar = "── live log ── following" + ("  ·  k to scroll back" if hot else "")
+                else:
+                    bar = (f"── log {start + 1}-{min(start + log_h, total)}/{total} ── "
+                           + ("j/k·PgUp/Dn·Home·End=live" if hot else "tab to scroll"))
+                _add(scr, yy, split + 1, bar, w, self._cp(3) | curses.A_BOLD)
+                yy += 1
+                for piece, attr in disp[start:start + log_h]:
+                    _add(scr, yy, split + 1, piece, w, attr)
+                    yy += 1
+            else:
+                wrapped = []
+                for ln in self.detail_lines(sel_row):
+                    if len(ln) <= dw:
+                        wrapped.append(ln)
+                        continue
+                    indent = " " * (len(ln) - len(ln.lstrip()))
+                    wrapped.extend(textwrap.wrap(ln, dw, subsequent_indent=indent) or [""])
+                self.detail_scroll = max(0, min(self.detail_scroll, max(0, len(wrapped) - 1)))
+                shown = wrapped[self.detail_scroll:self.detail_scroll + body_h]
+                for idx, ln in enumerate(shown):
+                    attr = self._line_attr(ln)
+                    if self.focus == "right" and idx == 0:
+                        attr |= curses.A_REVERSE
+                    _add(scr, body_top + idx, split + 1, ln, w, attr)
+        sind = scroll_indicator(base, len(view), len(rows))
+        nav = " j/k move · enter expand · tab pane · g group · / filter · q quit"
+        if sind:
+            nav += f"   {sind}"
+        act = " w watch · p pause · t tick · R run-role · c cancel · a approve · l log · o PR"
+        _add(scr, h - 2, 0, pad_cols(nav, w - 1), w, curses.A_REVERSE)
+        _add(scr, h - 1, 0, pad_cols(act, w - 1), w, curses.A_REVERSE)
+        scr.refresh()
+
+    # ---- input ----
+    def launch_logs(self, row):
+        if not row or not self.snap:
+            return
+        p = {pr.name: pr for pr in self.snap.projects}[row["project"]]
+        path = p.recent_runs[0].log_path if p.recent_runs else None
+        if not path or not os.path.exists(path):
+            self.flash = "no log file for this project"
+            return
+        pager = os.environ.get("PAGER", "less")
+        curses.endwin()
+        subprocess.call([pager, "+G", path])
+        self.scr.refresh()
+        curses.doupdate()
+
+    def launch_pr(self, row):
+        url = row and row["task"] and row["task"].pr_url
+        if not url:
+            self.flash = "no PR url for this item"
+            return
+        cmd = _open_cmd()
+        if not cmd:
+            self.flash = "no opener (open/xdg-open) found"
+            return
+        subprocess.Popen([cmd, url], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+
+    # ---- control (T1-T3): every action shells out to ./dais ----
+    def _dais(self):
+        return os.path.join(ROOT, "dais")   # the binary is TOOL CODE -> DAIS_ROOT, not the data dir
+
+    def _confirm(self, msg):
+        h, w = self.scr.getmaxyx()
+        box = f"  {msg} [y/N]  "
+        self.scr.timeout(-1)
+        _add(self.scr, h // 2, max(0, (w - disp_width(box)) // 2), box,
+             w, curses.A_REVERSE | curses.A_BOLD)
+        self.scr.refresh()
+        ch = self.scr.getch()
+        self.scr.timeout(250)
+        return ch in (ord("y"), ord("Y"))
+
+    def _menu(self, title, options):
+        """Tiny modal picker: numbered options, returns the chosen index (1-9) or None."""
+        if not options:
+            return None
+        h, w = self.scr.getmaxyx()
+        lines = [title] + [f"  {i + 1}. {o}" for i, o in enumerate(options[:9])]
+        lines.append("  (1-9 pick · esc cancel)")
+        bw = max(disp_width(s) for s in lines) + 2
+        y0, x0 = max(0, h // 2 - len(lines) // 2), max(0, (w - bw) // 2)
+        self.scr.timeout(-1)
+        for i, ln in enumerate(lines):
+            attr = curses.A_REVERSE | (curses.A_BOLD if i == 0 else 0)
+            _add(self.scr, y0 + i, x0, pad_cols(ln, bw), w, attr)
+        self.scr.refresh()
+        ch = self.scr.getch()
+        self.scr.timeout(250)
+        if ord("1") <= ch <= ord("9"):
+            idx = ch - ord("1")
+            return idx if idx < len(options[:9]) else None
+        return None
+
+    def start_or_stop_watch(self):
+        state, _i, _p = watch_state(self.root)
+        if state == "running":
+            if not self._confirm("stop watch (interrupts in-flight agents)?"):
+                return
+            try:
+                with open(os.path.join(self.root, WATCH_PID)) as fh:
+                    pid = int(fh.read().split()[0])
+                # Signal the whole process GROUP, not just the bash pid: watch is usually
+                # parked in `sleep`, and bash defers a trap until its foreground child
+                # returns. killpg kills the sleep too (like Ctrl-C does), so the watch's
+                # stop() trap fires immediately and tears down gracefully.
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                except (OSError, ProcessLookupError):
+                    os.kill(pid, signal.SIGTERM)
+                self.flash = "watch stopping…"
+            except (OSError, ValueError):
+                self.flash = "could not stop watch (stale pidfile?)"
+            return
+        idx = self._menu("start watch — how many parallel agents?",
+                         ["1 (serial)", "2", "3", "4", "5"])
+        if idx is None:
+            return
+        par, interval = str(idx + 1), "300"
+        try:
+            log = open(os.path.join(self.root, WATCH_LOG), "a")
+            subprocess.Popen([self._dais(), "watch", interval, par],
+                             stdout=log, stderr=log,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+            self.flash = f"watch started ({interval}s ×{par})"
+        except OSError as e:
+            self.flash = f"start failed: {e}"
+
+    def toggle_pause(self):
+        verb = "resume" if os.path.exists(os.path.join(self.root, PAUSED)) else "pause"
+        subprocess.call([self._dais(), verb])
+        self.flash = "resumed" if verb == "resume" else "paused"
+
+    def tick_project(self, proj):
+        if not proj:
+            return
+        try:
+            log = open(os.path.join(self.root, WATCH_LOG), "a")
+            subprocess.Popen([self._dais(), "tick", proj], stdout=log, stderr=log,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+            self.flash = f"ticked {proj}"
+        except OSError as e:
+            self.flash = f"tick failed: {e}"
+
+    def run_role(self, proj):
+        """Launch a SPECIFIC role on a project (vs `t`, which lets the router pick)."""
+        if not proj:
+            return
+        if running_agents(os.path.join(self.root, "projects", proj)):
+            self.flash = f"{proj} already has a running agent"
+            return
+        roles = [r for r in project_roles(self.root, proj) if r != "founder"]
+        idx = self._menu(f"run which role in {proj}?", roles)
+        if idx is None:
+            return
+        role = roles[idx]
+        try:
+            log = open(os.path.join(self.root, WATCH_LOG), "a")
+            subprocess.Popen([self._dais(), "run", proj, role], stdout=log, stderr=log,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+            self.flash = f"running {proj}/{role}"
+        except OSError as e:
+            self.flash = f"run failed: {e}"
+
+    def cancel_run(self, proj):
+        if not proj:
+            return
+        if not running_agents(os.path.join(self.root, "projects", proj)):
+            self.flash = f"nothing running in {proj}"
+            return
+        if not self._confirm(f"cancel running agent in {proj}?"):
+            return
+        subprocess.call([self._dais(), "cancel", proj])
+        self.flash = f"cancelled {proj}"
+
+    def approve_merge(self, row):
+        task = row and row.get("task")
+        if not task or task.status != "ready_to_merge" or not task.pr_url:
+            self.flash = "select a ready_to_merge task with a PR"
+            return
+        pr = parse_pr(task.pr_url)
+        if not pr:
+            self.flash = "no PR number in this task's pr_url"
+            return
+        if not self._confirm(f"ship {task.id} (PR #{pr}) to main?"):
+            return
+        curses.def_prog_mode()
+        curses.endwin()
+        print(f"\n=== dais ship {row['project']} {pr}  ({task.id}) ===\n", flush=True)
+        rc = subprocess.call([self._dais(), "ship", row["project"], pr])
+        try:
+            input(f"\n[ship exited {rc}] press enter to return to dais top… ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        curses.reset_prog_mode()
+        self.scr.clear()
+        self.scr.refresh()
+        self.refresh()
+        self.flash = (f"shipped {task.id}" if rc == 0
+                      else f"ship: {task.id} NOT merged (exit {rc}) — see output")
+
+    def handle(self, ch, rows, sel_i, sel_row):
+        if self.filtering:
+            if ch in (10, 13):           # enter
+                self.filtering = False
+            elif ch == 27:               # esc
+                self.filtering = False
+                self.filter = ""
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                self.filter = self.filter[:-1]
+            elif 32 <= ch < 127:
+                self.filter += chr(ch)
+            return True
+        if ch in (ord("q"),):
+            return False
+        on_log = self.focus == "right" and bool(sel_row and sel_row.get("kind") == "running")
+        page = max(1, self._log_h - 1)
+        if ch in (ord("j"), curses.KEY_DOWN):
+            if on_log:
+                self.log_top += 1                # draw() re-pins to the live tail past the end
+            elif self.focus == "right":
+                self.detail_scroll += 1
+            elif rows:
+                self.sel_id = self._move_sel(rows, sel_i, +1)
+                self.detail_scroll = 0
+                self._reset_log_scroll()
+        elif ch in (ord("k"), curses.KEY_UP):
+            if on_log:
+                self.log_follow = False
+                self.log_top = max(0, self.log_top - 1)
+            elif self.focus == "right":
+                self.detail_scroll = max(0, self.detail_scroll - 1)
+            elif rows:
+                self.sel_id = self._move_sel(rows, sel_i, -1)
+                self.detail_scroll = 0
+                self._reset_log_scroll()
+        elif ch == curses.KEY_NPAGE:         # PageDown
+            if on_log:
+                self.log_top += page
+            elif self.focus == "right":
+                self.detail_scroll += page
+        elif ch == curses.KEY_PPAGE:         # PageUp
+            if on_log:
+                self.log_follow = False
+                self.log_top = max(0, self.log_top - page)
+            elif self.focus == "right":
+                self.detail_scroll = max(0, self.detail_scroll - page)
+        elif ch == curses.KEY_HOME:          # jump to first line
+            if on_log:
+                self.log_follow, self.log_top = False, 0
+            elif self.focus == "right":
+                self.detail_scroll = 0
+        elif ch == curses.KEY_END:           # snap back to the live tail
+            if on_log:
+                self._reset_log_scroll()
+        elif ch in (9,):                 # tab
+            self.focus = "right" if self.focus == "left" else "left"
+        elif ch in (10, 13):             # enter — expand project
+            if sel_row and sel_row["kind"] == "project":
+                name = sel_row["project"]
+                self.expanded ^= {name}
+        elif ch == ord("g"):
+            self.mode = "queue" if self.mode == "project" else "project"
+            self.detail_scroll = 0
+            self._reset_log_scroll()
+        elif ch == ord("l"):
+            self.launch_logs(sel_row)
+        elif ch == ord("o"):
+            self.launch_pr(sel_row)
+        elif ch == ord("w"):
+            self.start_or_stop_watch()
+        elif ch == ord("p"):
+            self.toggle_pause()
+        elif ch == ord("t"):
+            self.tick_project(sel_row["project"] if sel_row else None)
+        elif ch == ord("R"):
+            self.run_role(sel_row["project"] if sel_row else None)
+        elif ch == ord("c"):
+            self.cancel_run(sel_row["project"] if sel_row else None)
+        elif ch == ord("a"):
+            self.approve_merge(sel_row)
+        elif ch == ord("/"):
+            self.filtering = True
+            self.filter = ""
+        elif ch == ord("r"):
+            self.refresh()
+        return True
+
+    def run(self):
+        curses.curs_set(0)
+        self._init_colors()
+        self.scr.timeout(250)
+        self.refresh()
+        while True:
+            if time.monotonic() - self.last_fetch >= self.interval:
+                self.refresh()
+            self.draw()
+            ch = self.scr.getch()
+            if ch == -1:
+                continue
+            if ch == curses.KEY_RESIZE:
+                continue
+            rows = self.left_rows()
+            sel_i, sel_row = self._selected(rows)
+            if not self.handle(ch, rows, sel_i, sel_row):
+                break
+
+
+# --------------------------------------------------------------------------- #
+# entrypoint
+# --------------------------------------------------------------------------- #
+def main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(prog="dashboard")
+    ap.add_argument("--tui", action="store_true")
+    ap.add_argument("--interval", type=float, default=2.0)
+    args = ap.parse_args(argv)
+    if args.tui:
+        if not sys.stdout.isatty():
+            print("dais top needs an interactive terminal; use `dais status`.",
+                  file=sys.stderr)
+            return 2
+        curses.wrapper(lambda scr: App(scr, args.interval).run())
+        return 0
+    with connect() as conn:
+        print(render_plain(load_snapshot(conn)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

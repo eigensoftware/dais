@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+# router.py — config-driven scheduler decision + roles linter.
+#   router.py <dais_root> <project>         -> prints the role to run next (nothing = idle)
+#   router.py --lint <dais_root> [project]  -> validates roles config(s); exit 1 on any error
+#
+# Model (status-driven board): a status maps to exactly ONE reactive role (its `handles`).
+# Reactive roles run first, by precedence (verify -> build -> plan, generalized from config);
+# then cadence roles (every:Nh) when no reactive work is pending; else idle.
+import sys, os, sqlite3, re
+
+VALID_ACCESS = {"edit", "review", "draft", "none"}
+
+
+def parse_roles(path):
+    """Return (roles, problems). Each role dict: name, access, trigger, handles[], prec, line."""
+    roles, problems = [], []
+    if not os.path.exists(path):
+        return roles, problems
+    with open(path) as f:
+        for ln, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            p = line.split()
+            if len(p) < 5:
+                problems.append((ln, "malformed (need 5 columns: name access trigger handles prec)", line))
+                continue
+            roles.append({
+                "name": p[0], "access": p[1], "trigger": p[2],
+                "handles": [] if p[3] == "-" else p[3].split(","),
+                "prec": int(p[4]) if p[4].lstrip("-").isdigit() else 999,
+                "prec_raw": p[4], "line": ln,
+            })
+    return roles, problems
+
+
+def decide(root, project):
+    """Which role should run next for this project (or None = idle)."""
+    roles, _ = parse_roles(os.path.join(root, "projects", project, "roles"))
+    if not roles:
+        return None
+    db = sqlite3.connect(os.path.join(root, "dais.db"))
+
+    # 1) reactive: lowest precedence with an actionable task wins (verify before build)
+    for r in sorted([r for r in roles if r["trigger"] == "reactive" and r["handles"]],
+                    key=lambda r: r["prec"]):
+        ph = ",".join("?" * len(r["handles"]))
+        n = db.execute("SELECT COUNT(*) FROM tasks WHERE project=? AND status IN (%s)" % ph,
+                       [project] + r["handles"]).fetchone()[0]
+        if n > 0:
+            return r["name"]
+
+    # 2) cadence: a role whose interval has elapsed (only when no reactive work)
+    for r in sorted([r for r in roles if r["trigger"].startswith("every:")],
+                    key=lambda r: r["prec"]):
+        m = re.match(r"every:(\d+)h$", r["trigger"])
+        if not m:
+            continue
+        hrs = int(m.group(1))
+        last = db.execute("SELECT MAX(started_at) FROM runs WHERE project=? AND agent=?",
+                          [project, r["name"]]).fetchone()[0]
+        if last is None:
+            return r["name"]
+        cutoff = db.execute("SELECT datetime('now', ?)", ["-%d hours" % hrs]).fetchone()[0]
+        if last < cutoff:
+            return r["name"]
+    return None  # idle
+
+
+def lint_project(root, project):
+    """Return (errors, warnings) for one project's roles file."""
+    errors, warnings = [], []
+    rolesf = os.path.join(root, "projects", project, "roles")
+    if not os.path.exists(rolesf):
+        return errors, warnings  # no roles file -> project just never runs; not an error
+    roles, problems = parse_roles(rolesf)
+    for ln, msg, line in problems:
+        warnings.append("L%d: %s -> %r" % (ln, msg, line))
+
+    # project.yaml must exist and carry the keys the harness reads
+    projyaml = os.path.join(root, "projects", project, "project.yaml")
+    if not os.path.exists(projyaml):
+        errors.append("missing project.yaml")
+    else:
+        with open(projyaml) as fh:
+            text = fh.read()
+        for key in ("project", "repo", "stage_goal"):
+            if not re.search(r"(?m)^%s:" % re.escape(key), text):
+                errors.append("project.yaml missing required key '%s:'" % key)
+    if not os.path.exists(os.path.join(root, "projects", project, "CONTEXT.md")):
+        warnings.append("no CONTEXT.md (agents read it first for project memory)")
+
+    # 1) THE invariant: each reactive status maps to exactly one role. Two roles claiming the
+    #    same status means only the lowest-prec one ever runs; the other is silently starved.
+    by_status = {}
+    for r in roles:
+        if r["trigger"] == "reactive":
+            for s in r["handles"]:
+                by_status.setdefault(s, []).append(r["name"])
+    for s, names in sorted(by_status.items()):
+        if len(names) > 1:
+            errors.append("status '%s' is handled by multiple reactive roles %s — only the "
+                          "lowest-precedence one runs; the rest are silently starved" % (s, names))
+
+    # 2) field sanity (warn, don't fail — the router already degrades safely)
+    for r in roles:
+        if r["access"] not in VALID_ACCESS:
+            warnings.append("role '%s': unknown access '%s' (expected %s); treated as read-only"
+                            % (r["name"], r["access"], "|".join(sorted(VALID_ACCESS))))
+        if not (r["trigger"] in ("reactive", "none") or re.match(r"every:\d+h$", r["trigger"])):
+            warnings.append("role '%s': unrecognized trigger '%s' (expected reactive|every:Nh|none); "
+                            "never scheduled" % (r["name"], r["trigger"]))
+        if not r["prec_raw"].lstrip("-").isdigit():
+            warnings.append("role '%s': non-numeric prec '%s'; defaulted to 999"
+                            % (r["name"], r["prec_raw"]))
+        if r["trigger"] != "none":  # a schedulable role needs a persona to run as
+            persona = os.path.join(root, "projects", project, "agents", r["name"] + ".md")
+            if not os.path.exists(persona):
+                warnings.append("role '%s': no persona file at projects/%s/agents/%s.md"
+                                % (r["name"], project, r["name"]))
+    return errors, warnings
+
+
+def lint(root, project):
+    if project:
+        projects = [project]
+    else:
+        pdir = os.path.join(root, "projects")
+        projects = sorted(d for d in os.listdir(pdir)
+                          if os.path.exists(os.path.join(pdir, d, "roles")))
+    any_err = False
+    for proj in projects:
+        errors, warnings = lint_project(root, proj)
+        if not errors and not warnings:
+            print("✓ %s: roles OK" % proj)
+        for e in errors:
+            print("✗ %s: ERROR  %s" % (proj, e)); any_err = True
+        for w in warnings:
+            print("• %s: warn   %s" % (proj, w))
+    return 1 if any_err else 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--lint":
+        root = sys.argv[2]
+        project = sys.argv[3] if len(sys.argv) > 3 else ""
+        sys.exit(lint(root, project))
+    try:
+        name = decide(sys.argv[1], sys.argv[2])
+        if name:
+            print(name)
+    except Exception:
+        pass  # decide-mode must never crash the scheduler -> any error means idle

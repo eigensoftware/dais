@@ -1,0 +1,4 @@
+# name      access  trigger   handles                       prec
+qa          review  reactive  needs_qa                      10
+engineer    edit    reactive  ready,changes_requested       20
+lead        draft   every:24h -                             30

@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+# dais — control panel for the Eigen Software agent company.
+# Same interface for you (the founder) and the agents. State lives in dais.db.
+set -uo pipefail
+# resolve through symlinks so a PATH symlink (~/.local/bin/dais -> repo/dais) finds the real code
+__src="$0"
+while [ -h "$__src" ]; do
+  __dir="$(cd "$(dirname "$__src")" && pwd)"
+  __src="$(readlink "$__src")"
+  case "$__src" in /*) ;; *) __src="$__dir/$__src" ;; esac
+done
+DAIS_ROOT="$(cd "$(dirname "$__src")" && pwd)"
+source "$DAIS_ROOT/harness/lib.sh"
+
+usage(){ cat <<'U'
+dais — your agent company control panel
+
+  dais status                         everything at a glance (tasks + recent runs)
+  dais top [secs]                     live TUI dashboard (read-only; default 2s refresh)
+  dais backlog <project>              stage goal + ranked queue
+  dais tasks <project> [--assignee A] [--status S]
+  dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."]
+  dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."]
+  dais handoff <id> <role> ["note"]   reassign + advance status (target status from roles config)
+  dais approve <id> [--priority P] ["note"]  greenlight a Lead 'proposed' initiative → ready (front-door founder gate)
+  dais tick [project] [--dry-run]     check the list once: run the most valuable pending task
+  dais watch [seconds]                keep checking on an interval (default 900s); Ctrl-C to stop
+  dais schedule install|uninstall|status   run the interval in the background (cross-platform)
+  dais pause | resume                 park/un-park the loop (honored by watch + schedule)
+  dais cancel <project>               stop the project's in-flight agent (marks it interrupted)
+  dais run <project> <agent>          run a specific agent now (headless claude)
+  dais ship <project> <pr#> [--migrated]  QA-gated, migration-aware squash-merge to main (founder gate)
+  dais logs <project> [N]             recent runs
+  dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md
+  dais lint [project]                 validate a project (roles + project.yaml + required files)
+  dais init                           create the db
+  dais migrate                        apply pending DB migrations (run with watch paused)
+  dais scaffold <project>             create a new project from the template
+U
+}
+
+STATUSES_OPEN="('backlog','ready','doing','needs_qa','changes_requested','ready_to_merge','needs_review','proposed','blocked')"
+# Closed set of lifecycle statuses. A project MAY add custom statuses via its roles file
+# (the `handles` column, e.g. needs_marketing) — those count as valid for that project only.
+# needs_review = founder-gate for a NON-merge deliverable (a doc, a plan, a research pass that
+# has no PR to ship) — the agent parks finished work there and the founder reviews + closes it,
+# the read-only twin of ready_to_merge (which is reserved for QA-approved PRs the founder merges).
+STATUSES_CANON="backlog ready doing needs_qa changes_requested ready_to_merge needs_review proposed done blocked cancelled deferred"
+# valid_status <project> <status> -> exit 0 if allowed (canonical, or declared in the project's roles)
+valid_status(){
+  case " $STATUSES_CANON " in *" $2 "*) return 0;; esac
+  local f="$DAIS_HOME/projects/$1/roles"
+  [ -f "$f" ] && awk -v s="$2" '!/^#/ && $4!="-"{n=split($4,h,",");for(i=1;i<=n;i++)if(h[i]==s)k=1}END{exit !k}' "$f"
+}
+# status_help <project> -> canonical statuses + the project's custom ones, for error messages
+status_help(){
+  local x out=""
+  for x in $(awk '!/^#/ && $4!="-"{print $4}' "$DAIS_HOME/projects/$1/roles" 2>/dev/null | tr ',' '\n' | sort -u); do
+    case " $STATUSES_CANON " in *" $x "*) ;; *) out="$out $x";; esac
+  done
+  printf '%s' "$STATUSES_CANON"; [ -n "$out" ] && printf '  (+%s)' "$out"
+}
+
+cmd="${1:-status}"; shift 2>/dev/null || true
+case "$cmd" in
+  init)
+    db_init && echo "db ready: $DB" ;;
+
+  migrate)
+    db_init; echo "migrations applied (recorded in schema_version). tip: run with 'dais watch' paused." ;;
+
+  status)
+    # one-shot dashboard — data layer + renderer live in harness/dashboard.py,
+    # shared with `dais top` (the live TUI) so the queries have a single home.
+    # auto-init so a fresh workspace (new DAIS_HOME) renders an empty board, not a crash.
+    [ -f "$DB" ] || db_init >/dev/null 2>&1
+    python3 "$DAIS_ROOT/harness/dashboard.py" ;;
+
+  top)
+    secs="${1:-2}"
+    case "$secs" in ''|*[!0-9.]*) echo "top: secs must be a number"; exit 1;; esac
+    [ -f "$DB" ] || db_init >/dev/null 2>&1
+    python3 "$DAIS_ROOT/harness/dashboard.py" --tui --interval "$secs" ;;
+
+  backlog)
+    proj="${1:?usage: dais backlog <project>}"; pe="$(sqlesc "$proj")"
+    echo "STAGE GOAL: $(pcfg "$proj" stage_goal)"; echo ""
+    echo "READY (Engineer pulls top-down):"
+    db -separator ' | ' "SELECT '  ['||priority||'] '||id, title FROM tasks WHERE project='$pe' AND status IN ('changes_requested','ready') ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END;" || true
+    echo ""; echo "IN FLIGHT:"
+    db -separator ' | ' "SELECT '  '||status||' '||id, title FROM tasks WHERE project='$pe' AND status IN ('doing','needs_qa','ready_to_merge','needs_review');" || true
+    echo ""; echo "BLOCKED (on founder):"
+    db -separator ' | ' "SELECT '  '||id, title FROM tasks WHERE project='$pe' AND status='blocked';" || true
+    echo ""; echo "BACKLOG / fast-follow:"
+    db -separator ' | ' "SELECT '  ['||priority||'] '||id, title FROM tasks WHERE project='$pe' AND status='backlog' ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END LIMIT 20;" || true ;;
+
+  tasks)
+    proj="${1:?usage: dais tasks <project> [--assignee A] [--status S]}"; shift 2>/dev/null || true
+    where="project='$(sqlesc "$proj")'"
+    while [ $# -gt 0 ]; do case "$1" in
+      --assignee) where="$where AND assignee='$(sqlesc "$2")'"; shift 2;;
+      --status)   where="$where AND status='$(sqlesc "$2")'"; shift 2;;
+      *) shift;; esac; done
+    db -separator ' | ' "SELECT id, status, priority, COALESCE(assignee,'-'), title FROM tasks WHERE $where ORDER BY updated_at DESC;" || true ;;
+
+  task)
+    sub="${1:?task add|set}"; shift 2>/dev/null || true
+    case "$sub" in
+      add)
+        proj="${1:?usage: dais task add <project> \"title\" [--id X] [--priority P] [--status S] [--assignee A] [--notes \"...\"]}"; shift
+        id=""; title=""; pri="medium"; st="backlog"; asg=""; notes=""
+        while [ $# -gt 0 ]; do case "$1" in
+          --id)       id="$2"; shift 2;;
+          --priority) pri="$2"; shift 2;;
+          --status)   st="$2"; shift 2;;
+          --assignee) asg="$2"; shift 2;;
+          --notes)    notes="$2"; shift 2;;
+          *) [ -z "$title" ] && title="$1"; shift;;
+        esac; done
+        [ -n "$title" ] || { echo "need a title"; exit 1; }
+        valid_status "$proj" "$st" || { echo "task add: invalid status '$st'. valid: $(status_help "$proj")"; exit 1; }
+        pe="$(sqlesc "$proj")"
+        if [ -z "$id" ]; then                       # auto-id: <abbrev>-<n>
+          abbr="$(printf '%s' "$proj" | cut -c1-3)"
+          n="$(db "SELECT COUNT(*)+1 FROM tasks WHERE project='$pe';")"
+          id="${abbr}-${n}"
+          while [ -n "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$id")';")" ]; do n=$((n+1)); id="${abbr}-${n}"; done
+        fi
+        db "INSERT INTO tasks(id,project,title,priority,status,assignee,notes) VALUES('$(sqlesc "$id")','$pe','$(sqlesc "$title")','$(sqlesc "$pri")','$(sqlesc "$st")',$([ -n "$asg" ] && echo "'$(sqlesc "$asg")'" || echo NULL),$([ -n "$notes" ] && echo "'$(sqlesc "$notes")'" || echo NULL));" \
+          && echo "added $id  [$st${asg:+ -> $asg}]" ;;
+      set)
+        id="$1"; shift
+        sets=""; newst=""
+        while [ $# -gt 0 ]; do case "$1" in
+          --status)   newst="$2"; sets="$sets, status='$(sqlesc "$2")'"; shift 2;;
+          --assignee) sets="$sets, assignee='$(sqlesc "$2")'"; shift 2;;
+          --pr)       sets="$sets, pr_url='$(sqlesc "$2")'"; shift 2;;
+          --priority) sets="$sets, priority='$(sqlesc "$2")'"; shift 2;;
+          --notes)    sets="$sets, notes='$(sqlesc "$2")'"; shift 2;;
+          --title)    sets="$sets, title='$(sqlesc "$2")'"; shift 2;;
+          *) shift;; esac; done
+        sets="${sets#, }"
+        [ -z "$sets" ] && { echo "nothing to set"; exit 1; }
+        if [ -n "$newst" ]; then
+          proj="$(db "SELECT project FROM tasks WHERE id='$(sqlesc "$id")';")"
+          [ -n "$proj" ] || { echo "no task: $id"; exit 1; }
+          valid_status "$proj" "$newst" || { echo "task set: invalid status '$newst'. valid: $(status_help "$proj")"; exit 1; }
+        fi
+        db "UPDATE tasks SET $sets, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" && echo "updated $id" ;;
+      *) usage ;;
+    esac ;;
+
+  handoff)
+    id="${1:?usage: dais handoff <id> <role> [note]}"; to="${2:?to-role}"; note="${3:-}"
+    proj="$(db "SELECT project FROM tasks WHERE id='$(sqlesc "$id")';")"
+    [ -n "$proj" ] || { echo "no task: $id"; exit 1; }
+    # target status = the role's first 'handles' status, from the project's roles config
+    st="$(awk -v r="$to" '!/^#/ && $1==r {split($4,h,","); print h[1]}' "$DAIS_HOME/projects/$proj/roles" 2>/dev/null | head -1)"
+    { [ -z "$st" ] || [ "$st" = "-" ]; } && st="ready"
+    nset=""; [ -n "$note" ] && nset=", notes='$(sqlesc "$note")'"
+    db "UPDATE tasks SET assignee='$(sqlesc "$to")', status='$st'$nset, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" \
+      && echo "handoff: $id -> $to ($st)" ;;
+
+  approve)
+    # founder-gate: greenlight a Lead `proposed` initiative → ready (the Engineer then picks it up).
+    # The front-door twin of `ship` (which gates code at the back door). To REJECT, use
+    # `dais task set <id> --status cancelled` (or backlog to park it).
+    id="${1:?usage: dais approve <id> [--priority high|medium|low] [\"note\"]}"; shift 2>/dev/null || true
+    pri=""; note=""
+    while [ $# -gt 0 ]; do case "$1" in
+      --priority) pri="$2"; shift 2;;
+      *) note="$1"; shift;;
+    esac; done
+    cur="$(db "SELECT status FROM tasks WHERE id='$(sqlesc "$id")';")"
+    [ -n "$cur" ] || { echo "no task: $id"; exit 1; }
+    [ "$cur" = "proposed" ] || { echo "✋ $id is '$cur', not 'proposed' — approve is for Lead proposals (use 'dais task set' for other moves)."; exit 1; }
+    proj="$(db "SELECT project FROM tasks WHERE id='$(sqlesc "$id")';")"
+    asg="$(awk '!/^#/ && $4!="-"{n=split($4,h,",");for(i=1;i<=n;i++)if(h[i]=="ready"){print $1;exit}}' \
+           "$DAIS_HOME/projects/$proj/roles" 2>/dev/null)"
+    [ -n "$asg" ] || asg="engineer"
+    set_pri=""; [ -n "$pri" ] && set_pri=", priority='$(sqlesc "$pri")'"
+    set_note=""; [ -n "$note" ] && set_note=", notes=COALESCE(notes,'')||'  |  approved: $(sqlesc "$note")'"
+    db "UPDATE tasks SET status='ready', assignee='$(sqlesc "$asg")'$set_pri$set_note, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" \
+      && echo "✓ approved $id → ready ($asg will pick it up)" ;;
+
+  ship)
+    # founder-gate: QA-gated, migration-aware squash-merge of a PR to main.
+    proj="${1:?usage: dais ship <project> <pr#> [--migrated]}"; pr="${2:?pr number}"; shift 2 2>/dev/null || true
+    migrated=0; for a in "$@"; do [ "$a" = "--migrated" ] && migrated=1; done
+    need gh "install GitHub CLI: https://cli.github.com"
+    gh="$(pcfg "$proj" github)"; [ -n "$gh" ] || { echo "no github configured for $proj"; exit 1; }
+    pe="$(sqlesc "$proj")"
+    # QA gate — only ship QA-approved work (a ready_to_merge task pointing at this PR)
+    tid="$(db "SELECT id FROM tasks WHERE project='$pe' AND pr_url LIKE '%/pull/$pr' AND status='ready_to_merge' LIMIT 1;")"
+    if [ -z "$tid" ]; then
+      echo "✋ refusing: no ready_to_merge (QA-approved) task in $proj points at PR #$pr."
+      db -separator '  ' "SELECT '   '||id, status, COALESCE(pr_url,'(no pr)') FROM tasks WHERE project='$pe' AND pr_url LIKE '%/pull/$pr';" 2>/dev/null
+      exit 1
+    fi
+    # never merge a conflicted PR
+    ms="$(gh pr view "$pr" --repo "$gh" --json mergeable --jq .mergeable 2>/dev/null)"
+    [ "$ms" = "CONFLICTING" ] && { echo "✋ PR #$pr is CONFLICTING — rebase onto main in a throwaway clone first, then re-run."; exit 1; }
+    # migration safety — additive migrations must hit prod BEFORE the merge deploys the code
+    migs="$(gh pr diff "$pr" --repo "$gh" --name-only 2>/dev/null | grep -E "$(migrations_re "$proj")" || true)"
+    if [ -n "$migs" ] && [ "$migrated" = 0 ]; then
+      echo "🛑 PR #$pr ($tid) adds DB migration(s). Apply them to prod FIRST, THEN re-run with --migrated:"
+      printf '     %s\n' $migs
+      echo "   migrate prod first (supabase example):  cd $(repo_path "$proj") && npx supabase db push"
+      echo "   then ship:                            dais ship $proj $pr --migrated"
+      exit 2
+    fi
+    # un-draft backstop: an agent may leave the PR a draft, and GitHub refuses to merge a draft
+    # even when QA approved it (mergeable=CLEAN but `gh pr merge` errors "still a draft"). Mark it
+    # ready (idempotent — no-op if already ready) so the founder gate is never blocked by a
+    # recoverable state. Belt to the engineer's suspenders (the persona also marks ready pre-QA).
+    gh pr ready "$pr" --repo "$gh" >/dev/null 2>&1 || true
+    # capture the head branch BEFORE merge — --delete-branch removes the remote ref, but we still
+    # need the name to prune the local worktree/branch the agent left behind (else it shadows main).
+    head_br="$(gh pr view "$pr" --repo "$gh" --json headRefName --jq .headRefName 2>/dev/null)"
+    # merge + record (append a ship note; keep the QA notes)
+    note="shipped PR #$pr via dais ship${migs:+ (migrations attested applied)}"
+    echo "▶ shipping $tid — squash-merge PR #$pr to $gh:main${migs:+  [migrations attested]}"
+    if gh pr merge "$pr" --repo "$gh" --squash --delete-branch; then
+      db "UPDATE tasks SET status='done', updated_at=datetime('now'), notes=COALESCE(notes,'')||'  |  $(sqlesc "$note")' WHERE id='$tid';"
+      echo "✓ $tid → done.  (merge to main may auto-deploy prod — verify the release.)"
+      # Local cleanup so the NEXT agent sees a clean, current main (not a stale ref or a dead branch
+      # to stack on). --delete-branch only touched the remote; the local worktree/branch persist.
+      rd="$(repo_path "$proj")"
+      if [ -n "$head_br" ] && [ -d "$rd" ]; then
+        wt="$(git -C "$rd" worktree list --porcelain | awk -v b="branch refs/heads/$head_br" '/^worktree /{w=$2} $0==b{print w}')"
+        [ -n "$wt" ] && git -C "$rd" worktree remove "$wt" --force >/dev/null 2>&1
+        git -C "$rd" worktree prune >/dev/null 2>&1 || true
+        git -C "$rd" branch -D "$head_br" >/dev/null 2>&1 || true
+        git -C "$rd" fetch -q origin 2>/dev/null || true
+        git -C "$rd" merge --ff-only origin/main >/dev/null 2>&1 || true
+        echo "  ↳ pruned local branch/worktree '$head_br' and refreshed local main"
+      fi
+    else echo "✗ merge failed (see above)"; exit 1; fi ;;
+
+  run)
+    exec "$DAIS_ROOT/harness/run-agent.sh" "$@" ;;
+
+  scaffold)
+    name="${1:?usage: dais scaffold <project>}"
+    [[ "$name" =~ ^[a-z0-9._-]+$ ]] || { echo "scaffold: name must be a slug (a-z 0-9 . _ -)"; exit 1; }
+    mkdir -p "$DAIS_HOME/projects"          # ensure the workspace projects/ dir exists (fresh DAIS_HOME)
+    dest="$DAIS_HOME/projects/$name"
+    [ -e "$dest" ] && { echo "scaffold: projects/$name already exists"; exit 1; }
+    src="$DAIS_ROOT/harness/templates/project"   # template is TOOL CODE -> stays on DAIS_ROOT
+    [ -d "$src" ] || { echo "scaffold: missing template at $src"; exit 1; }
+    cp -R "$src" "$dest"
+    mkdir -p "$dest/logs"
+    # substitute the project name into the text templates (portable in-place sed)
+    for f in "$dest/project.yaml" "$dest/CONTEXT.md"; do
+      sed "s/__PROJECT__/$name/g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    done
+    echo "scaffolded projects/$name — edit project.yaml (repo/github/stage_goal), then: dais lint $name" ;;
+
+  learn)
+    proj="${1:?usage: dais learn <project> \"durable note\"}"; shift
+    note="$*"
+    [ -n "$note" ] || { echo "usage: dais learn <project> \"durable note\""; exit 1; }
+    f="$DAIS_HOME/projects/$proj/CONTEXT.md"
+    [ -f "$f" ] || { echo "no CONTEXT.md for project '$proj'"; exit 1; }
+    printf -- '- %s\n' "$note" >> "$f" && echo "noted in $proj/CONTEXT.md" ;;
+
+  lint)
+    # validate the roles config(s): one reactive role per status, valid fields, personas exist
+    exec python3 "$DAIS_ROOT/harness/router.py" --lint "$DAIS_HOME" "${1:-}" ;;
+
+  tick)
+    exec "$DAIS_ROOT/harness/dispatch.sh" "$@" ;;
+
+  watch)
+    interval="${1:-900}"
+    par="${2:-1}"   # parallel width: how many agents may run at once (1 = serial, the default)
+    [[ "$interval" =~ ^[0-9]+$ ]] || { echo "usage: dais watch [interval-seconds] [parallel-1to5]"; exit 1; }
+    [[ "$par" =~ ^[0-9]+$ ]]      || { echo "usage: dais watch [interval-seconds] [parallel-1to5]"; exit 1; }
+    [ "$par" -lt 1 ] && par=1; [ "$par" -gt 5 ] && par=5
+    export DAIS_MAX_PARALLEL="$par"
+    # singleton + discoverable: record our pid (+interval/par) so `dais top` can show/stop us,
+    # and refuse to start a second loop that would double-dispatch the same board.
+    PIDF="$DAIS_HOME/projects/.watch.pid"
+    if [ -f "$PIDF" ] && kill -0 "$(awk '{print $1}' "$PIDF" 2>/dev/null)" 2>/dev/null; then
+      echo "watch already running (pid $(awk '{print $1}' "$PIDF")). stop it first."; exit 1
+    fi
+    echo "$$ $interval $par" > "$PIDF"
+    trap 'rm -f "$PIDF"' EXIT
+    # Clean stop: parallel agents are detached (backgrounded), so they don't receive this
+    # terminal's Ctrl-C. On stop we walk each live agent's process tree (wrapper → claude →
+    # children) and TERM it; the agent's EXIT trap marks the run interrupted and its task stays
+    # put, resuming on the next start. Tree-walk (not process groups) so it needs no job control.
+    kill_tree(){ local pid="$1" k; for k in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$k"; done; kill -TERM "$pid" 2>/dev/null; }
+    stop(){
+      echo; echo "■ watch stopping — halting any in-flight agents…"
+      for lk in "$DAIS_HOME"/projects/*/.lock-*; do
+        [ -e "$lk" ] || continue
+        pid="$(cat "$lk" 2>/dev/null)"; [ -n "$pid" ] || continue
+        kill -0 "$pid" 2>/dev/null && kill_tree "$pid"
+      done
+      echo "■ stopped. In-flight runs are marked interrupted; their tasks stay put and resume on the next start. Safe to restart anytime."
+      rm -f "$PIDF"
+      exit 0
+    }
+    trap stop INT TERM
+    if [ "$par" -gt 1 ]; then
+      echo "dais watch — up to ${par} agents in parallel (priority-ordered), polling every ${interval}s when idle. Ctrl-C to stop (safe anytime)."
+    else
+      echo "dais watch — one agent at a time (full live stream), polling every ${interval}s when idle. Ctrl-C to stop (safe anytime)."
+    fi
+    while true; do
+      printf '\n[%s] ─────────────────────────────────\n' "$(date '+%H:%M:%S')"
+      "$DAIS_ROOT/harness/dispatch.sh"; rc=$?
+      if [ "$rc" -eq 0 ]; then sleep 10          # work in flight → drain: check back shortly
+      else sleep "$interval"; fi                 # idle (10) or backed off (20) → poll on the interval
+    done ;;
+
+  pause)
+    touch "$DAIS_HOME/projects/.paused" && echo "⏸ paused — the loop (watch + schedule) idles until: dais resume" ;;
+
+  resume)
+    rm -f "$DAIS_HOME/projects/.paused" && echo "▶ resumed — work resumes on the next tick" ;;
+
+  cancel)
+    proj="${1:?usage: dais cancel <project>}"
+    kill_tree(){ local pid="$1" k; for k in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$k"; done; kill -TERM "$pid" 2>/dev/null; }
+    n=0
+    for lk in "$DAIS_HOME/projects/$proj"/.lock-*; do
+      [ -e "$lk" ] || continue
+      pid="$(cat "$lk" 2>/dev/null)"; [ -n "$pid" ] || continue
+      kill -0 "$pid" 2>/dev/null && { kill_tree "$pid"; n=$((n+1)); }
+    done
+    [ "$n" -gt 0 ] && echo "■ cancelled $n in-flight agent(s) in $proj — marked interrupted; task stays put" \
+                   || echo "nothing running in $proj" ;;
+
+  schedule)
+    sub="${1:-status}"; PLIST="$HOME/Library/LaunchAgents/com.dais.dispatch.plist"
+    case "$sub" in
+      install)
+        interval="${2:-900}"
+        [[ "$interval" =~ ^[0-9]+$ ]] || { echo "usage: dais schedule install [interval-seconds]"; exit 1; }
+        os="${DAIS_FORCE_OS:-$(uname)}"
+        case "$os" in
+          Darwin)
+            mkdir -p "$HOME/Library/LaunchAgents"
+            cat > "$PLIST" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.dais.dispatch</string>
+  <key>ProgramArguments</key><array><string>$DAIS_ROOT/dais</string><string>tick</string></array>
+  <key>StartInterval</key><integer>$interval</integer>
+  <key>StandardOutPath</key><string>$DAIS_HOME/projects/.dispatch.log</string>
+  <key>StandardErrorPath</key><string>$DAIS_HOME/projects/.dispatch.log</string>
+  <key>RunAtLoad</key><false/>
+</dict></plist>
+PL
+            launchctl unload "$PLIST" 2>/dev/null || true
+            launchctl load "$PLIST" && echo "scheduled: a tick every ${interval}s (background, survives logout). logs -> projects/.dispatch.log"
+            echo "note: needs the Mac awake + you logged in. uninstall with: dais schedule uninstall" ;;
+          Linux)
+            echo "Linux: add this line to your crontab (run: crontab -e):"
+            echo "  */$(( interval/60 < 1 ? 1 : interval/60 )) * * * * $DAIS_ROOT/dais tick >> $DAIS_HOME/projects/.dispatch.log 2>&1"
+            echo "(cron's finest granularity is 1 minute; for sub-minute polling use: dais watch $interval)" ;;
+          *)
+            echo "Background scheduling isn't wired for '$os'. Use the portable foreground loop instead:"
+            echo "  dais watch ${interval}" ;;
+        esac ;;
+      uninstall)
+        launchctl unload "$PLIST" 2>/dev/null || true; rm -f "$PLIST"; echo "unscheduled" ;;
+      status)
+        launchctl list 2>/dev/null | grep -q com.dais.dispatch && echo "scheduled (background)" || echo "not scheduled (use: dais watch, or dais schedule install)" ;;
+      *) echo "usage: dais schedule install|uninstall|status" ;;
+    esac ;;
+
+  logs)
+    proj="${1:-}"; n="${2:-8}"
+    [[ "$n" =~ ^[0-9]+$ ]] || { echo "logs: N must be an integer"; exit 1; }
+    w=""; [ -n "$proj" ] && w="WHERE project='$(sqlesc "$proj")'"
+    db -separator ' | ' "SELECT started_at, project||'/'||agent, status, log_path FROM runs $w ORDER BY id DESC LIMIT $n;" || true ;;
+
+  ""|help|-h|--help) usage ;;
+  *) echo "unknown: $cmd"; usage; exit 1 ;;
+esac

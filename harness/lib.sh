@@ -1,0 +1,80 @@
+# shared helpers — sourced by run-agent.sh and dais. Not executable on its own.
+DAIS_ROOT="${DAIS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
+# DAIS_HOME = the workspace (projects/ + dais.db + logs). Defaults to the tool dir
+# (self-contained monolith); override via env or ~/.dais/config (line: home=/path/to/workspace).
+if [ -z "${DAIS_HOME:-}" ] && [ -f "$HOME/.dais/config" ]; then
+  DAIS_HOME="$(sed -n 's/^home=//p' "$HOME/.dais/config" | head -1)"
+fi
+DAIS_HOME="${DAIS_HOME:-$DAIS_ROOT}"
+DAIS_HOME="${DAIS_HOME/#\~/$HOME}"          # expand a leading ~
+export DAIS_ROOT DAIS_HOME
+DB="$DAIS_HOME/dais.db"
+
+# preflight: every dais/run-agent/dispatch path hits the DB — fail clearly if sqlite3 is absent.
+command -v sqlite3 >/dev/null 2>&1 || { echo "dais: 'sqlite3' not found — install SQLite and retry" >&2; exit 127; }
+
+# `.timeout` makes concurrent writers wait for the lock (up to 10s) instead of failing with
+# "database is locked" — needed once `dais watch` runs agents in parallel (they share dais.db).
+db_init(){
+  # apply the base schema (idempotent), then any pending migrations in filename order,
+  # recording each in schema_version so it runs exactly once.
+  sqlite3 -cmd ".timeout 10000" "$DB" < "$DAIS_ROOT/harness/schema.sql"
+  local m base
+  for m in "$DAIS_ROOT"/harness/migrations/*.sql; do
+    [ -e "$m" ] || continue
+    base="$(basename "$m")"
+    if [ -z "$(sqlite3 "$DB" "SELECT 1 FROM schema_version WHERE filename='$base';" 2>/dev/null)" ]; then
+      # run the migration body inside a transaction: -bail stops sqlite3 at the
+      # first error (before COMMIT), so a partial migration rolls back atomically
+      # and is NOT recorded as applied. Pipe (not a heredoc) so the SQL body is
+      # never subject to shell expansion.
+      if { echo "BEGIN;"; cat "$m"; echo "COMMIT;"; } | sqlite3 -bail -cmd ".timeout 10000" "$DB"; then
+        sqlite3 "$DB" "INSERT INTO schema_version(filename) VALUES('$base');"
+      fi
+    fi
+  done
+}
+db(){ [ -f "$DB" ] || db_init >/dev/null 2>&1; sqlite3 -cmd ".timeout 10000" "$DB" "$@"; }
+sqlesc(){ printf '%s' "${1:-}" | sed "s/'/''/g"; }
+
+# read a single-line field from projects/<project>/project.yaml
+pcfg(){ grep -E "^$2:" "$DAIS_HOME/projects/$1/project.yaml" 2>/dev/null | head -1 | sed "s/^$2:[[:space:]]*//"; }
+
+# expand a leading ~ to $HOME
+expand(){ printf '%s' "${1/#\~/$HOME}"; }
+
+# repo_path <project> — absolute path to a project's working repo.
+# absolute -> as-is; ~ -> $HOME; relative -> ${DAIS_AGENT_REPOS:-<parent of DAIS_ROOT>}/<value>
+repo_path(){
+  local r; r="$(pcfg "$1" repo)"
+  case "$r" in
+    /*) printf '%s' "$r" ;;
+    "~"/*|"~") printf '%s' "$(expand "$r")" ;;
+    *)  printf '%s/%s' "${DAIS_AGENT_REPOS:-$(dirname "$DAIS_ROOT")}" "$r" ;;
+  esac
+}
+
+# migrations_re <project> — grep -E regex matching this project's migration files in a PR diff.
+# project.yaml `migrations_glob:` (default */migrations/*.sql) -> regex (* -> .*, . -> \., anchored at end).
+migrations_re(){
+  local g; g="$(pcfg "$1" migrations_glob)"; g="${g:-*/migrations/*.sql}"
+  # glob -> grep -E: escape dots, turn * into .*, anchor the suffix
+  local re="${g//./\\.}"; re="${re//\*/.*}"
+  printf '%s$' "$re"
+}
+
+# need <tool> <install-hint> — fail loud + actionable when a required CLI is missing.
+need(){ command -v "$1" >/dev/null 2>&1 || { printf "dais: '%s' not found — %s\n" "$1" "${2:-install it and retry}" >&2; exit 127; }; }
+
+# --- colors (auto-off when stdout isn't a terminal, or NO_COLOR is set) ---
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C0=$'\e[0m'; CB=$'\e[1m'; CD=$'\e[2m'
+  CR=$'\e[31m'; CG=$'\e[32m'; CY=$'\e[33m'; CBL=$'\e[34m'; CM=$'\e[35m'; CC=$'\e[36m'; CW=$'\e[97m'
+else
+  C0=''; CB=''; CD=''; CR=''; CG=''; CY=''; CBL=''; CM=''; CC=''; CW=''
+fi
+
+# Did a claude run die on the subscription cap? Match ONLY the genuine CLI cap message
+# ("You've hit your session limit …") — NOT an agent merely reviewing rate-limit / usage-cap
+# code, which would otherwise false-positive now that logs stream the agent's reasoning.
+is_capped(){ grep -qiE "you'?ve (hit|reached) your (usage|session|5-?hour|weekly) limit" "${1:-/dev/null}" 2>/dev/null; }
