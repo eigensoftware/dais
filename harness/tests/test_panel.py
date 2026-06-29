@@ -910,6 +910,35 @@ class TestLogWallMode(unittest.TestCase):
         self.assertNotIn("PROJECTS", text)
 
 
+class TestLogWallBarHelp(unittest.TestCase):
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-lwb-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def test_bar_shows_wall_keys_in_wall_mode(self):
+        papp = self._papp()
+        papp.show_logwall = True
+        scr = FakeScr(40, 200)
+        pn.render_bar(scr, pn.Rect(39, 0, 1, 200), papp, "work")
+        text = scr.calls[-1][2]
+        self.assertIn("L/esc back", text)
+        self.assertIn("q quit", text)
+
+    def test_normal_bar_advertises_L_logs(self):
+        papp = self._papp()
+        scr = FakeScr(40, 200)
+        pn.render_bar(scr, pn.Rect(39, 0, 1, 200), papp, "work")
+        self.assertIn("L logs", scr.calls[-1][2])
+
+    def test_help_overlay_lists_log_wall(self):
+        self.assertTrue(any("L logs" in ln for ln in pn._HELP_LINES))
+
+
 class TestSplitBands(unittest.TestCase):
     def test_even_split(self):
         self.assertEqual(pn.split_bands(1, 9, 3), [(1, 3), (4, 3), (7, 3)])

@@ -356,10 +356,14 @@ def render_logwall(scr, rect, app):
 
 def render_bar(scr, rect, app, focus):
     """Contextual action bar (reused) + the panel's global keys."""
+    if getattr(app, "show_logwall", False):
+        _add(scr, rect.y, rect.x, pad_cols(" L/esc back · q quit", rect.w),
+             rect.x + rect.w, curses.A_REVERSE)
+        return
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    keys = "tab pane · / filter · b parked · g expand · ? help · q quit"
+    keys = "tab pane · / filter · b parked · g expand · L logs · ? help · q quit"
     if getattr(app, "filtering", False):
         hint = f" /{app.filter}_  ·  {keys}"
     else:
@@ -381,6 +385,7 @@ _HELP_LINES = [
     "  g expand          expand the loop + archive (history)",
     "  rail + j/k        pick a project (ALL clears the filter)",
     "  l                 open the log pager for the selection",
+    "  L logs            live log wall - all running agents (esc back)",
     "  ? help            this overlay (any key closes)",
     "  q                 quit",
 ]
