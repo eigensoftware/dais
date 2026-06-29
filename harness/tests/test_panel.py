@@ -870,6 +870,46 @@ class TestLogWall(unittest.TestCase):
         self.assertIn("waiting for output", text)
 
 
+class TestLogWallMode(unittest.TestCase):
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-lwm-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def test_L_opens_then_closes(self):
+        papp = self._papp()
+        self.assertFalse(papp.show_logwall)
+        papp.handle(ord("L"), [], 0, None)
+        self.assertTrue(papp.show_logwall)
+        papp.handle(ord("L"), [], 0, None)
+        self.assertFalse(papp.show_logwall)
+
+    def test_esc_closes_wall(self):
+        papp = self._papp()
+        papp.show_logwall = True
+        papp.handle(27, [], 0, None)
+        self.assertFalse(papp.show_logwall)
+
+    def test_q_quits_from_wall(self):
+        papp = self._papp()
+        papp.show_logwall = True
+        self.assertFalse(papp.handle(ord("q"), [], 0, None))
+
+    def test_draw_shows_wall_and_hides_panes(self):
+        papp = self._papp()
+        papp.show_logwall = True
+        with mock.patch.object(d, "running_threads", return_value=[]):
+            papp.draw()
+        text = "\n".join(c[2] for c in papp.scr.calls)
+        self.assertIn("LOG WALL", text)
+        self.assertNotIn("INSPECTOR", text)
+        self.assertNotIn("PROJECTS", text)
+
+
 class TestSplitBands(unittest.TestCase):
     def test_even_split(self):
         self.assertEqual(pn.split_bands(1, 9, 3), [(1, 3), (4, 3), (7, 3)])

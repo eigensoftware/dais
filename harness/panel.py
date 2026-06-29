@@ -417,6 +417,7 @@ class PanelApp(d.App):
         self._rail_i = 0
         self.project_filter = None
         self.show_help = False
+        self.show_logwall = False
 
     def left_rows(self):
         rows = panel_work_rows(self.snap, project=self.project_filter,
@@ -430,6 +431,14 @@ class PanelApp(d.App):
         scr = self.scr
         scr.erase()
         h, w = scr.getmaxyx()
+        if self.show_logwall:
+            render_vitals(scr, Rect(0, 0, 1, w), self)
+            render_logwall(scr, Rect(1, 0, max(1, h - 2), w), self)
+            render_bar(scr, Rect(h - 1, 0, 1, w), self, self.pane_focus)
+            if self.show_help:
+                render_help(scr, h, w)
+            scr.refresh()
+            return
         rects = layout(w, h, show_rail=True, show_inspector=True, show_feed=True)
         order = focus_order(rects)
         if self.pane_focus not in order:
@@ -452,6 +461,15 @@ class PanelApp(d.App):
             return True
         if ch == ord("?"):
             self.show_help = True
+            return True
+        if self.show_logwall:                   # the wall is a passive full-body view
+            if ch == ord("q"):
+                return False
+            if ch in (ord("L"), 27):            # L or esc returns to the control panel
+                self.show_logwall = False
+            return True
+        if ch == ord("L"):                      # open the live log wall
+            self.show_logwall = True
             return True
         # global panel keys first
         if ch == ord("q"):
