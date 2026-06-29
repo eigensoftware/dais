@@ -8,6 +8,7 @@ layout. Reached via DAIS_PANEL=1; the classic `dais top` is unchanged.
 from collections import namedtuple
 
 import curses
+import textwrap
 
 import dashboard as d
 from dashboard import _add, clip_cols, pad_cols, disp_width  # width-aware primitives
@@ -97,7 +98,6 @@ def render_work(scr, rect, app, focused):
 
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection (app.detail_lines), wrapped to the pane width."""
-    import textwrap
     inner = render_pane_title(scr, rect, "INSPECTOR", focused)
     rows = app.left_rows()
     _, sel_row = app._selected(rows)

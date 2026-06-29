@@ -130,5 +130,7 @@ class TestPaneRenderers(unittest.TestCase):
         self.assertIn("lyr-1", text)
         self.assertIn("ready_to_merge", text)
         for (y, x, s, _a) in scr.calls:
+            self.assertGreaterEqual(y, rect.y)
             self.assertLess(y, rect.y + rect.h)
+            self.assertGreaterEqual(x, rect.x)
             self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)
