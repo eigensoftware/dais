@@ -84,3 +84,51 @@ class TestFocus(unittest.TestCase):
 
     def test_cycle_empty_returns_none(self):
         self.assertIsNone(pn.cycle_focus("work", [], +1))
+
+
+import sqlite3
+from unittest import mock
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_cockpit import FakeScr, _conn, make_app   # reuse the wired-App helpers
+
+
+def _seed(conn, rows):
+    conn.executemany(
+        "INSERT INTO tasks(id,project,title,status,priority,pr_url) VALUES(?,?,?,?,?,?)",
+        rows)
+    conn.commit()
+
+
+class TestPaneRenderers(unittest.TestCase):
+    def _app(self, rows):
+        conn = _conn(); _seed(conn, rows)
+        return make_app(conn=conn, h=40, w=200)
+
+    def test_work_renders_rows_within_rect(self):
+        app = self._app([("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
+                          "https://x/pull/9")])
+        scr = FakeScr(40, 200)
+        rect = pn.Rect(2, 5, 20, 60)
+        pn.render_work(scr, rect, app, focused=True)
+        # something drew the gate banner, and nothing escaped the rect
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("NEEDS YOU", text)
+        for (y, x, s, _a) in scr.calls:
+            self.assertGreaterEqual(y, rect.y)
+            self.assertLess(y, rect.y + rect.h)
+            self.assertGreaterEqual(x, rect.x)
+            self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)
+
+    def test_inspector_shows_selection_detail(self):
+        app = self._app([("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
+                          "https://x/pull/9")])
+        app.sel_id = "lyr-1"
+        scr = FakeScr(40, 200)
+        rect = pn.Rect(2, 70, 20, 60)
+        pn.render_inspector(scr, rect, app, focused=False)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("lyr-1", text)
+        self.assertIn("ready_to_merge", text)
+        for (y, x, s, _a) in scr.calls:
+            self.assertLess(y, rect.y + rect.h)
+            self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)

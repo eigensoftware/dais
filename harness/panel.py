@@ -70,3 +70,42 @@ def cycle_focus(current, order, direction=1):
     if current not in order:
         return order[0]
     return order[(order.index(current) + direction) % len(order)]
+
+
+def render_pane_title(scr, rect, title, focused):
+    """Draw a pane's title row (reverse bar); returns the inner Rect below it."""
+    attr = curses.A_REVERSE | (curses.A_BOLD if focused else 0)
+    _add(scr, rect.y, rect.x, pad_cols(f" {title}", rect.w), rect.x + rect.w, attr)
+    return Rect(rect.y + 1, rect.x, max(0, rect.h - 1), rect.w)
+
+
+def render_work(scr, rect, app, focused):
+    """The decisions/running/board list (app.left_rows) drawn into rect, scrolled to
+    keep the selection visible — the same windowing App.draw uses for its left pane."""
+    inner = render_pane_title(scr, rect, "WORK", focused)
+    rows = app.left_rows()
+    sel_i, sel_row = app._selected(rows)
+    app.sel_id = sel_row["id"] if sel_row else None
+    base = max(0, sel_i - inner.h + 1) if rows else 0
+    for idx, r in enumerate(rows[base:base + inner.h]):
+        attr = app._row_attr(r)
+        if (base + idx) == sel_i and focused and r.get("sel", True):
+            attr |= curses.A_REVERSE
+        _add(scr, inner.y + idx, inner.x, pad_cols(r["label"], inner.w),
+             inner.x + inner.w, attr)
+
+
+def render_inspector(scr, rect, app, focused):
+    """Detail of the current selection (app.detail_lines), wrapped to the pane width."""
+    import textwrap
+    inner = render_pane_title(scr, rect, "INSPECTOR", focused)
+    rows = app.left_rows()
+    _, sel_row = app._selected(rows)
+    wrapped = []
+    for ln in app.detail_lines(sel_row):
+        if disp_width(ln) <= inner.w:
+            wrapped.append(ln)
+        else:
+            wrapped.extend(textwrap.wrap(ln, inner.w) or [""])
+    for idx, ln in enumerate(wrapped[:inner.h]):
+        _add(scr, inner.y + idx, inner.x, ln, inner.x + inner.w)
