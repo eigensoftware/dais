@@ -372,3 +372,40 @@ class TestRenderWorkNative(unittest.TestCase):
         rows = papp.left_rows()
         self.assertTrue(any(r["kind"] == "band" and "NEEDS YOU" in r["label"] for r in rows))
         self.assertTrue(any(r["kind"] == "task" and r["id"] == "lyr-1" for r in rows))
+
+
+class TestRailSelection(unittest.TestCase):
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb3-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def test_rail_jk_sets_project_filter(self):
+        papp = self._papp([("lyr-1","beacon","x","ready_to_merge","high","https://x/pull/9"),
+                           ("cou-1","acme","y","proposed","high",None)])
+        papp.pane_focus = "rail"
+        papp.draw()                                   # establishes rail order
+        # move down from ALL to the first project, filter should be set to a real project
+        papp.handle(ord("j"), papp.left_rows(), 0, None)
+        self.assertIsNotNone(papp.project_filter)
+        self.assertIn(papp.project_filter, {"beacon", "acme"})
+        # work is now limited to that project
+        projs = {r["project"] for r in papp.left_rows() if r["kind"] == "task"}
+        self.assertEqual(projs, {papp.project_filter})
+
+    def test_g_toggles_expanded(self):
+        papp = self._papp([("w-1","cedar","x","ready","high",None)])
+        self.assertFalse(papp._panel_expanded)
+        papp.handle(ord("g"), papp.left_rows(), 0, None)
+        self.assertTrue(papp._panel_expanded)
+
+    def test_rail_renders_all_and_projects(self):
+        papp = self._papp([("lyr-1","beacon","x","ready","high",None)])
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 30, 22), papp, focused=True)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("ALL", text)
+        self.assertIn("beacon", text)

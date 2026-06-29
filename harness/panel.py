@@ -147,24 +147,38 @@ def render_vitals(scr, rect, app):
     ng = d.gate_count(snap, running_ids) if snap else 0
     cool = " · COOLING" if (snap and snap.cap_state) else ""
     clk = d.to_local_hhmm(snap.ts, with_secs=True) if snap else ""
+    pf = getattr(app, "project_filter", None)
+    proj_seg = " · all projects" if pf is None else f" · {pf}"
     head = (f" {ident}  {badge} · >{len(threads)} running · {nproj} proj"
-            f" · {ng} need you{cool}  {clk}")
+            f" · {ng} need you{proj_seg}{cool}  {clk}")
     _add(scr, rect.y, rect.x, pad_cols(head, rect.w), rect.x + rect.w,
          curses.A_REVERSE | curses.A_BOLD)
 
 
+def _rail_items(app):
+    names = [p.name for p in app.snap.projects] if app.snap else []
+    return ["ALL"] + names
+
+
 def render_rail(scr, rect, app, focused):
-    """Project navigator with running/gate chips."""
+    """Project navigator: ALL + per-project rows, with running/gate chips and filter mark."""
     inner = render_pane_title(scr, rect, "PROJECTS", focused)
-    snap = app.snap
-    if not snap:
-        return
-    for idx, p in enumerate(snap.projects[:inner.h]):
-        run = " >" if p.running else "  "
-        ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER)
-        chip = f" !{ng}" if ng else ""
-        _add(scr, inner.y + idx, inner.x, clip_cols(f"{run} {p.name}{chip}", inner.w),
-             inner.x + inner.w)
+    items = _rail_items(app)
+    ri = getattr(app, "_rail_i", 0)
+    pf = getattr(app, "project_filter", None)
+    for idx, name in enumerate(items[:inner.h]):
+        active = (name == "ALL" and pf is None) or name == pf
+        mark = "\xbb" if active else " "        # » (terminal-safe)
+        attr = curses.A_REVERSE if (focused and idx == ri) else (
+            curses.A_BOLD if active else 0)
+        if app.snap and name != "ALL":
+            p = next((x for x in app.snap.projects if x.name == name), None)
+            ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER) if p else 0
+            run = ">" if (p and p.running) else " "
+            label = f"{mark}{run}{name}" + (f" !{ng}" if ng else "")
+        else:
+            label = f"{mark} {name}"
+        _add(scr, inner.y + idx, inner.x, clip_cols(label, inner.w), inner.x + inner.w, attr)
 
 
 def render_feed(scr, rect, app):
@@ -202,6 +216,7 @@ class PanelApp(d.App):
         super().__init__(scr, interval=interval, root=root, conn=conn)
         self.pane_focus = "work"
         self._panel_expanded = False
+        self._rail_i = 0
         self.project_filter = None
 
     def left_rows(self):
@@ -245,6 +260,17 @@ class PanelApp(d.App):
                                                       curses.KEY_DOWN, curses.KEY_UP):
             self.detail_scroll += 1 if ch in (ord("j"), curses.KEY_DOWN) else -1
             self.detail_scroll = max(0, self.detail_scroll)
+            return True
+        if ch == ord("g"):                      # expand/collapse loop + archive
+            self._panel_expanded = not self._panel_expanded
+            return True
+        if self.pane_focus == "rail" and ch in (ord("j"), ord("k"),
+                                                curses.KEY_DOWN, curses.KEY_UP):
+            items = _rail_items(self)
+            step = 1 if ch in (ord("j"), curses.KEY_DOWN) else -1
+            self._rail_i = max(0, min(self._rail_i + step, len(items) - 1))
+            self.project_filter = None if items[self._rail_i] == "ALL" else items[self._rail_i]
+            self.sel_id = None                  # reset work selection to the filtered top
             return True
         # everything else (j/k select, a/x/+/-/n/o/enter, /, b, ...) reuses App.handle,
         # which already drives selection + the action engine on `rows`/`sel_row`.
