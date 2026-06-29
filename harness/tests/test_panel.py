@@ -839,6 +839,21 @@ class TestLogWall(unittest.TestCase):
             pn.render_logwall(scr, pn.Rect(1, 0, 30, 120), papp)
         text = "\n".join(c[2] for c in scr.calls)
         self.assertIn("no agents running", text)
+        self.assertNotIn("press w", text)
+
+    def test_overflow_note_reserves_last_row(self):
+        papp = self._papp()
+        threads = [{"project": f"p{i}", "agent": "eng", "since": "2026-06-29 00:00:00",
+                    "secs": 5, "task": f"t{i}", "log_path": None} for i in range(5)]
+        with mock.patch.object(d, "running_threads", return_value=threads):
+            scr = FakeScr(40, 200)
+            pn.render_logwall(scr, pn.Rect(1, 0, 4, 120), papp)   # title takes 1 row -> inner.h == 3
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("+3 more", text)                            # 5 agents, 2 shown, 3 hidden
+        headers = [c for c in scr.calls if "running" in c[2] and "/eng" in c[2]]
+        self.assertEqual(len(headers), 2)                         # exactly 2 headers (no clobber)
+        note = next(c for c in scr.calls if "+3 more" in c[2])
+        self.assertFalse(any(h[0] == note[0] for h in headers))   # note is on its own row
 
     def test_band_header_and_live_tail_with_red_errors(self):
         import tempfile

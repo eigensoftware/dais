@@ -331,14 +331,17 @@ def render_logwall(scr, rect, app):
     threads = d.running_threads(app.snap, app._now()) if app.snap else []
     inner = render_pane_title(scr, rect, f"LOG WALL · {len(threads)} agents", True)
     if not threads:
-        _add(scr, inner.y, inner.x,
-             clip_cols("  (no agents running - press w to start the loop)", inner.w),
+        _add(scr, inner.y, inner.x, clip_cols("  (no agents running)", inner.w),
              inner.x + inner.w, curses.A_DIM)
         return
-    dropped = 0
-    for t, (by, bh) in zip(threads, split_bands(inner.y, inner.h, len(threads))):
+    n = len(threads)
+    if n > inner.h:                          # not every agent fits — reserve the last row for the note
+        shown, note_n = max(0, inner.h - 1), n - max(0, inner.h - 1)
+    else:
+        shown, note_n = n, 0
+    band_h = inner.h - (1 if note_n else 0)  # leave the last row free when a note will be drawn
+    for t, (by, bh) in zip(threads, split_bands(inner.y, band_h, shown)):
         if bh <= 0:
-            dropped += 1
             continue
         tid = t.get("task") or "—"
         head = f"▶ {t['project']}/{t['agent']} · running {d.fmt_elapsed(t.get('secs') or 0)} · {tid}"
@@ -356,9 +359,9 @@ def render_logwall(scr, rect, app):
             attr = app._cp(2) if d._LOG_ERR_RE.search(ln) else 0
             _add(scr, by + 1 + i, inner.x, clip_cols("  " + ln, inner.w),
                  inner.x + inner.w, attr)
-    if dropped:
+    if note_n:
         _add(scr, inner.y + inner.h - 1, inner.x,
-             clip_cols(f"  +{dropped} more agent(s) - resize to see", inner.w),
+             clip_cols(f"  +{note_n} more agent(s) - resize to see", inner.w),
              inner.x + inner.w, curses.A_DIM)
 
 
