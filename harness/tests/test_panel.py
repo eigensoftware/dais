@@ -134,3 +134,38 @@ class TestPaneRenderers(unittest.TestCase):
             self.assertLess(y, rect.y + rect.h)
             self.assertGreaterEqual(x, rect.x)
             self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)
+
+
+class TestChromePanes(unittest.TestCase):
+    def _app(self, rows):
+        conn = _conn(); _seed(conn, rows)
+        return make_app(conn=conn, h=40, w=200)
+
+    def test_vitals_has_workspace_and_gate_count_honestly(self):
+        app = self._app([("cou-1", "acme", "approve", "proposed", "high", None)])
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        text = scr.calls[-1][2]
+        self.assertIn("DAIS", text)
+        self.assertIn("1 need you", text)     # honest gate count
+        self.assertNotIn("5h", text)          # NO fake budget bar
+
+    def test_rail_lists_projects(self):
+        app = self._app([("cou-1", "acme", "x", "proposed", "high", None),
+                         ("lyr-1", "beacon", "y", "ready", "high", None)])
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 30, 22), app, focused=False)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("acme", text)
+        self.assertIn("beacon", text)
+
+    def test_bar_shows_contextual_actions_for_selection(self):
+        app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
+                          "https://x/pull/9")])
+        app.sel_id = "lyr-1"
+        scr = FakeScr(40, 200)
+        pn.render_bar(scr, pn.Rect(39, 0, 1, 200), app, focus="work")
+        text = scr.calls[-1][2]
+        self.assertIn("ship", text)           # contextual action bar reused
+        self.assertIn(": command", text)
+        self.assertIn("q quit", text)

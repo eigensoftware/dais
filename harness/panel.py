@@ -109,3 +109,55 @@ def render_inspector(scr, rect, app, focused):
             wrapped.extend(textwrap.wrap(ln, inner.w) or [""])
     for idx, ln in enumerate(wrapped[:inner.h]):
         _add(scr, inner.y + idx, inner.x, ln, inner.x + inner.w)
+
+
+def render_vitals(scr, rect, app):
+    """Honest org vitals: identity · watch state · running/idle · cooling · gates · clock.
+    NO budget bar (no usage data exists)."""
+    snap = app.snap
+    ws = snap.workspace if snap else None
+    ident = f"DAIS · {ws} · LIVE" if ws else "DAIS · LIVE"
+    now = app._now()
+    threads = d.running_threads(snap, now) if snap else []
+    running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
+    wstate, wint, wpar = d.watch_state(app.root)
+    badge = (f"watch {wint or '?'}s x{wpar or '?'}" if wstate == "running"
+             else "PAUSED" if wstate == "paused" else "watch stopped")
+    nproj = len(snap.projects) if snap else 0
+    ng = d.gate_count(snap, running_ids) if snap else 0
+    cool = " · COOLING" if (snap and snap.cap_state) else ""
+    clk = d.to_local_hhmm(snap.ts, with_secs=True) if snap else ""
+    head = (f" {ident}  {badge} · >{len(threads)} running · {nproj} proj"
+            f" · {ng} need you{cool}  {clk}")
+    _add(scr, rect.y, rect.x, pad_cols(head, rect.w), rect.x + rect.w,
+         curses.A_REVERSE | curses.A_BOLD)
+
+
+def render_rail(scr, rect, app, focused):
+    """Project navigator with running/gate chips."""
+    inner = render_pane_title(scr, rect, "PROJECTS", focused)
+    snap = app.snap
+    if not snap:
+        return
+    for idx, p in enumerate(snap.projects[:inner.h]):
+        run = " >" if p.running else "  "
+        ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER)
+        chip = f" !{ng}" if ng else ""
+        _add(scr, inner.y + idx, inner.x, clip_cols(f"{run} {p.name}{chip}", inner.w),
+             inner.x + inner.w)
+
+
+def render_feed(scr, rect, app):
+    """Phase-A placeholder line; the real activity feed lands in the feed/vitals phase."""
+    _add(scr, rect.y, rect.x, pad_cols(" FEED  (activity ticker — coming next phase)",
+         rect.w), rect.x + rect.w, curses.A_DIM)
+
+
+def render_bar(scr, rect, app, focus):
+    """Contextual action bar (reused) + the panel's global keys."""
+    rows = app.left_rows()
+    _, sel_row = app._selected(rows)
+    acts = app.action_bar(sel_row) if sel_row else ""
+    hint = f" {acts}  ·  : command · tab pane · ? help · q quit"
+    _add(scr, rect.y, rect.x, pad_cols(hint, rect.w), rect.x + rect.w,
+         curses.A_REVERSE)
