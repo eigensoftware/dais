@@ -588,5 +588,61 @@ class TestWorkspaceResolution(CliTest):
         self.assertIsNone(q(B, "SELECT title FROM tasks WHERE id='env-1'"))
 
 
+class TestActionsVerb(CliTest):
+    """`dais actions <id>` lists the founder actions for a task plus the exact
+    command for each (it shells harness/actions.py's __main__ lister)."""
+
+    def test_lists_actions_for_a_proposed_task(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "An initiative",
+             "--id", "a-1", "--status", "proposed")
+        r = dais(self.root, "actions", "a-1")
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("dais approve a-1", r.stdout)   # the advance action's command
+        self.assertIn("reject", r.stdout)             # the reverse action's label
+        self.assertIn("new task", r.stdout)           # the trailing "new task" line
+
+    def test_unknown_task_errors(self):
+        r = dais(self.root, "actions", "nope")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no such task", r.stdout + r.stderr)
+
+
+class TestStartVerb(CliTest):
+    """`dais start <id>` runs the reactive role whose `handles` includes the
+    task's status. Non-runnable statuses print the fix and exit nonzero."""
+
+    def test_proposed_is_guarded(self):
+        dais(self.root, "task", "add", "demo", "Idea",
+             "--id", "s-1", "--status", "proposed")
+        r = dais(self.root, "start", "s-1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("approve it first", r.stdout + r.stderr)
+
+    def test_done_has_nothing_to_run(self):
+        dais(self.root, "task", "add", "demo", "Shipped",
+             "--id", "s-2", "--status", "done")
+        r = dais(self.root, "start", "s-2")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("nothing to run", r.stdout + r.stderr)
+
+    def test_unknown_task_errors(self):
+        r = dais(self.root, "start", "nope")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no such task", r.stdout + r.stderr)
+
+    def test_ready_resolves_the_handling_role(self):
+        # the scaffold template's roles has engineer handling `ready`. run-agent.sh
+        # fails fast (no real repo/claude), so we don't assert success — only that
+        # the role resolved, proven by the "starting <proj>/<role>" line printed
+        # BEFORE the exec.
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "Build it",
+             "--id", "s-3", "--status", "ready")
+        r = dais(self.root, "start", "s-3")
+        self.assertIn("starting demo/engineer", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

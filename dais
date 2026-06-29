@@ -28,6 +28,8 @@ dais — your agent company control panel
   dais schedule install|uninstall|status   run the interval in the background (cross-platform)
   dais pause | resume                 park/un-park the loop (honored by watch + schedule)
   dais cancel <project>               stop the project's in-flight agent (marks it interrupted)
+  dais actions <id>                    list the founder actions for a task + the exact command for each
+  dais start <id>                      run the role that handles this task's status, now
   dais run <project> <agent>          run a specific agent now (headless claude)
   dais ship <project> <pr#> [--migrated]  QA-gated, migration-aware squash-merge to main (founder gate)
   dais logs <project> [N]             recent runs
@@ -181,6 +183,18 @@ MD
       *) usage ;;
     esac ;;
 
+  actions)
+    # discoverability: list the founder actions valid for a task + the exact command
+    # for each. Pure renderer — the catalog/argv live in harness/actions.py (shared with
+    # the cockpit TUI), so the CLI just looks the row up and shells the __main__ lister.
+    id="${1:?usage: dais actions <id>}"
+    row="$(db -separator '|' "SELECT status,project,COALESCE(pr_url,''),COALESCE(priority,'medium') FROM tasks WHERE id='$(sqlesc "$id")';")"
+    [ -n "$row" ] || { echo "no such task: $id"; exit 1; }
+    st="${row%%|*}"; r="${row#*|}"; proj="${r%%|*}"; r="${r#*|}"; pr="${r%%|*}"; prio="${r##*|}"
+    haspr=0; [ -n "$pr" ] && haspr=1
+    echo "actions for $id  ($st):"
+    python3 "$DAIS_ROOT/harness/actions.py" "$st" task "$haspr" "$id" "$proj" "$pr" "$prio" ;;
+
   handoff)
     id="${1:?usage: dais handoff <id> <role> [note]}"; to="${2:?to-role}"; note="${3:-}"
     proj="$(db "SELECT project FROM tasks WHERE id='$(sqlesc "$id")';")"
@@ -270,6 +284,26 @@ MD
 
   run)
     exec "$DAIS_ROOT/harness/run-agent.sh" "$@" ;;
+
+  start)
+    # run the reactive role that handles this task's status, right now. Non-runnable
+    # statuses (founder gates / terminal) print the fix and exit nonzero; a runnable
+    # one resolves the role whose `handles` includes the status (the awk idiom from
+    # `approve`/`handoff`) and execs the runner like `dais run`.
+    id="${1:?usage: dais start <id>}"
+    row="$(db -separator '|' "SELECT status,project FROM tasks WHERE id='$(sqlesc "$id")';")"
+    [ -n "$row" ] || { echo "no such task: $id"; exit 1; }
+    st="${row%%|*}"; proj="${row##*|}"
+    case "$st" in
+      proposed)        echo "start: $id is 'proposed' — approve it first:  dais approve $id"; exit 1 ;;
+      backlog)         echo "start: $id is 'backlog' — promote it:  dais task set $id --status ready"; exit 1 ;;
+      deferred)        echo "start: $id is 'deferred' — un-defer:  dais task set $id --status ready"; exit 1 ;;
+      done|cancelled)  echo "start: $id is '$st' — nothing to run."; exit 1 ;;
+    esac
+    role="$(awk -v s="$st" '!/^#/ && $4!="-"{n=split($4,h,","); for(i=1;i<=n;i++) if(h[i]==s){print $1; exit}}' "$DAIS_HOME/projects/$proj/roles" 2>/dev/null)"
+    [ -n "$role" ] || { echo "start: no role handles status '$st' in $proj/roles"; exit 1; }
+    echo "▶ starting $proj/$role for $id ($st)…"
+    exec "$DAIS_ROOT/harness/run-agent.sh" "$proj" "$role" ;;
 
   scaffold)
     name="${1:?usage: dais scaffold <project>}"
