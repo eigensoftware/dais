@@ -27,6 +27,7 @@ class TestLayout(unittest.TestCase):
         self.assertEqual(L["rail"].x, 0)
         self.assertEqual(L["work"].x, 0)
         self.assertLess(L["rail"].y, L["work"].y)
+        self.assertEqual(L["work"].y, L["rail"].y + L["rail"].h + pn._LEFT_GAP)  # blank row above WORK
         self.assertGreater(L["inspector"].x, 0)
         self.assertEqual(L["inspector"].x, L["rail"].w)     # inspector starts where the left col ends
 
@@ -66,7 +67,23 @@ class TestLayout(unittest.TestCase):
         self.assertLess(few["rail"].h, many["rail"].h)       # more projects -> taller PROJECTS block
         self.assertGreater(few["work"].h, many["work"].h)    # ... and shorter WORK
         self.assertGreater(many["work"].h, 0)                # WORK never vanishes
-        self.assertEqual(few["rail"].h + few["work"].h, few["inspector"].h)  # left col fills the band
+        # left column fills the band: PROJECTS + blank-gap + WORK == inspector height
+        self.assertEqual(few["rail"].h + pn._LEFT_GAP + few["work"].h, few["inspector"].h)
+
+    def test_two_col_boundary_width(self):
+        # at exactly _TWO_COL_MIN_W the layout is still two side-by-side columns, tiling cleanly
+        L = pn.layout(pn._TWO_COL_MIN_W, 40, n_rail_items=6)
+        _covers_no_overlap(L, pn._TWO_COL_MIN_W, 40)
+        self.assertEqual(L["rail"].x, 0)
+        self.assertEqual(L["work"].x, 0)
+        self.assertGreater(L["inspector"].x, 0)              # right column, not stacked
+
+    def test_projects_capped_work_survives_many_projects(self):
+        # a huge project list never starves WORK: PROJECTS caps at _PROJ_MAX_H, WORK keeps >=1 row
+        L = pn.layout(200, 50, n_rail_items=40)
+        _covers_no_overlap(L, 200, 50)
+        self.assertLessEqual(L["rail"].h, pn._PROJ_MAX_H)
+        self.assertGreaterEqual(L["work"].h, 1)
 
 
 class TestFocus(unittest.TestCase):

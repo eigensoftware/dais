@@ -23,6 +23,7 @@ _INSP_MAX_W = 90          # ... nor wider than this (extra width goes to WORK)
 _INSP_PCT = 45            # inspector target width ≈ 45% of the screen
 _PROJ_MAX_H = 12          # cap the PROJECTS block so WORK always keeps room
 _MIN_WORK_H = 5           # ... and leave WORK at least this many rows when possible
+_LEFT_GAP = 1             # blank separator row between PROJECTS and WORK in the left column
 
 
 def _projects_h(n_rail_items, mid_h):
@@ -51,14 +52,15 @@ def layout(w, h, *, n_rail_items=1, show_feed=True):
         insp_w = min(_INSP_MAX_W, max(_INSP_MIN_W, w * _INSP_PCT // 100))
         left_w = w - insp_w
         out["rail"] = Rect(mid_y, 0, proj_h, left_w)
-        out["work"] = Rect(mid_y + proj_h, 0, max(0, mid_h - proj_h), left_w)
+        out["work"] = Rect(mid_y + proj_h + _LEFT_GAP, 0,
+                           max(0, mid_h - proj_h - _LEFT_GAP), left_w)
         out["inspector"] = Rect(mid_y, left_w, mid_h, insp_w)
     else:                                             # too narrow to go side-by-side: stack them
         out["rail"] = Rect(mid_y, 0, proj_h, w)
-        rest = max(0, mid_h - proj_h)
+        rest = max(0, mid_h - proj_h - _LEFT_GAP)     # -gap = the blank separator row above WORK
         work_h = rest * 6 // 10                       # WORK gets the larger share of the leftover
-        out["work"] = Rect(mid_y + proj_h, 0, work_h, w)
-        out["inspector"] = Rect(mid_y + proj_h + work_h, 0, rest - work_h, w)
+        out["work"] = Rect(mid_y + proj_h + _LEFT_GAP, 0, work_h, w)
+        out["inspector"] = Rect(mid_y + proj_h + _LEFT_GAP + work_h, 0, rest - work_h, w)
     return out
 
 
