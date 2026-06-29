@@ -822,6 +822,54 @@ class TestPaneFocusIndicator(unittest.TestCase):
         self.assertIn("WORK", titles[0][2])
 
 
+class TestLogWall(unittest.TestCase):
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-lw-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def test_empty_state_when_no_agents(self):
+        papp = self._papp()
+        with mock.patch.object(d, "running_threads", return_value=[]):
+            scr = FakeScr(40, 200)
+            pn.render_logwall(scr, pn.Rect(1, 0, 30, 120), papp)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("no agents running", text)
+
+    def test_band_header_and_live_tail_with_red_errors(self):
+        import tempfile
+        logf = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, prefix="dais-lwlog-")
+        logf.write("starting build\nrunning tests\nTraceback (most recent call last)\n")
+        logf.close()
+        papp = self._papp()
+        papp._cp = lambda n: n * 1000
+        thread = {"project": "cedar", "agent": "engineer", "since": "2026-06-29 00:00:00",
+                  "secs": 240, "task": "win-95", "log_path": logf.name}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            scr = FakeScr(40, 200)
+            pn.render_logwall(scr, pn.Rect(1, 0, 30, 120), papp)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("cedar/engineer", text)
+        self.assertIn("win-95", text)
+        self.assertIn("running tests", text)
+        err = [c for c in scr.calls if "Traceback" in c[2]]
+        self.assertTrue(err and err[0][3] == 2000)            # red = _cp(2)
+
+    def test_waiting_when_log_missing(self):
+        papp = self._papp()
+        thread = {"project": "cedar", "agent": "engineer", "since": "2026-06-29 00:00:00",
+                  "secs": 5, "task": "win-95", "log_path": None}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            scr = FakeScr(40, 200)
+            pn.render_logwall(scr, pn.Rect(1, 0, 30, 120), papp)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("waiting for output", text)
+
+
 class TestSplitBands(unittest.TestCase):
     def test_even_split(self):
         self.assertEqual(pn.split_bands(1, 9, 3), [(1, 3), (4, 3), (7, 3)])

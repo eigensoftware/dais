@@ -317,6 +317,43 @@ def render_feed(scr, rect, app):
          rect.w), rect.x + rect.w, curses.A_DIM)
 
 
+def render_logwall(scr, rect, app):
+    """Full-body live log wall: one full-width band per running agent (green header + live tail).
+    Reuses running_threads + tail_lines + _LOG_ERR_RE; tailed each draw so the text streams live."""
+    threads = d.running_threads(app.snap, app._now()) if app.snap else []
+    inner = render_pane_title(scr, rect, f"LOG WALL · {len(threads)} agents", True, app)
+    if not threads:
+        _add(scr, inner.y, inner.x,
+             clip_cols("  (no agents running - press w to start the loop)", inner.w),
+             inner.x + inner.w, curses.A_DIM)
+        return
+    dropped = 0
+    for t, (by, bh) in zip(threads, split_bands(inner.y, inner.h, len(threads))):
+        if bh <= 0:
+            dropped += 1
+            continue
+        tid = t.get("task") or "—"
+        head = f"▶ {t['project']}/{t['agent']} · running {d.fmt_elapsed(t.get('secs') or 0)} · {tid}"
+        _add(scr, by, inner.x, pad_cols(head, inner.w), inner.x + inner.w,
+             app._cp(1) | curses.A_REVERSE | curses.A_BOLD)
+        k = bh - 1
+        if k <= 0:
+            continue
+        lines = d.tail_lines(t.get("log_path"), k)
+        if not lines:
+            _add(scr, by + 1, inner.x, clip_cols("  (waiting for output...)", inner.w),
+                 inner.x + inner.w, curses.A_DIM)
+            continue
+        for i, ln in enumerate(lines):
+            attr = app._cp(2) if d._LOG_ERR_RE.search(ln) else 0
+            _add(scr, by + 1 + i, inner.x, clip_cols("  " + ln, inner.w),
+                 inner.x + inner.w, attr)
+    if dropped:
+        _add(scr, inner.y + inner.h - 1, inner.x,
+             clip_cols(f"  +{dropped} more agent(s) - resize to see", inner.w),
+             inner.x + inner.w, curses.A_DIM)
+
+
 def render_bar(scr, rect, app, focus):
     """Contextual action bar (reused) + the panel's global keys."""
     rows = app.left_rows()
