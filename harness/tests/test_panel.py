@@ -119,8 +119,14 @@ class TestPaneRenderers(unittest.TestCase):
         return make_app(conn=conn, h=40, w=200)
 
     def test_work_renders_rows_within_rect(self):
-        app = self._app([("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
-                          "https://x/pull/9")])
+        import tempfile
+        conn = _conn()
+        _seed(conn, [("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
+                      "https://x/pull/9")])
+        root = tempfile.mkdtemp(prefix="dais-pwr-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        app = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        app.snap = d.load_snapshot(conn, root=root)
         scr = FakeScr(40, 200)
         rect = pn.Rect(2, 5, 20, 60)
         pn.render_work(scr, rect, app, focused=True)
@@ -331,3 +337,38 @@ class TestPanelWorkRows(unittest.TestCase):
         rows = pn.panel_work_rows(snap, show_parked=True)
         self.assertTrue(any("PARKED" in r.get("label", "") for r in rows))
         self.assertTrue(any(r["kind"] == "task" and r["status"] == "backlog" for r in rows))
+
+
+class TestRenderWorkNative(unittest.TestCase):
+    def _app(self, rows):
+        conn = _conn(); _seed(conn, rows)
+        return make_app(conn=conn, h=40, w=200)
+
+    def test_band_bars_and_tags_render(self):
+        app = self._app([("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
+                          "https://x/pull/9"),
+                         ("cou-1", "acme", "post", "needs_review", "high", None)])
+        # PanelApp model: make a PanelApp to get the override + state
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=app.conn)
+        papp.snap = d.load_snapshot(app.conn, root=root)
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 90), papp, focused=True)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("NEEDS YOU", text)
+        self.assertIn("MERGE", text)
+        self.assertIn("REVIEW", text)
+        for (y, x, s, _a) in scr.calls:                # within the rect
+            self.assertGreaterEqual(y, 1); self.assertLess(y, 31)
+            self.assertLessEqual(pn.disp_width(s), 90 - x)
+
+    def test_panelapp_left_rows_is_the_panel_model(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb2-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("lyr-1","beacon","x","ready_to_merge","high","https://x/pull/9")])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        rows = papp.left_rows()
+        self.assertTrue(any(r["kind"] == "band" and "NEEDS YOU" in r["label"] for r in rows))
+        self.assertTrue(any(r["kind"] == "task" and r["id"] == "lyr-1" for r in rows))

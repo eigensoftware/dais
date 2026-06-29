@@ -80,19 +80,38 @@ def render_pane_title(scr, rect, title, focused):
     return Rect(rect.y + 1, rect.x, max(0, rect.h - 1), rect.w)
 
 
+def _tag_attr(app, status):
+    return app._cp(d.STATUS_PAIR.get(status, 6))
+
+
 def render_work(scr, rect, app, focused):
-    """The decisions/running/board list (app.left_rows) drawn into rect, scrolled to
-    keep the selection visible — the same windowing App.draw uses for its left pane."""
+    """Panel-native WORK: band bars + color-tagged selectable rows."""
     inner = render_pane_title(scr, rect, "WORK", focused)
     rows = app.left_rows()
     sel_i, sel_row = app._selected(rows)
     app.sel_id = sel_row["id"] if sel_row else None
     base = max(0, sel_i - inner.h + 1) if rows else 0
     for idx, r in enumerate(rows[base:base + inner.h]):
-        attr = app._row_attr(r)
-        if (base + idx) == sel_i and focused and r.get("sel", True):
-            attr |= curses.A_REVERSE
-        _add(scr, inner.y + idx, inner.x, pad_cols(r["label"], inner.w),
+        y = inner.y + idx
+        if r["kind"] == "band":
+            bar = pad_cols(f"▌ {r['label']} ", inner.w)
+            _add(scr, y, inner.x, bar, inner.x + inner.w, curses.A_REVERSE | curses.A_BOLD)
+            continue
+        if r["kind"] == "info":
+            _add(scr, y, inner.x, clip_cols(r["label"], inner.w), inner.x + inner.w,
+                 curses.A_DIM)
+            continue
+        # task / running row: TAG  id  project  title
+        selected = (base + idx) == sel_i and focused
+        if r["kind"] == "running":
+            tag, tid, proj = "RUN", (r.get("task_id") or "—"), r["project"]
+            title = f"{r.get('agent','')}"
+        else:
+            tag, tid, proj = r["tag"], r["id"], r["project"]
+            title = r["task"].title
+        line = f"  {tag:<7} {tid:<8} {proj[:11]:<11} {title}"
+        attr = curses.A_REVERSE if selected else _tag_attr(app, r.get("status", ""))
+        _add(scr, y, inner.x, pad_cols(clip_cols(line, inner.w), inner.w),
              inner.x + inner.w, attr)
 
 
@@ -182,6 +201,12 @@ class PanelApp(d.App):
     def __init__(self, scr, interval=2.0, root=d.HOME, conn=None):
         super().__init__(scr, interval=interval, root=root, conn=conn)
         self.pane_focus = "work"
+        self._panel_expanded = False
+        self.project_filter = None
+
+    def left_rows(self):
+        return panel_work_rows(self.snap, project=self.project_filter,
+                               expanded=self._panel_expanded, show_parked=self.show_parked)
 
     def draw(self):
         scr = self.scr
