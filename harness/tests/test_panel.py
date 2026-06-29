@@ -795,18 +795,18 @@ class TestPaneFocusIndicator(unittest.TestCase):
         papp._cp = lambda n: n * 1000          # make the accent color identifiable
         return papp
 
-    def test_focused_title_has_marker_and_magenta_accent(self):
+    def test_focused_title_has_marker_and_bright_bar(self):
         papp = self._papp()
         scr = FakeScr(40, 80)
-        pn.render_pane_title(scr, pn.Rect(0, 0, 10, 40), "WORK", True, papp)
+        pn.render_pane_title(scr, pn.Rect(0, 0, 10, 40), "WORK", True)
         call = scr.calls[-1]
         self.assertIn("▶ WORK", call[2])
-        self.assertEqual(call[3], 5000 | curses.A_REVERSE | curses.A_BOLD)   # magenta bar
+        self.assertEqual(call[3], curses.A_REVERSE | curses.A_BOLD)   # bright bar, no color pair
 
     def test_unfocused_title_is_dim_without_marker(self):
         papp = self._papp()
         scr = FakeScr(40, 80)
-        pn.render_pane_title(scr, pn.Rect(0, 0, 10, 40), "WORK", False, papp)
+        pn.render_pane_title(scr, pn.Rect(0, 0, 10, 40), "WORK", False)
         call = scr.calls[-1]
         self.assertNotIn("▶", call[2])
         self.assertIn("WORK", call[2])
@@ -845,6 +845,7 @@ class TestLogWall(unittest.TestCase):
         logf = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, prefix="dais-lwlog-")
         logf.write("starting build\nrunning tests\nTraceback (most recent call last)\n")
         logf.close()
+        self.addCleanup(os.unlink, logf.name)
         papp = self._papp()
         papp._cp = lambda n: n * 1000
         thread = {"project": "cedar", "agent": "engineer", "since": "2026-06-29 00:00:00",
@@ -960,3 +961,25 @@ class TestSplitBands(unittest.TestCase):
         hs = [h for _, h in bands]
         for i in range(1, 5):
             self.assertEqual(ys[i], ys[i - 1] + hs[i - 1])
+
+
+class TestRailNeedsYouChip(unittest.TestCase):
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-rail-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("a-1", "alpha", "rev", "needs_review", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def test_needs_you_chip_is_bold_yellow_and_separate(self):
+        papp = self._papp()
+        scr = FakeScr(40, 80)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 24), papp, focused=False)
+        chips = [c for c in scr.calls if "!1" in c[2]]
+        self.assertTrue(chips)                                  # the gate count renders
+        self.assertEqual(chips[0][3], 4000 | curses.A_BOLD)     # bold yellow (_cp(4)), not the name hue
+        name_calls = [c for c in scr.calls if "alpha" in c[2] and "!1" not in c[2]]
+        self.assertTrue(name_calls)                             # chip is a SEPARATE _add from the name

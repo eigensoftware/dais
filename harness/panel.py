@@ -89,11 +89,12 @@ def split_bands(top, height, n):
     return out
 
 
-def render_pane_title(scr, rect, title, focused, app):
-    """Draw a pane's title row. The FOCUSED pane gets a magenta accent bar with a ▶ marker; unfocused
-    panes recede to plain dim text — so the active pane is unmistakable. Returns the inner Rect below."""
+def render_pane_title(scr, rect, title, focused):
+    """Draw a pane's title row. The FOCUSED pane gets a bright, high-contrast reverse bar with a ▶
+    marker; unfocused panes recede to plain dim text — so the active pane is unmistakable and its
+    title text stays readable. Returns the inner Rect below the title row."""
     if focused:
-        attr = app._cp(5) | curses.A_REVERSE | curses.A_BOLD     # magenta bar = the focused pane
+        attr = curses.A_REVERSE | curses.A_BOLD              # bright bar = the focused pane
         text = f"▶ {title}"
     else:
         attr = curses.A_DIM
@@ -127,7 +128,7 @@ def _tag_attr(app, status):
 
 def render_work(scr, rect, app, focused):
     """Panel-native WORK: band bars + color-tagged selectable rows."""
-    inner = render_pane_title(scr, rect, "WORK", focused, app)
+    inner = render_pane_title(scr, rect, "WORK", focused)
     rows = app.left_rows()
     sel_i, sel_row = app._selected(rows)
     app.sel_id = sel_row["id"] if sel_row else None
@@ -217,7 +218,7 @@ def _panel_detail_lines(app, sel_row):
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
     Running selections (task=None) show the agent header instead of crashing on task.id."""
-    inner = render_pane_title(scr, rect, "INSPECTOR", focused, app)
+    inner = render_pane_title(scr, rect, "INSPECTOR", focused)
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     # A running selection has task=None — detail_lines() does task.id and would CRASH.
@@ -284,7 +285,7 @@ def _rail_items(app):
 def render_rail(scr, rect, app, focused):
     """Project navigator: ALL + per-project rows, each a distinct hue; the live (running) project is
     green; the active filter is bold with a » mark; the focused cursor is reverse."""
-    inner = render_pane_title(scr, rect, "PROJECTS", focused, app)
+    inner = render_pane_title(scr, rect, "PROJECTS", focused)
     items = _rail_items(app)
     ri = getattr(app, "_rail_i", 0)
     pf = getattr(app, "project_filter", None)
@@ -305,10 +306,17 @@ def render_rail(scr, rect, app, focused):
         if p is not None:
             ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER)
             run = ">" if running else " "
-            label = f"{mark}{run}{name}" + (f" !{ng}" if ng else "")
+            name_str = f"{mark}{run}{name}"
+            _add(scr, inner.y + idx, inner.x, clip_cols(name_str, inner.w),
+                 inner.x + inner.w, attr)
+            if ng:                                          # needs-you count: bold yellow so it pops
+                chip_attr = app._cp(4) | curses.A_BOLD | \
+                    (curses.A_REVERSE if (focused and idx == ri) else 0)
+                _add(scr, inner.y + idx, inner.x + disp_width(name_str), f" !{ng}",
+                     inner.x + inner.w, chip_attr)
         else:
-            label = f"{mark} {name}"
-        _add(scr, inner.y + idx, inner.x, clip_cols(label, inner.w), inner.x + inner.w, attr)
+            _add(scr, inner.y + idx, inner.x, clip_cols(f"{mark} {name}", inner.w),
+                 inner.x + inner.w, attr)
 
 
 def render_feed(scr, rect, app):
@@ -321,7 +329,7 @@ def render_logwall(scr, rect, app):
     """Full-body live log wall: one full-width band per running agent (green header + live tail).
     Reuses running_threads + tail_lines + _LOG_ERR_RE; tailed each draw so the text streams live."""
     threads = d.running_threads(app.snap, app._now()) if app.snap else []
-    inner = render_pane_title(scr, rect, f"LOG WALL · {len(threads)} agents", True, app)
+    inner = render_pane_title(scr, rect, f"LOG WALL · {len(threads)} agents", True)
     if not threads:
         _add(scr, inner.y, inner.x,
              clip_cols("  (no agents running - press w to start the loop)", inner.w),
