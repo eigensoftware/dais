@@ -194,7 +194,10 @@ class TestRepoPath(unittest.TestCase):
         yaml = os.path.join(self.root, "projects", "demo", "project.yaml")
         with open(yaml, "w") as fh:
             fh.write("project: demo\nrepo: %s\n" % repo_value)
-        e = {"DAIS_ROOT": self.root, "PATH": os.environ["PATH"], "HOME": "/home/x"}
+        # Pin DAIS_HOME too: resolution now keys on cwd, but this is a repo_path unit
+        # test (project.yaml lives under self.root), so make the workspace explicit.
+        e = {"DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+             "PATH": os.environ["PATH"], "HOME": "/home/x"}
         if env:
             e.update(env)
         r = subprocess.run(["bash", "-c",
@@ -237,7 +240,8 @@ class TestMigrationsGlob(unittest.TestCase):
         r = subprocess.run(["bash", "-c",
                             'source "%s/harness/lib.sh"; migrations_re demo' % self.root],
                            capture_output=True, text=True,
-                           env={"DAIS_ROOT": self.root, "PATH": os.environ["PATH"]})
+                           env={"DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                                "PATH": os.environ["PATH"]})
         return r.stdout.strip()
 
     def test_default_glob_matches_supabase_and_db(self):
@@ -391,6 +395,127 @@ class TestBinarySymlinkResolves(CliTest):
         self.assertEqual(r.returncode, 0, out)
         self.assertNotIn("No such file", out)   # would mean it looked for harness/ in bindir
         self.assertNotIn("Traceback", out)
+
+
+class TestInitBootstrap(CliTest):
+    """`dais init [path]` bootstraps a workspace skeleton at the TARGET path
+    (dais.yaml + CONTEXT.md + projects/ + .gitignore + board), idempotently —
+    it never clobbers files that already exist."""
+
+    def _fresh_dir(self, prefix="dais-ws-"):
+        d = tempfile.mkdtemp(prefix=prefix)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def _neutral_home(self):
+        # a HOME with no ~/.dais/config so resolution can't read the real one
+        return self._fresh_dir("dais-HOME-")
+
+    def test_init_creates_workspace_skeleton(self):
+        T = self._fresh_dir()
+        r = dais(self.root, "init", T, env={"HOME": self._neutral_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for rel in ("dais.yaml", "CONTEXT.md", "projects", ".gitignore", "dais.db"):
+            self.assertTrue(os.path.exists(os.path.join(T, rel)),
+                            "init should create %s" % rel)
+        self.assertTrue(os.path.isdir(os.path.join(T, "projects")))
+        with open(os.path.join(T, "dais.yaml")) as fh:
+            y = fh.read()
+        self.assertIn("workspace: %s" % os.path.basename(T), y)
+        self.assertIn("agent_repos:", y)
+
+    def test_init_is_idempotent(self):
+        T = self._fresh_dir()
+        keep = os.path.join(T, "CONTEXT.md")
+        with open(keep, "w") as fh:
+            fh.write("KEEP ME — do not clobber\n")
+        r = dais(self.root, "init", T, env={"HOME": self._neutral_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(keep) as fh:
+            self.assertIn("KEEP ME", fh.read())  # the [ ! -f ] guard preserved it
+
+
+class TestWorkspaceResolution(CliTest):
+    """`dais` resolves which workspace it operates on from where you're STANDING:
+    (1) DAIS_HOME env, (2) nearest ancestor of cwd with a marker (dais.yaml or
+    dais.db), (3) under the tool tree -> self-contained, (4) ~/.dais/config,
+    (5) the tool dir. Assertions are on which DB file actually got the row.
+    Config-branch tests pass a CONTROLLED HOME so the real ~/.dais/config (which
+    points at a real workspace on this machine) can never interfere."""
+
+    def _tmp(self, prefix):
+        d = tempfile.mkdtemp(prefix=prefix)
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def _neutral_home(self):
+        return self._tmp("dais-HOME-")  # no ~/.dais/config
+
+    def _home_with_config(self, home_target):
+        h = self._tmp("dais-HOME-")
+        os.makedirs(os.path.join(h, ".dais"))
+        with open(os.path.join(h, ".dais", "config"), "w") as fh:
+            fh.write("home=%s\n" % home_target)
+        return h
+
+    def _init_ws(self, prefix):
+        # a real workspace via `dais init`; neutral HOME keeps even a pre-impl run isolated
+        d = self._tmp(prefix)
+        dais(self.root, "init", d, env={"HOME": self._neutral_home()})
+        return d
+
+    def _run(self, cwd, *args, env=None):
+        # like the shared dais() helper, but with a caller-chosen cwd (you must stand
+        # somewhere other than self.root to exercise resolution).
+        e = dict(os.environ)
+        e["NO_COLOR"] = "1"
+        if env:
+            e.update(env)
+        return subprocess.run([os.path.join(self.root, "dais"), *args],
+                              capture_output=True, text=True, env=e, cwd=cwd)
+
+    def test_cwd_workspace_wins_over_config(self):
+        A = self._init_ws("dais-A-")
+        B = self._init_ws("dais-B-")
+        home = self._home_with_config(B)        # config points elsewhere (B)
+        # standing in A; "the workspace you're standing in" must beat the config
+        r = self._run(A, "task", "add", "demo", "X", "--id", "wsa-1",
+                      env={"HOME": home})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(A, "SELECT title FROM tasks WHERE id='wsa-1'")[0], "X")
+        self.assertIsNone(q(B, "SELECT title FROM tasks WHERE id='wsa-1'"))
+
+    def test_walkup_from_subdir(self):
+        A = self._init_ws("dais-A-")
+        sub = os.path.join(A, "projects")       # a subdir of A with no marker of its own
+        os.makedirs(sub, exist_ok=True)
+        # a board op from the subdir walks UP to A's marker (A/dais.yaml)
+        r = self._run(sub, "task", "add", "demo", "X", "--id", "wu-1",
+                      env={"HOME": self._neutral_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(A, "SELECT title FROM tasks WHERE id='wu-1'")[0], "X")
+
+    def test_config_used_when_not_standing_in_a_workspace(self):
+        B = self._init_ws("dais-B-")
+        N = self._tmp("dais-N-")                # neutral dir: no marker, not under the tool tree
+        home = self._home_with_config(B)
+        r = self._run(N, "task", "add", "demo", "X", "--id", "cfg-1",
+                      env={"HOME": home})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(B, "SELECT title FROM tasks WHERE id='cfg-1'")[0], "X")
+
+    def test_env_overrides_everything(self):
+        A = self._init_ws("dais-A-")
+        B = self._init_ws("dais-B-")
+        C = self._init_ws("dais-C-")
+        home = self._home_with_config(B)
+        # standing in A, config -> B, but explicit DAIS_HOME=C beats both
+        r = self._run(A, "task", "add", "demo", "X", "--id", "env-1",
+                      env={"HOME": home, "DAIS_HOME": C})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(C, "SELECT title FROM tasks WHERE id='env-1'")[0], "X")
+        self.assertIsNone(q(A, "SELECT title FROM tasks WHERE id='env-1'"))
+        self.assertIsNone(q(B, "SELECT title FROM tasks WHERE id='env-1'"))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,26 @@
 # shared helpers — sourced by run-agent.sh and dais. Not executable on its own.
 DAIS_ROOT="${DAIS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
-# DAIS_HOME = the workspace (projects/ + dais.db + logs). Defaults to the tool dir
-# (self-contained monolith); override via env or ~/.dais/config (line: home=/path/to/workspace).
+# DAIS_HOME = the workspace (dais.yaml + CONTEXT.md + projects/ + dais.db). Resolution order:
+#   1) $DAIS_HOME env (explicit override)
+#   2) nearest ancestor of cwd containing a workspace marker (dais.yaml or dais.db) — "the
+#      workspace you're standing in" (a fresh clone has dais.yaml before its board exists)
+#   3) cwd is inside the tool's own source tree (DAIS_ROOT) -> self-contained dev (so a fresh
+#      dev clone never touches a config'd workspace)
+#   4) ~/.dais/config  home=/path/to/workspace
+#   5) default to the tool dir (self-contained)
+if [ -z "${DAIS_HOME:-}" ]; then
+  __d="$PWD"
+  while [ -n "$__d" ] && [ "$__d" != "/" ]; do
+    if [ -f "$__d/dais.yaml" ] || [ -f "$__d/dais.db" ]; then DAIS_HOME="$__d"; break; fi
+    __d="$(dirname "$__d")"
+  done
+fi
+if [ -z "${DAIS_HOME:-}" ]; then
+  # compare PHYSICAL paths: a symlinked tmpdir (macOS /var -> /private/var) makes the logical
+  # DAIS_ROOT and the getcwd-derived $PWD differ, so resolve both before the prefix test.
+  __rp="$(cd "$DAIS_ROOT" 2>/dev/null && pwd -P)"; __pp="$(pwd -P)"
+  case "$__pp/" in "${__rp:-$DAIS_ROOT}"/*) DAIS_HOME="$DAIS_ROOT" ;; esac
+fi
 if [ -z "${DAIS_HOME:-}" ] && [ -f "$HOME/.dais/config" ]; then
   DAIS_HOME="$(sed -n 's/^home=//p' "$HOME/.dais/config" | head -1)"
 fi
