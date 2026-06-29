@@ -389,6 +389,13 @@ class TestCockpitHelpers(unittest.TestCase):
     def test_gate_count_zero(self):
         self.assertEqual(d.gate_count(_snap(_proj("a", ready=3, needs_qa=1))), 0)
 
+    def test_gate_count_excludes_running_task(self):
+        """gate_count must not count a gate task that is currently in-flight (running_ids)."""
+        snap = _snap(_proj("a", needs_review=2, ready_to_merge=1))
+        # task id for first needs_review: "a-needs_review-0"
+        running = frozenset({("a", "a-needs_review-0")})
+        self.assertEqual(d.gate_count(snap, running), d.gate_count(snap) - 1)
+
     def test_loop_summary_text_omits_zero_segments(self):
         snap = _snap(_proj("a", ready=3, needs_qa=1), _proj("b", ready=0))
         # changes_requested=0 omitted; order is ready, needs_qa, changes_requested
@@ -537,6 +544,89 @@ class TestCockpitHeaderAndDraw(unittest.TestCase):
             sub.call.return_value = 0
             app.handle(ord("a"), rows, i, row)
             sub.call.assert_called_once_with(["dais", "ship", "beacon", "7"])
+
+
+class TestCockpitMinorCoverage(unittest.TestCase):
+    """Minor coverage gaps: row ordering, parked composition, truly empty board."""
+
+    def test_running_band_leads_gate_band(self):
+        """▶ running rows must appear before the ⚡ NEEDS YOU header in left_rows()."""
+        conn = _conn()
+        conn.execute(
+            "INSERT INTO tasks(id,project,title,status,priority,pr_url) "
+            "VALUES(?,?,?,?,?,?)",
+            ("prj-1", "myproj", "approve", "proposed", "high", None))
+        conn.commit()
+        app = make_app(conn=conn)
+        thread = {"project": "myproj", "task": None, "agent": "lead",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": "/tmp/x.log"}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            rows = app.left_rows()
+        running_idx = next((i for i, r in enumerate(rows) if r["kind"] == "running"), None)
+        gate_idx = next((i for i, r in enumerate(rows)
+                         if "⚡ NEEDS YOU" in r.get("label", "")), None)
+        self.assertIsNotNone(running_idx, "no running row found")
+        self.assertIsNotNone(gate_idx, "no ⚡ NEEDS YOU header found")
+        self.assertLess(running_idx, gate_idx, "running band should precede gate band")
+
+    def test_show_parked_reveals_backlog_and_deferred_alongside_gates(self):
+        """Toggling `b` reveals backlog + deferred rows alongside the gate band."""
+        conn = _conn()
+        conn.executemany(
+            "INSERT INTO tasks(id,project,title,status,priority,pr_url) "
+            "VALUES(?,?,?,?,?,?)",
+            [("prj-1", "myproj", "future work", "backlog", "low", None),
+             ("prj-2", "myproj", "parked item", "deferred", "low", None),
+             ("prj-3", "myproj", "approve this", "proposed", "high", None)])
+        conn.commit()
+        app = make_app(conn=conn)
+        app.show_parked = True
+        rows = app.left_rows()
+        labels = [r["label"] for r in rows]
+        self.assertTrue(any("backlog (1)" in l for l in labels), labels)
+        self.assertTrue(any("deferred (1)" in l for l in labels), labels)
+        parked_ids = {r["id"] for r in rows
+                      if r.get("kind") == "task"
+                      and r.get("status") in ("backlog", "deferred")}
+        self.assertIn("prj-1", parked_ids)
+        self.assertIn("prj-2", parked_ids)
+
+    def test_empty_board_produces_allclear_and_zero_gate_count(self):
+        """No tasks at all: gate_count is 0, left_rows() shows all-clear, draw() runs cleanly."""
+        app = make_app()   # in-memory DB with no tasks seeded
+        self.assertEqual(d.gate_count(app.snap), 0)
+        rows = app.left_rows()
+        labels = [r["label"] for r in rows]
+        self.assertTrue(any(l.startswith("✓ nothing needs you") for l in labels), labels)
+        app.draw()          # must not raise
+
+
+class TestGateBannerHeaderConsistency(unittest.TestCase):
+    """Integration: when a needs_review task is in-flight the header/banner must agree."""
+
+    def test_running_needs_review_header_and_banner_show_no_gate(self):
+        """Header ⚡ token and gate band are both absent when the only gate task is
+        in the running band — the header/banner contract must hold."""
+        conn = _conn()
+        conn.execute(
+            "INSERT INTO tasks(id,project,title,status,priority,pr_url) "
+            "VALUES(?,?,?,?,?,?)",
+            ("prj-1", "myproj", "review doc", "needs_review", "medium", None))
+        conn.commit()
+        app = make_app(conn=conn)
+        thread = {"project": "myproj", "task": "prj-1", "agent": "lead",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": "/tmp/x.log"}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            # header line (y == 0) must have no ⚡
+            app.draw()
+            top = [c for c in app.scr.calls if c[0] == 0]
+            self.assertTrue(top, "no header drawn")
+            self.assertNotIn("⚡", top[-1][2])
+            # body must show the all-clear line
+            rows = app.left_rows()
+            labels = [r["label"] for r in rows]
+            self.assertTrue(
+                any(l.startswith("✓ nothing needs you") for l in labels), labels)
 
 
 if __name__ == "__main__":

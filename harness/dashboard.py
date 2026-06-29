@@ -444,12 +444,16 @@ GATE_ICON = {"ready_to_merge": "⏳", "needs_review": "📋",
 LOOP_SUMMARY_ORDER = ["ready", "needs_qa", "changes_requested"]
 
 
-def gate_count(snap):
-    """Total founder-gate tasks across all projects (the ⚡ NEEDS YOU count). Gate
-    statuses are founder-idle (no reactive role runs them), so this equals the number
-    of gate rows the cockpit lists."""
-    return sum(len(p.tasks_by_status.get(st, []))
-               for p in snap.projects for st in GATE_ORDER)
+def gate_count(snap, running_ids=frozenset()):
+    """Total founder-gate tasks across all projects (the ⚡ NEEDS YOU count).
+    Running tasks (running_ids: a set of (project, task_id)) are excluded because
+    needs_review appears in both GATE_ORDER and _INFLIGHT_ORDER — a running agent
+    can sweep a needs_review task into the running band, so we exclude it here to
+    keep the header ⚡N token consistent with the gate band body."""
+    return sum(1 for p in snap.projects
+               for st in GATE_ORDER
+               for t in p.tasks_by_status.get(st, [])
+               if (p.name, t.id) not in running_ids)
 
 
 def loop_summary(snap, running_ids=frozenset()):
@@ -977,7 +981,7 @@ class App:
             gate_items = [(st, byst.get(st, [])) for st in GATE_ORDER]
             if any(items for _st, items in gate_items):
                 rows.append(self._header_row(
-                    f"⚡ NEEDS YOU ({gate_count(self.snap)})", "ready_to_merge"))
+                    f"⚡ NEEDS YOU ({gate_count(self.snap, running_ids)})", "ready_to_merge"))
                 for st, items in gate_items:
                     if items:
                         emit_group(f"{GATE_ICON[st]} {st} ({len(items)})", st, items)
@@ -1121,7 +1125,8 @@ class App:
             badge = "○ watch stopped"
         threads = running_threads(self.snap, now) if self.snap else []
         run = f" · ▶ {len(threads)} running" if threads else ""
-        ng = gate_count(self.snap) if self.snap else 0
+        running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
+        ng = gate_count(self.snap, running_ids) if self.snap else 0
         gates = f" · ⚡{ng}" if ng else ""
         ws = self.snap.workspace if self.snap else None
         ident = f"DAIS · {ws} · LIVE" if ws else "DAIS · LIVE"   # show where you are
