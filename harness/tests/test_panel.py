@@ -469,9 +469,17 @@ class TestRailSelection(unittest.TestCase):
 class TestInspectorWideColor(unittest.TestCase):
     def test_inspector_is_a_wide_right_column(self):
         L = pn.layout(200, 50)
-        # the inspector is a generous right column (the founder wanted it wide), within its bounds
+        # the inspector is a generous right column (the founder wanted it wide)
         self.assertGreaterEqual(L["inspector"].w, 80)
-        self.assertLessEqual(L["inspector"].w, pn._INSP_MAX_W)
+
+    def test_wide_screen_caps_left_column(self):
+        # on a very wide screen the left column stops sprawling; the inspector absorbs the extra
+        L = pn.layout(213, 64, n_rail_items=6)
+        _covers_no_overlap(L, 213, 64)
+        self.assertLessEqual(L["work"].w, pn._LEFT_MAX_W)     # left column no longer unnecessarily wide
+        self.assertLessEqual(L["rail"].w, pn._LEFT_MAX_W)
+        self.assertEqual(L["inspector"].x, L["work"].w)       # inspector starts where the left col ends
+        self.assertGreater(L["inspector"].w, L["work"].w)     # ... and is the wider pane on a 213 screen
 
     def test_inspector_colorizes_status_and_sections(self):
         # has_color path: stub _cp to tag lines so we can assert color was applied

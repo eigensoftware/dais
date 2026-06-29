@@ -19,8 +19,8 @@ PANES = ("vitals", "rail", "work", "inspector", "feed", "bar")
 _MIN_FEED_H = 14          # below this terminal height, the feed is dropped
 _TWO_COL_MIN_W = 76       # below this width the columns stack into one (nothing is dropped)
 _INSP_MIN_W = 36          # the inspector is never narrower than this in two-column mode
-_INSP_MAX_W = 90          # ... nor wider than this (extra width goes to WORK)
-_INSP_PCT = 45            # inspector target width ≈ 45% of the screen
+_INSP_PCT = 45            # inspector target width ≈ 45% of the screen at medium widths
+_LEFT_MAX_W = 96          # the left column (PROJECTS+WORK) never sprawls past this; extra -> inspector
 _PROJ_MAX_H = 12          # cap the PROJECTS block so WORK always keeps room
 _MIN_WORK_H = 5           # ... and leave WORK at least this many rows when possible
 _LEFT_GAP = 1             # blank separator row between PROJECTS and WORK in the left column
@@ -49,8 +49,11 @@ def layout(w, h, *, n_rail_items=1, show_feed=True):
     mid_h = max(1, (h - 3 if feed_on else h - 2))     # rows between vitals and feed/bar
     proj_h = _projects_h(n_rail_items, mid_h)
     if w >= _TWO_COL_MIN_W:
-        insp_w = min(_INSP_MAX_W, max(_INSP_MIN_W, w * _INSP_PCT // 100))
-        left_w = w - insp_w
+        # left column ~ (100 - _INSP_PCT)% of width but capped at _LEFT_MAX_W so it never sprawls;
+        # the inspector absorbs whatever is left (long notes benefit from the room).
+        left_w = min(w * (100 - _INSP_PCT) // 100, _LEFT_MAX_W)
+        left_w = max(1, min(left_w, w - _INSP_MIN_W))    # keep the inspector at least _INSP_MIN_W
+        insp_w = w - left_w
         out["rail"] = Rect(mid_y, 0, proj_h, left_w)
         out["work"] = Rect(mid_y + proj_h + _LEFT_GAP, 0,
                            max(0, mid_h - proj_h - _LEFT_GAP), left_w)
