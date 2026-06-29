@@ -489,7 +489,7 @@ class TestBarAndHelp(unittest.TestCase):
         self.assertFalse(papp.show_help)
 
 
-class TestFullChromatic(unittest.TestCase):
+class TestRolePalette(unittest.TestCase):
     def _papp(self, rows, project=None):
         import tempfile
         root = tempfile.mkdtemp(prefix="dais-pb6-")
@@ -553,6 +553,18 @@ class TestFullChromatic(unittest.TestCase):
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
         self.assertEqual(self._row_attr(scr, "cou-5a"), curses.A_REVERSE | curses.A_BOLD)
+
+    def test_selected_running_row_also_uses_the_bright_bar(self):
+        # the uniform selection bar applies to running rows too — green base dropped when selected
+        papp = self._papp([("z-1", "zeta", "t", "ready", "med", None)])
+        threads = [{"project": "zeta", "agent": "eng", "task": "z-1",
+                    "since": "2026-06-29 00:00:00", "log_path": None}]
+        with mock.patch.object(d, "running_threads", return_value=threads):
+            papp.sel_id = "run::zeta"
+            scr = FakeScr(40, 200)
+            pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
+        run_row = next(c for c in scr.calls if "RUN" in c[2] and "eng" in c[2])
+        self.assertEqual(run_row[3], curses.A_REVERSE | curses.A_BOLD)
 
     def test_inspector_attr_rules(self):
         papp = self._papp([("z-1", "z", "t", "ready", "med", None)])
