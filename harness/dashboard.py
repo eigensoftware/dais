@@ -1121,9 +1121,11 @@ class App:
             badge = "○ watch stopped"
         threads = running_threads(self.snap, now) if self.snap else []
         run = f" · ▶ {len(threads)} running" if threads else ""
+        ng = gate_count(self.snap) if self.snap else 0
+        gates = f" · ⚡{ng}" if ng else ""
         ws = self.snap.workspace if self.snap else None
         ident = f"DAIS · {ws} · LIVE" if ws else "DAIS · LIVE"   # show where you are
-        head = f" {ident}  {clk} · ↻{self.interval:g}s · {badge}{run}{cap}"
+        head = f" {ident}  {clk} · ↻{self.interval:g}s · {badge}{run}{gates}{cap}"
         if self.filtering:
             head += f"   /{self.filter}_"
         elif self.flash and time.monotonic() < self._flash_until:

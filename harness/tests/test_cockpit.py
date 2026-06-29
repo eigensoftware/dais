@@ -476,5 +476,68 @@ class TestCockpitRows(unittest.TestCase):
         self.assertEqual(app.mode, "queue")
 
 
+class TestCockpitHeaderAndDraw(unittest.TestCase):
+    def _app(self, tasks, sel=None, w=100, h=24):
+        conn = _conn()
+        conn.executemany(
+            "INSERT INTO tasks(id,project,title,status,priority,pr_url) "
+            "VALUES(?,?,?,?,?,?)", tasks)
+        conn.commit()
+        app = make_app(conn=conn, h=h, w=w)
+        if sel:
+            app.sel_id = sel
+        return app
+
+    def _header_text(self, app):
+        app.draw()
+        top = [c for c in app.scr.calls if c[0] == 0]      # y == 0 is the header
+        self.assertTrue(top, "no header drawn")
+        return top[-1][2]
+
+    def test_header_shows_gate_count(self):
+        app = self._app([
+            ("cou-1", "acme", "approve", "proposed", "high", None),
+            ("lyr-1", "beacon", "ship", "ready_to_merge", "high", "https://x/pull/3"),
+        ])
+        self.assertIn("⚡2", self._header_text(app))
+
+    def test_header_omits_token_when_no_gates(self):
+        app = self._app([("win-1", "cedar", "build", "ready", "high", None)])
+        self.assertNotIn("⚡", self._header_text(app))
+
+    def test_full_frame_smoke_within_width(self):
+        app = self._app([
+            ("lyr-1", "beacon", "ship the funnel", "ready_to_merge", "high",
+             "https://x/y/pull/42"),
+            ("cou-1", "acme", "approve direction", "proposed", "high", None),
+            ("win-1", "cedar", "build a", "ready", "high", None),
+            ("win-2", "cedar", "verify b", "needs_qa", "medium", None),
+        ], sel="lyr-1")
+        app.draw()
+        all_text = "\n".join(c[2] for c in app.scr.calls)
+        self.assertIn("⚡ NEEDS YOU", all_text)
+        self.assertIn("⚙ the loop:", all_text)
+        footer = [c for c in app.scr.calls if c[0] == app.scr.h - 1]
+        self.assertTrue(footer and "ship" in footer[-1][2], "action bar missing/wrong")
+        for (_y, x, s, _attr) in app.scr.calls:
+            self.assertLessEqual(d.disp_width(s), app.scr.w - x,
+                                 f"row overruns the pane: {s!r}")
+
+    def test_a_ships_a_real_cockpit_merge_row(self):
+        """End-to-end: the engine still drives a gate row built by the cockpit."""
+        app = self._app([
+            ("lyr-1", "beacon", "ship", "ready_to_merge", "high", "https://x/y/pull/7"),
+        ])
+        app._confirm = lambda *a: True
+        rows = app.left_rows()
+        i, row = next((i, r) for i, r in enumerate(rows)
+                      if r["kind"] == "task" and r["status"] == "ready_to_merge")
+        app.sel_id = row["id"]
+        with mock.patch.object(d, "subprocess") as sub:
+            sub.call.return_value = 0
+            app.handle(ord("a"), rows, i, row)
+            sub.call.assert_called_once_with(["dais", "ship", "beacon", "7"])
+
+
 if __name__ == "__main__":
     unittest.main()
