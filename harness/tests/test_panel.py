@@ -522,17 +522,16 @@ class TestFullChromatic(unittest.TestCase):
                            ("cou-2", "acme", "cancelled1", "cancelled", "med", None)],
                           project="acme")
 
-    def test_bands_are_urgency_colored(self):
+    def test_active_bands_share_one_structure_color(self):
+        # consistency: every active band header is the SAME cyan structure bar (not a per-band hue)
         papp = self._board()
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
-        self.assertEqual(self._band_attr(scr, "NEEDS YOU"),
-                         4000 | curses.A_REVERSE | curses.A_BOLD)     # yellow
-        self.assertEqual(self._band_attr(scr, "RUNNING"),
-                         1000 | curses.A_REVERSE | curses.A_BOLD)     # green
-        self.assertEqual(self._band_attr(scr, "THE LOOP"),
-                         3000 | curses.A_REVERSE | curses.A_BOLD)     # cyan
-        self.assertEqual(self._band_attr(scr, "ARCHIVE"), curses.A_DIM)  # recedes
+        cyan = 3000 | curses.A_REVERSE | curses.A_BOLD                # _cp(3) = structure
+        self.assertEqual(self._band_attr(scr, "NEEDS YOU"), cyan)
+        self.assertEqual(self._band_attr(scr, "RUNNING"), cyan)
+        self.assertEqual(self._band_attr(scr, "THE LOOP"), cyan)
+        self.assertEqual(self._band_attr(scr, "ARCHIVE"), curses.A_DIM)  # history recedes (inactive)
 
     def test_archive_rows_are_dim(self):
         papp = self._board()
@@ -540,18 +539,20 @@ class TestFullChromatic(unittest.TestCase):
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=False)
         self.assertEqual(self._row_attr(scr, "cou-1"), curses.A_DIM)
 
-    def test_needs_review_row_is_cyan_not_white(self):
+    def test_gate_row_is_needs_you_yellow(self):
+        # a founder-gate row (needs_review ∈ GATE_ORDER) carries the needs-you role, not a status hue
         papp = self._board()
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=False)  # no selection highlight
-        self.assertEqual(self._row_attr(scr, "cou-5a"), 3000)            # cyan, not 6000 white
+        self.assertEqual(self._row_attr(scr, "cou-5a"), 4000)            # _cp(4) = needs-you yellow
 
-    def test_selected_row_keeps_status_hue(self):
+    def test_selected_row_is_uniform_bright_bar(self):
+        # consistency: selection is the SAME bright bar on every row, not the row's own color reversed
         papp = self._board()
         papp.sel_id = "cou-5a"
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
-        self.assertEqual(self._row_attr(scr, "cou-5a"), 3000 | curses.A_REVERSE)
+        self.assertEqual(self._row_attr(scr, "cou-5a"), curses.A_REVERSE | curses.A_BOLD)
 
     def test_inspector_attr_rules(self):
         papp = self._papp([("z-1", "z", "t", "ready", "med", None)])
@@ -561,6 +562,16 @@ class TestFullChromatic(unittest.TestCase):
         self.assertEqual(pn._inspector_attr(papp, 0, "runs touching z-1:"), 3000 | curses.A_BOLD)
         self.assertEqual(pn._inspector_attr(papp, 0,
                          "assignee founder · prio high · pr (none)"), 4000)         # yellow
+
+    def test_inspector_head_line_is_structure_cyan(self):
+        # the inspector's "<id> <status>" head line is a header → cyan-bold, not a per-status hue
+        papp = self._papp([("cou-5a", "acme", "review", "needs_review", "high", None)],
+                          project="acme")
+        papp.sel_id = "cou-5a"
+        scr = FakeScr(40, 200)
+        pn.render_inspector(scr, pn.Rect(0, 0, 20, 60), papp, focused=False)
+        head = next(c for c in scr.calls if c[2].strip().startswith("cou-5a"))
+        self.assertEqual(head[3], 3000 | curses.A_BOLD)                 # _cp(3) = structure
 
     def test_vitals_need_you_is_yellow_when_positive(self):
         papp = self._papp([("g-1", "g", "t", "ready_to_merge", "high", "https://x/pull/1")])
@@ -577,7 +588,8 @@ class TestFullChromatic(unittest.TestCase):
         self.assertFalse([c for c in scr.calls
                           if c[3] == (4000 | curses.A_REVERSE | curses.A_BOLD)])
 
-    def test_rail_projects_get_distinct_hues_and_running_is_green(self):
+    def test_rail_projects_are_uniform_and_running_is_green(self):
+        # consistency: idle project rows all share the same plain treatment (no per-project rainbow)
         papp = self._papp([("a-1", "alpha", "x", "ready", "med", None),
                            ("b-1", "bravo", "y", "ready", "med", None)])
         # if the snapshot derives projects differently, adapt the seed so snap.projects has >=2 names
@@ -585,14 +597,11 @@ class TestFullChromatic(unittest.TestCase):
         self.assertGreaterEqual(len(names), 2)
         scr = FakeScr(40, 200)
         pn.render_rail(scr, pn.Rect(1, 0, 20, 20), papp, focused=False)
-        # ALL row carries no hue; the two project rows carry different non-zero hues
-        all_attr = self._row_attr_rail(scr, "ALL")
-        self.assertEqual(all_attr, 0)
-        a_attr = self._row_attr_rail(scr, names[0])
-        b_attr = self._row_attr_rail(scr, names[1])
-        self.assertNotEqual(a_attr, 0)
-        self.assertNotEqual(a_attr, b_attr)
-        # mark the first project running -> its row turns green (cp 1)
+        # ALL and every idle project row carry the same plain attr (0) — uniform, no hue
+        self.assertEqual(self._row_attr_rail(scr, "ALL"), 0)
+        self.assertEqual(self._row_attr_rail(scr, names[0]), 0)
+        self.assertEqual(self._row_attr_rail(scr, names[1]), 0)
+        # mark the first project running -> only it turns green (cp 1) — the live role
         papp.snap.projects[0].running = True
         scr2 = FakeScr(40, 200)
         pn.render_rail(scr2, pn.Rect(1, 0, 20, 20), papp, focused=False)

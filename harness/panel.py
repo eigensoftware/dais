@@ -103,11 +103,16 @@ def render_pane_title(scr, rect, title, focused):
     return Rect(rect.y + 1, rect.x, max(0, rect.h - 1), rect.w)
 
 
-# panel-local color system (does NOT touch dashboard.STATUS_PAIR, which the classic UI shares)
-_BAND_PAIR = {"RUNNING": 1, "NEEDS YOU": 4, "THE LOOP": 3}   # green / yellow / cyan
-_BAND_DIM = {"ARCHIVE", "PARKED"}                            # history/parked recede
+# ── panel color palette: ONE color per ROLE, applied consistently across every pane ──
+# (does NOT touch dashboard.STATUS_PAIR, which the classic UI shares)
+_STRUCTURE = 3      # cyan   — section/band headers + the inspector's header lines
+_LIVE = 1           # green  — running agents, the live project, succeeded/pass
+_NEEDS_YOU = 4      # yellow — founder-gated work: gate rows, counts, chips, "prio high"
+_BAD = 2            # red    — failed/error/blocked lines
+# focus/selection  = curses.A_REVERSE | curses.A_BOLD (a bright bar; no color pair)
+# inactive         = curses.A_DIM (history, parked, placeholders, labels)
+_BAND_DIM = {"ARCHIVE", "PARKED"}                            # history/parked headers recede (inactive)
 _DIM_STATUSES = {"done", "cancelled", "backlog", "deferred"}
-_RAIL_HUES = [3, 5, 4, 1, 2, 6]                              # cyan magenta yellow green red white
 
 
 def _row_search_text(r):
@@ -119,11 +124,13 @@ def _row_search_text(r):
 
 
 def _tag_attr(app, status):
+    """A WORK row's base color BY ROLE (not per-status): founder gates are needs-you yellow,
+    archive/parked recede to dim, ordinary in-flight work stays plain."""
     if status in _DIM_STATUSES:
-        return curses.A_DIM                                  # archive/parked recede
-    if status == "needs_review":
-        return app._cp(3)                                    # cyan gate (override white)
-    return app._cp(d.STATUS_PAIR.get(status, 6))
+        return curses.A_DIM                                  # archive/parked → inactive
+    if status in d.GATE_ORDER:
+        return app._cp(_NEEDS_YOU)                           # founder gate → needs-you yellow
+    return 0                                                 # ordinary loop work → plain
 
 
 def render_work(scr, rect, app, focused):
@@ -141,9 +148,9 @@ def render_work(scr, rect, app, focused):
             name = r["label"].rsplit(" · ", 1)[0]       # "NEEDS YOU · 1" -> "NEEDS YOU"
             bar = pad_cols(f"▌ {r['label']} ", inner.w)
             if name in _BAND_DIM:
-                battr = curses.A_DIM
-            else:
-                battr = app._cp(_BAND_PAIR.get(name, 6)) | curses.A_REVERSE | curses.A_BOLD
+                battr = curses.A_DIM                          # ARCHIVE/PARKED recede (inactive)
+            else:                                            # every active band: one structure color
+                battr = app._cp(_STRUCTURE) | curses.A_REVERSE | curses.A_BOLD
             _add(scr, y, inner.x, bar, inner.x + inner.w, battr)
             continue
         if r["kind"] == "info":
@@ -155,13 +162,14 @@ def render_work(scr, rect, app, focused):
         if r["kind"] == "running":
             tag, tid, proj = "RUN", (r.get("task_id") or "—"), r["project"]
             title = f"{r.get('agent','')}"
-            base_attr = app._cp(1)                           # live = green
+            base_attr = app._cp(_LIVE)                        # running = green (live)
         else:
             tag, tid, proj = r["tag"], r["id"], r["project"]
             title = r["task"].title
             base_attr = _tag_attr(app, r.get("status", ""))
         line = f"  {tag:<7} {tid:<8} {proj[:11]:<11} {title}"
-        attr = (base_attr | curses.A_REVERSE) if selected else base_attr
+        # selection is ONE uniform bright bar (same as the focused pane title), not the row's hue
+        attr = (curses.A_REVERSE | curses.A_BOLD) if selected else base_attr
         _add(scr, y, inner.x, pad_cols(clip_cols(line, inner.w), inner.w),
              inner.x + inner.w, attr)
 
@@ -172,15 +180,15 @@ def _inspector_attr(app, idx_in_doc, line):
     s = line.strip()
     low = s.lower()
     if "succeeded" in low:
-        return app._cp(1)
+        return app._cp(_LIVE)
     if "fail" in low or "error" in low or "blocked" in low:
-        return app._cp(2)
+        return app._cp(_BAD)
     if "pass" in low or s.startswith("+ "):
-        return app._cp(1)
+        return app._cp(_LIVE)
     if s.endswith(":") or s.startswith("runs touching"):
-        return app._cp(3) | curses.A_BOLD
+        return app._cp(_STRUCTURE) | curses.A_BOLD
     if "prio high" in low or "prio urgent" in low:
-        return app._cp(4)
+        return app._cp(_NEEDS_YOU)
     if s.startswith("assignee") or s.startswith("prio"):
         return curses.A_DIM
     return 0
@@ -241,7 +249,7 @@ def render_inspector(scr, rect, app, focused):
     # first wrapped line is the "<id>  <status>" header — color it by the selection's status
     head_attr = 0
     if sel_row and sel_row.get("status"):
-        head_attr = app._cp(d.STATUS_PAIR.get(sel_row["status"], 6)) | curses.A_BOLD
+        head_attr = app._cp(_STRUCTURE) | curses.A_BOLD     # the id/status head line is a header
     for idx, ln in enumerate(wrapped[start:start + inner.h]):
         doc_i = start + idx
         attr = head_attr if doc_i == 0 else _inspector_attr(app, doc_i, ln)
@@ -274,7 +282,7 @@ def render_vitals(scr, rect, app):
     if ng > 0:
         x = rect.x + disp_width(left)
         _add(scr, rect.y, x, mid, rect.x + rect.w,
-             app._cp(4) | curses.A_REVERSE | curses.A_BOLD)
+             app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
 
 
 def _rail_items(app):
@@ -283,8 +291,8 @@ def _rail_items(app):
 
 
 def render_rail(scr, rect, app, focused):
-    """Project navigator: ALL + per-project rows, each a distinct hue; the live (running) project is
-    green; the active filter is bold with a » mark; the focused cursor is reverse."""
+    """Project navigator: ALL + per-project rows in one uniform color; only the live (running)
+    project is green; the active filter is bold with a » mark; the focused cursor is reverse."""
     inner = render_pane_title(scr, rect, "PROJECTS", focused)
     items = _rail_items(app)
     ri = getattr(app, "_rail_i", 0)
@@ -295,12 +303,7 @@ def render_rail(scr, rect, app, focused):
         p = (next((x for x in app.snap.projects if x.name == name), None)
              if (app.snap and name != "ALL") else None)
         running = bool(p and getattr(p, "running", False))
-        if name == "ALL":
-            hue = 0
-        elif running:
-            hue = app._cp(1)                                # live project = green
-        else:
-            hue = app._cp(_RAIL_HUES[(idx - 1) % len(_RAIL_HUES)])
+        hue = app._cp(_LIVE) if running else 0              # uniform: only a live project is colored
         attr = hue | (curses.A_BOLD if (active and name != "ALL") else 0) | \
             (curses.A_REVERSE if (focused and idx == ri) else 0)
         if p is not None:
@@ -310,7 +313,7 @@ def render_rail(scr, rect, app, focused):
             _add(scr, inner.y + idx, inner.x, clip_cols(name_str, inner.w),
                  inner.x + inner.w, attr)
             if ng:                                          # needs-you count: bold yellow so it pops
-                chip_attr = app._cp(4) | curses.A_BOLD | \
+                chip_attr = app._cp(_NEEDS_YOU) | curses.A_BOLD | \
                     (curses.A_REVERSE if (focused and idx == ri) else 0)
                 _add(scr, inner.y + idx, inner.x + disp_width(name_str), f" !{ng}",
                      inner.x + inner.w, chip_attr)
@@ -346,7 +349,7 @@ def render_logwall(scr, rect, app):
         tid = t.get("task") or "—"
         head = f"▶ {t['project']}/{t['agent']} · running {d.fmt_elapsed(t.get('secs') or 0)} · {tid}"
         _add(scr, by, inner.x, pad_cols(head, inner.w), inner.x + inner.w,
-             app._cp(1) | curses.A_REVERSE | curses.A_BOLD)
+             app._cp(_LIVE) | curses.A_REVERSE | curses.A_BOLD)
         k = bh - 1
         if k <= 0:
             continue
@@ -356,7 +359,7 @@ def render_logwall(scr, rect, app):
                  inner.x + inner.w, curses.A_DIM)
             continue
         for i, ln in enumerate(lines):
-            attr = app._cp(2) if d._LOG_ERR_RE.search(ln) else 0
+            attr = app._cp(_BAD) if d._LOG_ERR_RE.search(ln) else 0
             _add(scr, by + 1 + i, inner.x, clip_cols("  " + ln, inner.w),
                  inner.x + inner.w, attr)
     if note_n:
