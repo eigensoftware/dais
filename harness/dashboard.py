@@ -17,6 +17,11 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 
+# the action engine lives beside this file in harness/; `dais top` runs this module
+# as a script (so harness/ is sys.path[0]) and the tests insert harness/ on the path,
+# so a bare `from actions import …` resolves in both.
+from actions import task_actions, action_command, priority_cycle, Action  # noqa: F401
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # tool code dir
 HOME = os.environ.get("DAIS_HOME") or ROOT                           # workspace (data) dir
 DB = os.path.join(HOME, "dais.db")
@@ -390,6 +395,26 @@ def render_plain(snap, color=None):
 # --------------------------------------------------------------------------- #
 QUEUE_ORDER = ["ready_to_merge", "needs_review", "proposed", "blocked", "needs_qa",
                "changes_requested", "ready"]
+# founder-parked statuses, revealed in the cockpit only when `b` is toggled on
+PARKED_ORDER = ["backlog", "deferred"]
+
+# task priorities low→critical (the `+`/`-` cycle + the set-priority picker)
+PRIORITIES = ("low", "medium", "high", "critical")
+
+# short, scannable tokens for the contextual action bar / confirm prompts, keyed by
+# action id. Falls back to the engine's full label for anything not listed.
+BAR_LABEL = {
+    "approve": "approve", "reject": "reject", "accept": "accept",
+    "request_changes": "request-changes", "ship": "ship", "start": "start",
+    "promote": "promote", "undefer": "un-defer", "unblock": "unblock",
+    "defer": "defer", "cancel": "cancel", "cancel_run": "cancel-run",
+    "open_pr": "PR",
+}
+
+
+def bar_label(act):
+    """The action's short bar token text (engine label as a fallback)."""
+    return BAR_LABEL.get(act.id, act.label)
 
 # status -> curses color-pair id (pairs defined in App._init_colors). Mirrors the
 # plain renderer's palette: merge=green, blocked=red, qa=cyan, engineer=yellow,
@@ -401,13 +426,31 @@ STATUS_PAIR = {"ready_to_merge": 1, "needs_review": 6, "proposed": 5, "blocked":
 _LOG_ERR_RE = re.compile(r"exit code [1-9]|\bfatal\b|traceback|exception|\berror\b", re.I)
 
 
-def action_queue(snap):
+def action_queue(snap, order=QUEUE_ORDER):
     rows = []
-    for st in QUEUE_ORDER:
+    for st in order:
         for p in snap.projects:
             for t in p.tasks_by_status.get(st, []):
                 rows.append((p.name, t, st))
     return rows
+
+
+def watch_args(interval, par):
+    """Validated/clamped argv tail for `dais watch <interval> <par>`: par is clamped
+    to 1–5, interval to a positive int (a non-int / non-positive value falls back to
+    the 300s default). Pure, so the cockpit's `w` flow can be unit-tested."""
+    try:
+        iv = int(interval)
+    except (TypeError, ValueError):
+        iv = 300
+    if iv < 1:
+        iv = 300
+    try:
+        p = int(par)
+    except (TypeError, ValueError):
+        p = 1
+    p = max(1, min(5, p))
+    return [str(iv), str(p)]
 
 
 def runs_touching(runs, task_id):
@@ -718,14 +761,15 @@ def _add(scr, y, x, s, w, attr=0):
 
 
 class App:
-    def __init__(self, scr, interval=2.0, root=HOME):
+    def __init__(self, scr, interval=2.0, root=HOME, conn=None):
         self.scr = scr
         self.interval = max(0.5, interval)
         self.root = root
-        self.conn = connect()
+        self.conn = conn or connect()
         self.snap = None
         self.mode = "project"          # "project" | "queue"
         self.expanded = set()           # project names expanded in project mode
+        self.show_parked = False        # reveal backlog+deferred rows (toggled by `b`)
         self.focus = "left"            # "left" | "right"
         self.sel_id = None              # selection tracked by id across refreshes
         self.detail_scroll = 0
@@ -852,6 +896,7 @@ class App:
         if not self.snap:
             return rows
         now = self._now()
+        order = QUEUE_ORDER + PARKED_ORDER if self.show_parked else QUEUE_ORDER
         threads = running_threads(self.snap, now)
         running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
         if threads:
@@ -870,10 +915,10 @@ class App:
 
         if self.mode == "queue":
             byst = {}
-            for (proj, task, st) in action_queue(self.snap):
+            for (proj, task, st) in action_queue(self.snap, order):
                 if keep(proj, task):
                     byst.setdefault(st, []).append((proj, task))
-            for st in QUEUE_ORDER:
+            for st in order:
                 items = byst.get(st)
                 if not items:
                     continue
@@ -896,10 +941,10 @@ class App:
                                  label=f"{p.name}{run}{bl}"))
                 if p.name in self.expanded:
                     byst = {}
-                    for (proj, task, st) in action_queue(self.snap):
+                    for (proj, task, st) in action_queue(self.snap, order):
                         if proj == p.name and keep(proj, task):
                             byst.setdefault(st, []).append(task)
-                    for st in QUEUE_ORDER:
+                    for st in order:
                         items = byst.get(st)
                         if not items:
                             continue
@@ -1084,12 +1129,14 @@ class App:
                         attr |= curses.A_REVERSE
                     _add(scr, body_top + idx, split + 1, ln, w, attr)
         sind = scroll_indicator(base, len(view), len(rows))
-        nav = " j/k move · enter expand · tab pane · g group · / filter · q quit"
+        parked = " · b hide-parked" if self.show_parked else " · b parked"
+        nav = f" j/k move · tab pane · g group · / filter{parked} · l log · q quit"
         if sind:
             nav += f"   {sind}"
-        act = " w watch · p pause · t tick · R run-role · c cancel · a approve · l log · o PR"
+        # second footer line: the contextual action bar for the selected row
+        bar = " " + self.action_bar(sel_row)
         _add(scr, h - 2, 0, pad_cols(nav, w - 1), w, curses.A_REVERSE)
-        _add(scr, h - 1, 0, pad_cols(act, w - 1), w, curses.A_REVERSE)
+        _add(scr, h - 1, 0, pad_cols(bar, w - 1), w, curses.A_REVERSE | curses.A_BOLD)
         scr.refresh()
 
     # ---- input ----
@@ -1155,37 +1202,41 @@ class App:
             return idx if idx < len(options[:9]) else None
         return None
 
-    def start_or_stop_watch(self):
-        state, _i, _p = watch_state(self.root)
-        if state == "running":
-            if not self._confirm("stop watch (interrupts in-flight agents)?"):
-                return
+    def _stop_watch(self):
+        """SIGTERM the watch process GROUP so its stop() trap fires immediately. watch
+        is usually parked in `sleep`, and bash defers a trap until its foreground child
+        returns; killpg kills the sleep too (like Ctrl-C), so teardown is graceful."""
+        try:
+            with open(os.path.join(self.root, WATCH_PID)) as fh:
+                pid = int(fh.read().split()[0])
             try:
-                with open(os.path.join(self.root, WATCH_PID)) as fh:
-                    pid = int(fh.read().split()[0])
-                # Signal the whole process GROUP, not just the bash pid: watch is usually
-                # parked in `sleep`, and bash defers a trap until its foreground child
-                # returns. killpg kills the sleep too (like Ctrl-C does), so the watch's
-                # stop() trap fires immediately and tears down gracefully.
-                try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
-                except (OSError, ProcessLookupError):
-                    os.kill(pid, signal.SIGTERM)
-                self.flash = "watch stopping…"
-            except (OSError, ValueError):
-                self.flash = "could not stop watch (stale pidfile?)"
-            return
-        idx = self._menu("start watch — how many parallel agents?",
-                         ["1 (serial)", "2", "3", "4", "5"])
-        if idx is None:
-            return
-        par, interval = str(idx + 1), "300"
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
+            self.flash = "watch stopping…"
+        except (OSError, ValueError):
+            self.flash = "could not stop watch (stale pidfile?)"
+
+    def start_or_stop_watch(self):
+        state, cur_i, cur_p = watch_state(self.root)
+        if state in ("running", "paused"):
+            idx = self._menu(f"watch is {state} ({cur_i or '?'}s ×{cur_p or '?'})",
+                             ["stop watch", "reconfigure (restart)"])
+            if idx is None:
+                return
+            self._stop_watch()
+            if idx == 0:                     # stop only
+                return
+            # idx == 1 → reconfigure: fall through to prompt + start fresh
+        iv = self._prompt(f"watch interval seconds [{cur_i or '300'}]") or (cur_i or "300")
+        par = self._prompt(f"parallel agents 1-5 [{cur_p or '1'}]") or (cur_p or "1")
+        args = watch_args(iv, par)
         try:
             log = open(os.path.join(self.root, WATCH_LOG), "a")
-            subprocess.Popen([self._dais(), "watch", interval, par],
+            subprocess.Popen([self._dais(), "watch"] + args,
                              stdout=log, stderr=log,
                              stdin=subprocess.DEVNULL, start_new_session=True)
-            self.flash = f"watch started ({interval}s ×{par})"
+            self.flash = f"watch started ({args[0]}s ×{args[1]})"
         except OSError as e:
             self.flash = f"start failed: {e}"
 
@@ -1236,31 +1287,240 @@ class App:
         subprocess.call([self._dais(), "cancel", proj])
         self.flash = f"cancelled {proj}"
 
-    def approve_merge(self, row):
-        task = row and row.get("task")
-        if not task or task.status != "ready_to_merge" or not task.pr_url:
-            self.flash = "select a ready_to_merge task with a PR"
+    # ---- the action engine (contextual bar + shared dispatcher) ----
+    def _row_kind(self, row):
+        """The engine's kind for a left row: 'project' | 'running' | 'task' (None for
+        non-actionable rows like status-group headers)."""
+        k = row.get("kind") if row else None
+        return k if k in ("project", "running", "task") else None
+
+    def _task_of(self, row):
+        """The task Mapping `action_command`/`task_actions` need ({id,project,status,
+        pr_url,priority}), or None for project / header rows. A running row resolves
+        its in-flight task object when one exists (so its priority is real)."""
+        kind = self._row_kind(row)
+        if kind in (None, "project"):
+            return None
+        task = row.get("task")
+        if task is None and kind == "running":
+            task = (find_task(self.snap, row.get("project"), row.get("task_id"))
+                    if self.snap else None)
+        if task is not None:
+            return {"id": task.id, "project": row.get("project"), "status": task.status,
+                    "pr_url": task.pr_url, "priority": task.priority}
+        # a running row whose task can't be resolved (task_id is '—'/None)
+        return {"id": row.get("task_id"), "project": row.get("project"),
+                "status": row.get("status"), "pr_url": None, "priority": None}
+
+    def _row_actions(self, row):
+        """task_actions for a row (the single source the bar, menu and keys share)."""
+        t = self._task_of(row)
+        if t is None:
+            return []
+        return task_actions(t["status"], self._row_kind(row),
+                            has_pr=bool(t.get("pr_url")))
+
+    def _slot_action(self, row, slot):
+        for act in self._row_actions(row):
+            if act.slot == slot:
+                return act
+        return None
+
+    def menu_options(self, row):
+        """Labels for the Enter action menu — exactly the engine's labels, in order."""
+        return [act.label for act in self._row_actions(row)]
+
+    def action_bar(self, row):
+        """The always-visible contextual footer: the keyed actions for the selected
+        row as `KEY label`, then `+/- priority`, `↵ actions`, and the global `n new`.
+        Project rows show the project-control keys instead."""
+        kind = self._row_kind(row)
+        if kind == "project":
+            return "R run-role · t tick · w watch · p pause · c cancel · ↵ expand"
+        acts = self._row_actions(row)
+        if not acts:
+            return "n new"
+        parts = [f"{a.key} {bar_label(a)}" for a in acts if a.key]
+        if any(a.id == "set_priority" for a in acts):
+            parts.append("+/- priority")
+        if any(a.slot == "menu" for a in acts):
+            parts.append("↵ actions")
+        parts.append("n new")
+        return " · ".join(parts)
+
+    def _dispatch(self, cmd):
+        """Run a fast `dais …` command, blocking; return its exit code. The single
+        subprocess seam the cockpit tests mock."""
+        return subprocess.call([self._dais()] + [str(c) for c in cmd])
+
+    def _ship_pr(self, row, cmd):
+        """ship is a real merge that streams output → drop out of curses, run it,
+        pause for the founder to read, then restore. The curses/`input` dance only
+        runs on a real tty (so the dispatch is unit-testable headless)."""
+        tid = (self._task_of(row) or {}).get("id")
+        live = sys.stdout.isatty()
+        if live:
+            try:
+                curses.def_prog_mode()
+                curses.endwin()
+            except curses.error:
+                pass
+            print(f"\n=== dais {' '.join(str(c) for c in cmd)}  ({tid}) ===\n", flush=True)
+        rc = self._dispatch(cmd)
+        if live:
+            try:
+                input(f"\n[ship exited {rc}] press enter to return to dais top… ")
+            except (EOFError, KeyboardInterrupt):
+                pass
+            try:
+                curses.reset_prog_mode()
+            except curses.error:
+                pass
+            self.scr.clear()
+            self.scr.refresh()
+        return rc
+
+    def do_action(self, action_id, row):
+        """The shared dispatcher behind shortcuts and the Enter menu: build the argv
+        from the engine, honor `Action.confirm`, run it (or route an interactive id),
+        then refresh + flash."""
+        if action_id == "new":               # works on any row (uses its project)
+            self._new_task(row)
             return
-        pr = parse_pr(task.pr_url)
-        if not pr:
-            self.flash = "no PR number in this task's pr_url"
+        t = self._task_of(row)
+        if t is None:
+            self.flash = "no task selected"
             return
-        if not self._confirm(f"ship {task.id} (PR #{pr}) to main?"):
+        cmd = action_command(action_id, t)
+        if cmd is not None:
+            act = next((a for a in self._row_actions(row) if a.id == action_id), None)
+            if act and act.confirm:
+                if not self._confirm(f"{BAR_LABEL.get(action_id, action_id)} {t['id']}?"):
+                    return
+            if action_id == "ship":
+                rc = self._ship_pr(row, cmd)
+                self.refresh()
+                self.flash = (f"shipped {t['id']}" if rc == 0
+                              else f"ship: {t['id']} NOT merged (exit {rc}) — see output")
+                return
+            rc = self._dispatch(cmd)
+            self.refresh()
+            self.flash = (f"{BAR_LABEL.get(action_id, action_id)} {t['id']}" if rc == 0
+                          else f"{action_id} failed (exit {rc})")
             return
-        curses.def_prog_mode()
-        curses.endwin()
-        print(f"\n=== dais ship {row['project']} {pr}  ({task.id}) ===\n", flush=True)
-        rc = subprocess.call([self._dais(), "ship", row["project"], pr])
-        try:
-            input(f"\n[ship exited {rc}] press enter to return to dais top… ")
-        except (EOFError, KeyboardInterrupt):
-            pass
-        curses.reset_prog_mode()
-        self.scr.clear()
-        self.scr.refresh()
+        # cmd is None → interactive action
+        if action_id == "set_priority":
+            self._priority_menu(row)
+        elif action_id == "handoff":
+            self._handoff(row)
+        elif action_id == "edit_title":
+            self._edit_title(row)
+        elif action_id == "open_pr":
+            self.launch_pr(row)
+        else:
+            self.flash = f"no handler for {action_id}"
+
+    def _action_menu(self, row):
+        """Open the numbered Enter menu and dispatch the chosen action."""
+        acts = self._row_actions(row)
+        if not acts:
+            self.flash = "no actions for this row"
+            return
+        idx = self._menu(f"actions · {(self._task_of(row) or {}).get('id') or ''}".rstrip(),
+                         [a.label for a in acts])
+        if idx is not None:
+            self.do_action(acts[idx].id, row)
+
+    def _bump_priority(self, row, direction):
+        if self._row_kind(row) != "task":
+            return
+        t = self._task_of(row)
+        if not t or not t.get("id"):
+            return
+        newp = priority_cycle(t.get("priority"), direction)
+        rc = self._dispatch(["task", "set", t["id"], "--priority", newp])
         self.refresh()
-        self.flash = (f"shipped {task.id}" if rc == 0
-                      else f"ship: {task.id} NOT merged (exit {rc}) — see output")
+        self.flash = (f"{t['id']} → {newp}" if rc == 0 else f"priority failed (exit {rc})")
+
+    def _priority_menu(self, row):
+        t = self._task_of(row)
+        if not t or not t.get("id"):
+            return
+        idx = self._menu(f"priority for {t['id']} (now {t.get('priority') or '?'})",
+                         list(PRIORITIES))
+        if idx is None:
+            return
+        newp = PRIORITIES[idx]
+        rc = self._dispatch(["task", "set", t["id"], "--priority", newp])
+        self.refresh()
+        self.flash = (f"{t['id']} → {newp}" if rc == 0 else f"priority failed (exit {rc})")
+
+    def _handoff(self, row):
+        t = self._task_of(row)
+        if not t or not t.get("id"):
+            return
+        roles = [r for r in project_roles(self.root, t["project"]) if r != "founder"]
+        idx = self._menu(f"handoff {t['id']} to which role?", roles)
+        if idx is None:
+            return
+        rc = self._dispatch(["handoff", t["id"], roles[idx]])
+        self.refresh()
+        self.flash = (f"{t['id']} → {roles[idx]}" if rc == 0
+                      else f"handoff failed (exit {rc})")
+
+    def _edit_title(self, row):
+        t = self._task_of(row)
+        if not t or not t.get("id"):
+            return
+        title = self._prompt(f"new title for {t['id']}")
+        if not title:
+            return
+        rc = self._dispatch(["task", "set", t["id"], "--title", title])
+        self.refresh()
+        self.flash = (f"retitled {t['id']}" if rc == 0 else f"retitle failed (exit {rc})")
+
+    def _new_task(self, row):
+        proj = row.get("project") if row else None
+        if not proj:
+            self.flash = "no project for a new task"
+            return
+        title = self._prompt(f"new task title in {proj}")
+        if not title:
+            return
+        rc = self._dispatch(["task", "add", proj, title])
+        self.refresh()
+        self.flash = (f"added task in {proj}" if rc == 0 else f"add failed (exit {rc})")
+
+    def _prompt(self, label):
+        """Read a single line in the footer (esc cancels → ''). Curses-simple, mirrors
+        the `/` filter input loop."""
+        buf = ""
+        self.scr.timeout(-1)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        while True:
+            h, w = self.scr.getmaxyx()
+            _add(self.scr, h - 1, 0, pad_cols(f"  {label}: {buf}_", w - 1), w,
+                 curses.A_REVERSE | curses.A_BOLD)
+            self.scr.refresh()
+            ch = self.scr.getch()
+            if ch in (10, 13):               # enter — accept
+                break
+            if ch == 27:                     # esc — cancel
+                buf = ""
+                break
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                buf = buf[:-1]
+            elif 32 <= ch < 127:
+                buf += chr(ch)
+        self.scr.timeout(250)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        return buf.strip()
 
     def handle(self, ch, rows, sel_i, sel_row):
         if self.filtering:
@@ -1318,10 +1578,11 @@ class App:
                 self._reset_log_scroll()
         elif ch in (9,):                 # tab
             self.focus = "right" if self.focus == "left" else "left"
-        elif ch in (10, 13):             # enter — expand project
+        elif ch in (10, 13):             # enter — expand a project, else the action menu
             if sel_row and sel_row["kind"] == "project":
-                name = sel_row["project"]
-                self.expanded ^= {name}
+                self.expanded ^= {sel_row["project"]}
+            elif sel_row:
+                self._action_menu(sel_row)
         elif ch == ord("g"):
             self.mode = "queue" if self.mode == "project" else "project"
             self.detail_scroll = 0
@@ -1340,8 +1601,28 @@ class App:
             self.run_role(sel_row["project"] if sel_row else None)
         elif ch == ord("c"):
             self.cancel_run(sel_row["project"] if sel_row else None)
-        elif ch == ord("a"):
-            self.approve_merge(sel_row)
+        elif ch == ord("a"):                 # contextual ADVANCE (approve/ship/start/…)
+            act = self._slot_action(sel_row, "advance")
+            if act:
+                self.do_action(act.id, sel_row)
+            elif self._row_kind(sel_row) != "project":
+                self.flash = "nothing to advance here"
+        elif ch == ord("x"):                 # contextual REVERSE (reject/defer/cancel-run/…)
+            act = self._slot_action(sel_row, "reverse")
+            if act:
+                self.do_action(act.id, sel_row)
+            elif self._row_kind(sel_row) != "project":
+                self.flash = "nothing to reverse here"
+        elif ch in (ord("+"), ord("=")):     # raise priority ('=' is the unshifted '+')
+            self._bump_priority(sel_row, +1)
+        elif ch == ord("-"):                 # lower priority
+            self._bump_priority(sel_row, -1)
+        elif ch == ord("n"):                 # new task in the row's project
+            self.do_action("new", sel_row)
+        elif ch == ord("b"):                 # reveal/hide founder-parked rows
+            self.show_parked = not self.show_parked
+            self.flash = ("showing parked (backlog+deferred)" if self.show_parked
+                          else "hiding parked")
         elif ch == ord("/"):
             self.filtering = True
             self.filter = ""
