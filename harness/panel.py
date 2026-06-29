@@ -73,10 +73,16 @@ def cycle_focus(current, order, direction=1):
     return order[(order.index(current) + direction) % len(order)]
 
 
-def render_pane_title(scr, rect, title, focused):
-    """Draw a pane's title row (reverse bar); returns the inner Rect below it."""
-    attr = curses.A_REVERSE | (curses.A_BOLD if focused else 0)
-    _add(scr, rect.y, rect.x, pad_cols(f" {title}", rect.w), rect.x + rect.w, attr)
+def render_pane_title(scr, rect, title, focused, app):
+    """Draw a pane's title row. The FOCUSED pane gets a magenta accent bar with a ▶ marker; unfocused
+    panes recede to plain dim text — so the active pane is unmistakable. Returns the inner Rect below."""
+    if focused:
+        attr = app._cp(5) | curses.A_REVERSE | curses.A_BOLD     # magenta bar = the focused pane
+        text = f"▶ {title}"
+    else:
+        attr = curses.A_DIM
+        text = f"  {title}"
+    _add(scr, rect.y, rect.x, pad_cols(text, rect.w), rect.x + rect.w, attr)
     return Rect(rect.y + 1, rect.x, max(0, rect.h - 1), rect.w)
 
 
@@ -105,7 +111,7 @@ def _tag_attr(app, status):
 
 def render_work(scr, rect, app, focused):
     """Panel-native WORK: band bars + color-tagged selectable rows."""
-    inner = render_pane_title(scr, rect, "WORK", focused)
+    inner = render_pane_title(scr, rect, "WORK", focused, app)
     rows = app.left_rows()
     sel_i, sel_row = app._selected(rows)
     app.sel_id = sel_row["id"] if sel_row else None
@@ -195,7 +201,7 @@ def _panel_detail_lines(app, sel_row):
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
     Running selections (task=None) show the agent header instead of crashing on task.id."""
-    inner = render_pane_title(scr, rect, "INSPECTOR", focused)
+    inner = render_pane_title(scr, rect, "INSPECTOR", focused, app)
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     # A running selection has task=None — detail_lines() does task.id and would CRASH.
@@ -262,7 +268,7 @@ def _rail_items(app):
 def render_rail(scr, rect, app, focused):
     """Project navigator: ALL + per-project rows, each a distinct hue; the live (running) project is
     green; the active filter is bold with a » mark; the focused cursor is reverse."""
-    inner = render_pane_title(scr, rect, "PROJECTS", focused)
+    inner = render_pane_title(scr, rect, "PROJECTS", focused, app)
     items = _rail_items(app)
     ri = getattr(app, "_rail_i", 0)
     pf = getattr(app, "project_filter", None)

@@ -767,3 +767,41 @@ class TestFinalReviewFixes(unittest.TestCase):
         self.assertIn("press l", text)
         self.assertNotIn("press L", text)
         self.assertNotIn("coming in the log phase", text)
+
+
+class TestPaneFocusIndicator(unittest.TestCase):
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pb9-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("a-1", "alpha", "t", "ready_to_merge", "high", "https://x/pull/1")])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000          # make the accent color identifiable
+        return papp
+
+    def test_focused_title_has_marker_and_magenta_accent(self):
+        papp = self._papp()
+        scr = FakeScr(40, 80)
+        pn.render_pane_title(scr, pn.Rect(0, 0, 10, 40), "WORK", True, papp)
+        call = scr.calls[-1]
+        self.assertIn("▶ WORK", call[2])
+        self.assertEqual(call[3], 5000 | curses.A_REVERSE | curses.A_BOLD)   # magenta bar
+
+    def test_unfocused_title_is_dim_without_marker(self):
+        papp = self._papp()
+        scr = FakeScr(40, 80)
+        pn.render_pane_title(scr, pn.Rect(0, 0, 10, 40), "WORK", False, papp)
+        call = scr.calls[-1]
+        self.assertNotIn("▶", call[2])
+        self.assertIn("WORK", call[2])
+        self.assertEqual(call[3], curses.A_DIM)
+
+    def test_exactly_one_pane_title_marked_in_full_draw(self):
+        papp = self._papp()
+        papp.pane_focus = "work"
+        papp.draw()
+        titles = [c for c in papp.scr.calls
+                  if "▶" in c[2] and any(t in c[2] for t in ("WORK", "PROJECTS", "INSPECTOR"))]
+        self.assertEqual(len(titles), 1)
+        self.assertIn("WORK", titles[0][2])
