@@ -660,3 +660,17 @@ class TestPromptWrapping(unittest.TestCase):
         app.scr._keys = [ord(c) for c in "quick"] + [10]
         got = app._prompt("title")
         self.assertEqual(got, "quick")
+
+
+class TestConfirmPadding(unittest.TestCase):
+    """The quit confirm gets the same padding as the menus: blank top/bottom + a 2-space left margin."""
+
+    def test_confirm_is_padded(self):
+        app = make_app()
+        app.scr._keys = [ord("n")]                           # decline
+        self.assertFalse(app._confirm("quit dais top?"))
+        texts = [c[2] for c in app.scr.calls]
+        msg = next(t for t in texts if "quit dais top?" in t)
+        self.assertIn("[y/N]", msg)
+        self.assertTrue(msg.startswith("  "))                # 2-space left margin
+        self.assertTrue(any(t.strip() == "" for t in texts))  # has blank padding row(s)

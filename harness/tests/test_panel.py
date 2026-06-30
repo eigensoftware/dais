@@ -1839,3 +1839,20 @@ class TestTagAlignment(unittest.TestCase):
         self.assertGreaterEqual(len(lines), 2)
         cols = {ln.index("cedar") for ln in lines}
         self.assertEqual(len(cols), 1)                  # the project column lines up across both tags
+
+
+class TestOverlayPadding(unittest.TestCase):
+    """The captured-output overlay (ship / quick actions) gets the same padding as the ? help and
+    action menu: a blank row top + bottom and a 2-space left margin on every line."""
+
+    def test_overlay_blank_rows_and_left_margin(self):
+        scr = FakeScr(40, 120)
+        ov = {"title": "ship win-95 — done", "lines": ["▶ shipping win-95 …", "✓ win-95 → done."]}
+        pn.render_overlay(scr, 40, 120, ov)
+        texts = [c[2] for c in scr.calls]
+        self.assertEqual(texts[0].strip(), "")               # blank top row
+        self.assertEqual(texts[-1].strip(), "")              # blank bottom row
+        title = next(t for t in texts if "ship win-95" in t)
+        self.assertTrue(title.startswith("  "))              # 2-space left margin
+        body = next(t for t in texts if "shipping" in t)
+        self.assertTrue(body.startswith("  "))               # body indented too

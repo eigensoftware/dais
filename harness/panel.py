@@ -654,17 +654,20 @@ _HELP_LINES = [
 def render_overlay(scr, h, w, ov):
     """Centered reverse-video modal showing a captured command's output (a bold title row, then the
     output tailed to fit so the footer stays visible). Lets actions like `ship` run IN the panel
-    instead of dropping to the console. Any key dismisses it."""
-    bw = min(max(0, w - 4), 100)
+    instead of dropping to the console. Consistent padding: a blank row top + bottom, a 2-space left
+    margin on every line (matching the ? help + action menu overlays). Any key dismisses it."""
+    title = ov.get("title", "") if ov else ""
     lines = ov.get("lines", []) if ov else []
-    max_body = max(1, min(h - 2, len(lines) + 1) - 1)    # leave a row for the title
-    body = lines[-max_body:] if len(lines) > max_body else lines
-    box = [ov.get("title", "") if ov else ""] + body
+    body_room = max(1, (h - 2) - 3)                      # screen minus margins, minus blank+title+blank
+    body = lines[-body_room:] if len(lines) > body_room else lines
+    box = [""] + ["  " + title] + ["  " + ln for ln in body] + [""]
+    content_w = max((disp_width(ln) for ln in box), default=0)
+    bw = min(max(0, w - 4), content_w + 2)               # +2 right margin; sized to content
     bh = min(max(0, h - 2), len(box))
     y0 = max(0, (h - bh) // 2)
     x0 = max(0, (w - bw) // 2)
     for i in range(bh):
-        attr = curses.A_REVERSE | (curses.A_BOLD if i == 0 else 0)
+        attr = curses.A_REVERSE | (curses.A_BOLD if i == 1 else 0)   # title row (after the blank top)
         _add(scr, y0 + i, x0, pad_cols(clip_cols(box[i], bw), bw), x0 + bw, attr)
 
 

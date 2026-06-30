@@ -1310,10 +1310,14 @@ class App:
 
     def _confirm(self, msg):
         h, w = self.scr.getmaxyx()
-        box = f"  {msg} [y/N]  "
+        # consistent padding: blank row top + bottom, a 2-space left margin (matches ? help / menu)
+        lines = ["", f"  {msg}  [y/N]", ""]
+        bw = max(disp_width(s) for s in lines) + 2
+        y0, x0 = max(0, h // 2 - 1), max(0, (w - bw) // 2)
         self.scr.timeout(-1)
-        _add(self.scr, h // 2, max(0, (w - disp_width(box)) // 2), box,
-             w, curses.A_REVERSE | curses.A_BOLD)
+        for i, ln in enumerate(lines):
+            attr = curses.A_REVERSE | (curses.A_BOLD if i == 1 else 0)
+            _add(self.scr, y0 + i, x0, pad_cols(ln, bw), x0 + bw, attr)
         self.scr.refresh()
         ch = self.scr.getch()
         self.scr.timeout(250)
