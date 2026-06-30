@@ -75,6 +75,12 @@ Two founder gates, pick by whether there's a PR: use ready_to_merge ONLY for a Q
 Do ONE unit of work this run, then stop. Follow your role file exactly. Code work happens in the repo at $REPO (open PRs with gh — as ready-for-review, NOT draft; mark the PR ready BEFORE you handoff to QA, since a draft can't be merged at the founder gate). Do not start more than one task. When done, update the task's status / hand it off per your role.
 Base any new branch on the freshly-fetched origin/main, never on local refs you happen to find. A just-merged PR is squash-merged and its branch DELETED on the remote, but a stale local branch/worktree may linger — the dais board is the source of truth for what's merged: if a task is 'done', its work IS on origin/main, so build on top of main, never stack on that task's old branch."
 
+# Task pinning (set by `dais loop`): scope this run to ONE task and tell the agent the failing
+# verifier output is in its notes. Empty otherwise, so normal self-selecting runs are unaffected.
+[ -n "${DAIS_TASK:-}" ] && STANDING="$STANDING
+
+LOOP MODE: work ONLY on task ${DAIS_TASK} this run — do NOT pick any other task. If its notes carry a '↻ loop feedback' block, that is the verifier output from your last attempt: fix exactly what it reports. Make the change and stop — an external verifier decides pass/fail and re-runs you if it's still failing, so do not mark the task done/needs_qa yourself unless your role normally would on success."
+
 # Debug seam: dump the assembled agent prompt and exit, WITHOUT calling claude. Lets tests
 # assert prompt wiring (e.g. workspace-context injection) without an end-to-end model run.
 if [ "${DAIS_SHOW_PROMPT:-0}" = 1 ]; then

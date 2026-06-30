@@ -644,5 +644,98 @@ class TestStartVerb(CliTest):
         self.assertIn("starting demo/engineer", r.stdout)
 
 
+class TestLoopCommand(CliTest):
+    """`dais loop` — single-task iterate-until-pass. The builder is stubbed via DAIS_LOOP_BUILDER so
+    no model runs; the verifier (--until) is a real shell command, so every branch is deterministic."""
+
+    def _setup(self):
+        dais(self.root, "scaffold", "demo")
+        base = tempfile.mkdtemp(prefix="dais-repos-")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        os.makedirs(os.path.join(base, "demo"))
+        dais(self.root, "task", "add", "demo", "make it green",
+             "--id", "d-1", "--status", "ready")
+        return base                              # becomes DAIS_AGENT_REPOS
+
+    def _builder(self, body=":"):
+        p = os.path.join(self.root, "stub_builder.sh")
+        with open(p, "w") as fh:
+            fh.write("#!/usr/bin/env bash\n" + body + "\n")
+        os.chmod(p, 0o755)
+        return p
+
+    def _loop(self, base, builder, *args):
+        env = {"DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+               "DAIS_AGENT_REPOS": base, "DAIS_LOOP_BUILDER": builder}
+        return dais(self.root, "loop", "demo", "d-1", *args, env=env)
+
+    def _status(self):
+        return q(self.root, "SELECT status FROM tasks WHERE id='d-1'")[0]
+
+    def _notes(self):
+        return q(self.root, "SELECT COALESCE(notes,'') FROM tasks WHERE id='d-1'")[0]
+
+    def test_requires_until(self):
+        base = self._setup()
+        r = self._loop(base, self._builder())
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--until", r.stdout + r.stderr)
+
+    def test_hit_first_try_stops_and_does_not_block(self):
+        base = self._setup()
+        calls = os.path.join(self.root, "calls.log")
+        r = self._loop(base, self._builder('echo "$DAIS_TASK" >> "%s"' % calls), "--until", "true")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("✓", r.stdout)            # ✓ hit
+        self.assertNotEqual(self._status(), "blocked")
+        with open(calls) as fh:
+            lines = [l.strip() for l in fh if l.strip()]
+        self.assertEqual(lines, ["d-1"])             # exactly one attempt; task pinned via DAIS_TASK
+
+    def test_cap_blocks_after_max_attempts(self):
+        base = self._setup()
+        calls = os.path.join(self.root, "calls.log")
+        r = self._loop(base, self._builder('echo x >> "%s"' % calls),
+                       "--until", "false", "--max", "3")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("--max 3", r.stdout)
+        self.assertEqual(self._status(), "blocked")
+        with open(calls) as fh:
+            self.assertEqual(len([l for l in fh if l.strip()]), 3)   # re-dispatched exactly max times
+        notes = self._notes()
+        self.assertIn("loop feedback", notes)
+        self.assertIn("false", notes)                # the failing verifier is named in the note
+
+    def test_failure_output_feeds_back_into_the_next_attempt(self):
+        base = self._setup()
+        seen = os.path.join(self.root, "notes_seen.log")
+        # the builder dumps the task's CURRENT notes each call, proving the verifier output
+        # from attempt 1 reaches the builder on attempt 2
+        body = ('sqlite3 "$DAIS_HOME/dais.db" '
+                "\"SELECT COALESCE(notes,'') FROM tasks WHERE id='$DAIS_TASK'\" >> \"%s\"; "
+                'printf "@@@" >> "%s"' % (seen, seen))
+        r = self._loop(base, self._builder(body),
+                       "--until", "echo NEEDLE_OUT; false", "--max", "2")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        with open(seen) as fh:
+            blocks = fh.read().split("@@@")
+        self.assertNotIn("NEEDLE_OUT", blocks[0])    # attempt 1 saw clean notes
+        self.assertIn("NEEDLE_OUT", blocks[1])       # attempt 2 saw the fed-back failure
+        self.assertIn("loop feedback", blocks[1])
+
+    def test_hit_after_a_miss_strips_the_feedback_block(self):
+        base = self._setup()
+        passfile = os.path.join(self.root, "PASS")
+        cnt = os.path.join(self.root, "n")
+        # builder creates PASS on its 2nd call -> verifier passes on attempt 2
+        body = ('n=$(cat "%s" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "%s"; '
+                '[ "$n" -ge 2 ] && touch "%s" || true' % (cnt, cnt, passfile))
+        r = self._loop(base, self._builder(body),
+                       "--until", "test -f %s" % passfile, "--max", "5")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("loop feedback", self._notes())   # cleaned up on success
+        self.assertNotEqual(self._status(), "blocked")
+
+
 if __name__ == "__main__":
     unittest.main()
