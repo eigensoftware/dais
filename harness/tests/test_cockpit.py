@@ -721,7 +721,7 @@ class TestDeployMigrationPanel(unittest.TestCase):
         os.makedirs(os.path.join(app.root, "projects", "app"), exist_ok=True)
         with open(os.path.join(app.root, "projects", "app", "project.yaml"), "w") as f:
             f.write("project: app\nrepo: /tmp/x\n%s\n" % lines)
-        app.snap = d.Snapshot(projects=[d.Project(name="app", stage_goal="", deploy_pending=2,
+        app.snap = d.Snapshot(projects=[d.Project(name="app", stage_goal="", deploy_needs=True,
                                                   deploy_migration=migration)],
                               recent_runs=[], cap_state=False, ts="t", workspace="w")
         return app

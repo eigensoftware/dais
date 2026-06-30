@@ -1859,78 +1859,82 @@ class TestOverlayPadding(unittest.TestCase):
 
 
 class TestDeployVitals(unittest.TestCase):
-    """The vitals strip shows a yellow ⬆ N DEPLOY token when projects have merged-but-undeployed work."""
+    """The vitals strip shows a yellow ⬆ DEPLOY token (yes/no) when a project's prod is behind main."""
 
-    def _papp(self, pending):
+    def _papp(self, needs):
         import tempfile
         root = tempfile.mkdtemp(prefix="dais-dep-")
         os.makedirs(os.path.join(root, "projects"), exist_ok=True)
         papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
         projs = [d.Project(name="cedar", stage_goal="", deploy_configured=True,
-                           deploy_pending=pending)]
+                           deploy_needs=needs)]
         papp.snap = d.Snapshot(projects=projs, recent_runs=[], cap_state=False,
                                ts="2026-06-30 16:00:00", workspace="eigen")
         papp._cp = lambda n: n * 1000
         return papp
 
-    def test_deploy_token_shows_when_pending(self):
-        papp = self._papp(3)
+    def test_deploy_token_shows_when_behind(self):
+        papp = self._papp(True)
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
-        text = "".join(c[2] for c in scr.calls)
-        self.assertIn("⬆ 1 DEPLOY", text)                       # 1 project has undeployed merges
+        self.assertIn("⬆ DEPLOY", "".join(c[2] for c in scr.calls))   # yes/no, no count
         tok = next(c for c in scr.calls if "DEPLOY" in c[2] and c[3] != (pn._VITALS * 1000 | curses.A_BOLD))
         self.assertEqual(tok[3], 4000 | curses.A_REVERSE | curses.A_BOLD)   # yellow founder-gate hue
 
-    def test_no_token_when_nothing_pending(self):
-        papp = self._papp(0)
+    def test_no_token_when_up_to_date(self):
+        papp = self._papp(False)
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        self.assertNotIn("DEPLOY", "".join(c[2] for c in scr.calls))
+
+    def test_no_token_when_unchecked(self):
+        papp = self._papp(None)                              # unknown until --check resolves it
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
         self.assertNotIn("DEPLOY", "".join(c[2] for c in scr.calls))
 
 
 class TestDeployState(unittest.TestCase):
-    """deploy_state: detects a deploy: command, parses the deployed SHA from the latest succeeded
-    deploy run, and reports the pending count (git is stubbed here — exercised live by the CLI)."""
+    """deploy_state: yes/no derived from the cached prod SHA (.deploy-rev) vs main — not a guessed
+    baseline. git is stubbed here; exercised live by the CLI."""
 
-    def _root_conn(self, deploy_line):
+    def _root(self, deploy_line, rev=None):
         import tempfile
         root = tempfile.mkdtemp(prefix="dais-ds-")
-        os.makedirs(os.path.join(root, "projects", "app"))
-        with open(os.path.join(root, "projects", "app", "project.yaml"), "w") as f:
+        pdir = os.path.join(root, "projects", "app"); os.makedirs(pdir)
+        with open(os.path.join(pdir, "project.yaml"), "w") as f:
             f.write("project: app\nrepo: /tmp/x\n%s\n" % deploy_line)
-        return root, _conn()
+        if rev is not None:
+            with open(os.path.join(pdir, ".deploy-rev"), "w") as f:
+                f.write(rev)
+        return root
 
     def test_no_deploy_configured(self):
-        root, conn = self._root_conn("# none")
-        self.assertEqual(d.deploy_state(root, "app", conn), (False, None, None, False, []))
+        self.assertEqual(d.deploy_state(self._root("# none"), "app"), (False, None, None, False, []))
 
-    def test_configured_parses_sha_time_and_commits(self):
-        root, conn = self._root_conn("deploy: echo hi")
-        conn.execute("INSERT INTO runs(project,agent,status,summary,ended_at) "
-                     "VALUES('app','deploy','succeeded','deployed abc1234','2026-06-30 10:00:00')")
-        conn.commit()
-        with mock.patch.object(d, "_deploy_pending", return_value=5) as mp, \
-             mock.patch.object(d, "_deploy_has_migration", return_value=True) as mh, \
-             mock.patch.object(d, "_deploy_commits", return_value=[("de54f1a", "win-95: split")]):
-            configured, pending, last, has_mig, commits = d.deploy_state(root, "app", conn)
-        self.assertTrue(configured)
-        self.assertEqual(pending, 5)
-        self.assertEqual(last, "2026-06-30 10:00:00")
-        self.assertTrue(has_mig)                            # migration detected in the pending range
-        self.assertEqual(commits, [("de54f1a", "win-95: split")])   # what would ship
-        mp.assert_called_once_with("/tmp/x", "abc1234")    # SHA parsed from the run summary
-        mh.assert_called_once_with(root, "app", "/tmp/x", "abc1234")
+    def test_unchecked_is_unknown(self):
+        # deploy: set but no .deploy-rev yet → needs is None (unknown), nothing listed
+        self.assertEqual(d.deploy_state(self._root("deploy: echo hi"), "app"),
+                         (True, None, None, False, []))
 
-    def test_no_migration_or_commit_check_when_nothing_pending(self):
-        root, conn = self._root_conn("deploy: echo hi")
-        with mock.patch.object(d, "_deploy_pending", return_value=0), \
-             mock.patch.object(d, "_deploy_has_migration") as mh, \
-             mock.patch.object(d, "_deploy_commits") as mc:
-            _, _, _, has_mig, commits = d.deploy_state(root, "app", conn)
-        self.assertFalse(has_mig)
-        self.assertEqual(commits, [])
-        mh.assert_not_called(); mc.assert_not_called()      # don't probe git when there's nothing to deploy
+    def test_checked_and_behind_needs_deploy(self):
+        root = self._root("deploy: echo hi", rev="abc1234\n2026-06-30 10:00:00\n")
+        with mock.patch.object(d, "_deploy_commits", return_value=[("de54f1a", "win-95: split")]) as mc, \
+             mock.patch.object(d, "_deploy_has_migration", return_value=True):
+            configured, needs, checked, has_mig, commits = d.deploy_state(root, "app")
+        self.assertTrue(configured); self.assertTrue(needs)
+        self.assertEqual(checked, "2026-06-30 10:00:00")
+        self.assertTrue(has_mig)
+        self.assertEqual(commits, [("de54f1a", "win-95: split")])
+        mc.assert_called_once_with("/tmp/x", "abc1234")     # diff prod(abc1234)..main
+
+    def test_checked_and_current_is_up_to_date(self):
+        root = self._root("deploy: echo hi", rev="abc1234\n2026-06-30 10:00:00\n")
+        with mock.patch.object(d, "_deploy_commits", return_value=[]), \
+             mock.patch.object(d, "_deploy_has_migration") as mh:
+            _, needs, _, has_mig, commits = d.deploy_state(root, "app")
+        self.assertFalse(needs); self.assertEqual(commits, [])
+        mh.assert_not_called()                              # no migration probe when nothing to ship
 
 
 class TestDeployMigrationVitals(unittest.TestCase):
@@ -1940,7 +1944,7 @@ class TestDeployMigrationVitals(unittest.TestCase):
         os.makedirs(os.path.join(root, "projects"), exist_ok=True)
         papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
         papp.snap = d.Snapshot(projects=[d.Project(name="cedar", stage_goal="",
-                               deploy_configured=True, deploy_pending=2, deploy_migration=True)],
+                               deploy_configured=True, deploy_needs=True, deploy_migration=True)],
                                recent_runs=[], cap_state=False, ts="2026-06-30 16:00:00", workspace="e")
         papp._cp = lambda n: n * 1000
         scr = FakeScr(40, 200)
@@ -1949,8 +1953,8 @@ class TestDeployMigrationVitals(unittest.TestCase):
 
 
 class TestAwaitingDeploy(unittest.TestCase):
-    """The AWAITING DEPLOY band + rail `dep` column show exactly what's merged-but-not-shipped, so a
-    deploy is never blind."""
+    """The AWAITING DEPLOY band + rail `dep` column show exactly what's behind on prod, so a deploy
+    is never blind."""
 
     def _snap(self, **proj_kw):
         p = d.Project(name="cedar", stage_goal="", deploy_configured=True, **proj_kw)
@@ -1958,7 +1962,7 @@ class TestAwaitingDeploy(unittest.TestCase):
                           ts="2026-06-30 16:00:00", workspace="e")
 
     def test_band_lists_the_pending_commits(self):
-        snap = self._snap(deploy_pending=2, deploy_migration=True,
+        snap = self._snap(deploy_needs=True, deploy_migration=True, deploy_checked_at="2026-06-30 15:00:00",
                           deploy_commits=[("abc1234", "win-95: split the vault"),
                                           ("def5678", "win-71: vault merge")])
         rows = pn.panel_work_rows(snap, expanded=True)
@@ -1967,24 +1971,60 @@ class TestAwaitingDeploy(unittest.TestCase):
         self.assertIn("⚠ migration", text)                  # the band flags a pending migration
         self.assertIn("win-95: split the vault", text)      # the actual commits are listed
         self.assertIn("abc1234", text)
+        self.assertIn("prod checked", text)                 # the checked-at meta line
 
-    def test_band_absent_when_nothing_pending(self):
-        snap = self._snap(deploy_pending=0, deploy_commits=[])
+    def test_band_absent_when_up_to_date(self):
+        snap = self._snap(deploy_needs=False, deploy_commits=[])
         text = "\n".join(r.get("label", "") for r in pn.panel_work_rows(snap, expanded=True))
         self.assertNotIn("AWAITING DEPLOY", text)
 
-    def test_rail_dep_column_counts_pending(self):
+    def test_rail_dep_marks_a_project_behind(self):
         import tempfile
         root = tempfile.mkdtemp(prefix="dais-rdep-")
         os.makedirs(os.path.join(root, "projects"), exist_ok=True)
         papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
-        papp.snap = self._snap(deploy_pending=3, deploy_commits=[("a", "x")] * 3)
+        papp.snap = self._snap(deploy_needs=True, deploy_commits=[("a", "x")])
         papp._cp = lambda n: n * 1000
-        self.assertEqual(pn._rail_counts(papp, "cedar")[5], 3)   # the dep column
+        self.assertEqual(pn._rail_counts(papp, "cedar")[5], 1)   # the dep column: 1 = behind
         scr = FakeScr(40, 200)
         pn.render_rail(scr, pn.Rect(1, 0, 20, 60), papp, focused=False)   # wide: all columns incl dep
         text = "\n".join(c[2] for c in scr.calls)
         self.assertIn("dep", text)                          # the column header
-        # the dep cell (value 3) pops bold yellow like the needs-you gate
-        cell = next(c for c in scr.calls if c[2].strip() == "3")
-        self.assertEqual(cell[3], 4000 | curses.A_BOLD)
+        cell = next(c for c in scr.calls if c[2].strip() == "1")
+        self.assertEqual(cell[3], 4000 | curses.A_BOLD)     # bold yellow like the needs-you gate
+
+
+class TestAutoDeployCheck(unittest.TestCase):
+    """The panel keeps needs-deploy current by spawning a background `dais deploy <p> --check` when
+    the cached prod SHA is stale — never SSHing inline."""
+
+    def _papp(self, deployed_rev=True):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-auto-")
+        pdir = os.path.join(root, "projects", "cedar"); os.makedirs(pdir)
+        rev = "deployed_rev: echo abc\n" if deployed_rev else ""
+        with open(os.path.join(pdir, "project.yaml"), "w") as f:
+            f.write("project: cedar\nrepo: /tmp/x\ndeploy: echo d\n%s" % rev)
+        conn = _conn()
+        conn.execute("INSERT INTO tasks(id,project,title,status,priority) "
+                     "VALUES('w-1','cedar','t','ready','med')")
+        conn.commit()
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp._spawned = []
+        papp._spawn_agent = lambda cmd: papp._spawned.append(cmd) or True
+        return papp
+
+    def test_spawns_check_when_unchecked(self):
+        papp = self._papp(deployed_rev=True)
+        papp.refresh()                                       # loads snapshot + auto-checks
+        self.assertIn(["deploy", "cedar", "--check"], papp._spawned)
+
+    def test_no_check_without_deployed_rev(self):
+        papp = self._papp(deployed_rev=False)
+        papp.refresh()
+        self.assertEqual(papp._spawned, [])                  # nothing to ask the server with
+
+    def test_does_not_respawn_immediately(self):
+        papp = self._papp(deployed_rev=True)
+        papp.refresh(); papp.refresh()                       # second refresh is throttled
+        self.assertEqual(papp._spawned.count(["deploy", "cedar", "--check"]), 1)

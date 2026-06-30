@@ -138,8 +138,8 @@ class Project:
     tasks_by_status: dict = field(default_factory=dict)
     recent_runs: list = field(default_factory=list)
     deploy_configured: bool = False   # project.yaml has a deploy: command
-    deploy_pending: int = None        # commits on origin/main since the last deploy (None = unknown)
-    last_deploy: str = None           # ended_at of the last successful deploy run
+    deploy_needs: bool = None         # prod != main → needs deploy; False = up to date; None = unchecked
+    deploy_checked_at: str = None     # when prod's live SHA was last fetched (.deploy-rev cache)
     deploy_migration: bool = False    # an un-deployed commit touches a migration → flag it loudly
     deploy_commits: list = field(default_factory=list)   # (sha7, subject) of what's awaiting deploy
 
@@ -264,12 +264,12 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 "AND status='running' ORDER BY id DESC LIMIT 1",
                 (name, agent)).fetchone()
             running.append((agent, since["started_at"] if since else None))
-        dcfg, dpending, dlast, dmig, dcommits = deploy_state(root, name, conn)
+        dcfg, dneeds, dchecked, dmig, dcommits = deploy_state(root, name)
         projects.append(Project(name=name, stage_goal=stage_goal(root, name),
                                 running=running, tasks_by_status=by_status,
                                 recent_runs=proj_runs, deploy_configured=dcfg,
-                                deploy_pending=dpending, last_deploy=dlast, deploy_migration=dmig,
-                                deploy_commits=dcommits))
+                                deploy_needs=dneeds, deploy_checked_at=dchecked,
+                                deploy_migration=dmig, deploy_commits=dcommits))
     # resolve dependencies once across ALL projects (a predecessor may live in another project):
     # a task is blocked when its predecessor exists and isn't done/cancelled. A dangling ref
     # (predecessor missing) is treated as unblocked so a deleted prerequisite never strands work.
@@ -296,21 +296,18 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                     cap_state=capped > 0, ts=now, workspace=workspace_name(root))
 
 
-def _deploy_pending(repo, sha):
-    """How many commits are on origin/main ahead of `sha` (the last-deployed commit), or None if it
-    can't be told. Local git only — origin/main is kept current by agents' `git fetch` on each run,
-    so this needs no network in the refresh loop."""
-    if not (repo and sha and sha != "?"):
-        return None
+def read_deploy_rev(root, project):
+    """(prod_sha, checked_at) from the project's .deploy-rev cache — what `dais deploy <p> --check`
+    last learned the SERVER is running (and a real deploy updates to the just-shipped SHA). The panel
+    reads this (never SSHes itself); ('', None) when never checked."""
+    path = os.path.join(root, "projects", project, ".deploy-rev")
     try:
-        out = subprocess.run(
-            ["git", "-C", os.path.expanduser(repo), "rev-list", "--count", "%s..origin/main" % sha],
-            capture_output=True, text=True, timeout=5)
-        if out.returncode == 0 and out.stdout.strip().isdigit():
-            return int(out.stdout.strip())
-    except Exception:
-        pass
-    return None
+        with open(path) as f:
+            lines = [ln.strip() for ln in f.read().splitlines()]
+        return (lines[0] if lines and lines[0] else "",
+                lines[1] if len(lines) > 1 and lines[1] else None)
+    except OSError:
+        return ("", None)
 
 
 def _deploy_has_migration(root, project, repo, sha):
@@ -349,25 +346,25 @@ def _deploy_commits(repo, sha, limit=25):
     return []
 
 
-def deploy_state(root, project, conn):
-    """(configured, pending, last_deploy_ts, has_migration, commits) for a project: whether it declares
-    a deploy: command, how many merged commits are still un-deployed (origin/main since the last
-    recorded deploy SHA), when it last deployed, whether any un-deployed commit touches a migration,
-    and the commit list (sha7, subject) of what would ship. SHA is parsed from the last deploy run."""
+def deploy_state(root, project):
+    """(configured, needs, checked_at, has_migration, commits) — the deploy signal as YES/NO, derived
+    from what the SERVER is running (the .deploy-rev cache), NOT a guessed baseline:
+      configured  – the project declares a deploy: command
+      needs       – True if prod's SHA differs from origin/main (commits to ship), False if up to
+                    date, None if never checked (unknown — a --check resolves it)
+      checked_at  – when prod's SHA was last fetched
+      has_migration / commits – the migration flag + commit list (prod..origin/main) of what'd ship
+    Local git only; the SSH to learn prod's SHA happens in `dais deploy --check`, not here."""
     if not project_field(root, project, "deploy"):
         return (False, None, None, False, [])
-    row = conn.execute(
-        "SELECT summary, ended_at FROM runs WHERE project=? AND agent='deploy' "
-        "AND status='succeeded' ORDER BY id DESC LIMIT 1", (project,)).fetchone()
-    sha, last_ts = "", (row["ended_at"] if row else None)
-    if row and row["summary"]:
-        m = re.search(r"deployed (\S+)", row["summary"])
-        sha = m.group(1) if m else ""
+    prod_sha, checked_at = read_deploy_rev(root, project)
+    if not prod_sha:
+        return (True, None, checked_at, False, [])        # configured but never checked → unknown
     repo = project_field(root, project, "repo")
-    pending = _deploy_pending(repo, sha)
-    has_mig = _deploy_has_migration(root, project, repo, sha) if pending else False
-    commits = _deploy_commits(repo, sha) if pending else []
-    return (True, pending, last_ts, has_mig, commits)
+    commits = _deploy_commits(repo, prod_sha)
+    needs = len(commits) > 0
+    has_mig = _deploy_has_migration(root, project, repo, prod_sha) if needs else False
+    return (True, needs, checked_at, has_mig, commits)
 
 
 def load_runs(conn, limit=200):

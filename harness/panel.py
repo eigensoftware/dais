@@ -408,14 +408,13 @@ def render_vitals(scr, rect, app):
     pf = getattr(app, "project_filter", None)
     proj_seg = " · all projects" if pf is None else f" · {pf}"
     ident = f" DAIS {_BRAND} {ws}" if ws else " DAIS"     # honesty comes from the watch badge, not a literal "LIVE"
-    pend = [p for p in (snap.projects if snap else []) if (p.deploy_pending or 0) > 0]
-    n_deploy = len(pend)
+    pend = [p for p in (snap.projects if snap else []) if p.deploy_needs]
     mig_pending = any(getattr(p, "deploy_migration", False) for p in pend)
     run_dot = _DOT_RUN if threads else _DOT_IDLE
     run_tok = f"{run_dot} {len(threads)} running"
     gate_tok = f"{_DOT_GATE} {ng} NEED YOU" if ng > 0 else f"{_DOT_IDLE} {ng} need you"
-    deploy_tok = (f" · ⬆ {n_deploy} DEPLOY{' ⚠MIGRATION' if mig_pending else ''}"
-                  if n_deploy else "")        # merged-but-not-deployed: a founder gate; ⚠ if it has a migration
+    deploy_tok = (f" · ⬆ DEPLOY{' ⚠MIGRATION' if mig_pending else ''}"
+                  if pend else "")            # yes/no: prod is behind main (a founder gate); ⚠ if a migration
     pre = ident + "   "
     sep = " · "                                            # between the two hero tokens
     ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}  {clk}"
@@ -428,7 +427,7 @@ def render_vitals(scr, rect, app):
     if ng > 0:                                             # the gate token is the alarm: yellow hero
         _add(scr, rect.y, rect.x + disp_width(pre + run_tok + sep), gate_tok,
              rect.x + rect.w, app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
-    if n_deploy:                                           # un-deployed merges also pull the eye yellow
+    if pend:                                               # prod behind main also pulls the eye yellow
         _add(scr, rect.y, rect.x + disp_width(pre + run_tok + sep + gate_tok), deploy_tok,
              rect.x + rect.w, app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
 
@@ -455,7 +454,7 @@ def _rail_counts(app, name):
     def total(statuses):
         return sum(len(p.tasks_by_status.get(st, [])) for p in projs for st in statuses)
     run = sum(1 for p in projs if p.running)            # one agent per project, so 0/1 each
-    dep = sum(p.deploy_pending or 0 for p in projs)
+    dep = sum(1 for p in projs if p.deploy_needs)        # projects whose prod is behind main (0/1 each)
     return (run, total(d.GATE_ORDER), total(_SCOPING_STATUSES),
             total(_LOOP_STATUSES), total(_BACKLOG_STATUSES), dep)
 
@@ -723,6 +722,7 @@ class PanelApp(d.App):
         self._runs = []
         self.show_overlay = False        # an action's captured output, shown in-panel (e.g. ship)
         self._overlay = None
+        self._deploy_check_at = {}       # project → last time we spawned a background prod --check
 
     def refresh(self):
         super().refresh()
@@ -731,6 +731,21 @@ class PanelApp(d.App):
                 self._runs = d.load_runs(self.conn)
             except d.sqlite3.Error:
                 pass                      # keep the last list; the next tick retries
+        self._auto_deploy_check()
+
+    def _auto_deploy_check(self):
+        """Keep "needs deploy?" current: for deploy-configured projects with a deployed_rev: command,
+        spawn `dais deploy <p> --check` (detached — never blocks the UI) when the cached prod SHA is
+        stale (>5 min) and we haven't spawned one recently. The result lands in .deploy-rev and shows
+        on a later refresh. So the panel learns prod's state without ever SSHing inline."""
+        nowm = d.time.monotonic()
+        for p in (self.snap.projects if self.snap else []):
+            if not p.deploy_configured or not d.project_field(self.root, p.name, "deployed_rev"):
+                continue
+            age = d.seconds_between(p.deploy_checked_at, d.utc_now()) if p.deploy_checked_at else 1e9
+            if age > 300 and (nowm - self._deploy_check_at.get(p.name, 0)) > 120:
+                self._deploy_check_at[p.name] = nowm
+                self._spawn_agent(["deploy", p.name, "--check"])
 
     def left_rows(self):
         rows = panel_work_rows(self.snap, project=self.project_filter,
@@ -963,23 +978,22 @@ def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
     for proj, t in gates:
         rows.append(_task_row(proj, t, _short_tag(t.status)))
 
-    # AWAITING DEPLOY — merged to main but not yet shipped (deploy-configured projects). A founder
-    # action: lists EXACTLY which commits `D` will ship, so you never deploy blind. ⚠ if any carries
-    # a migration. Only appears when something is pending (no empty header).
-    dep_projs = [p for p in projects if (p.deploy_pending or 0) > 0]
+    # AWAITING DEPLOY — prod is behind main (deploy-configured projects, learned by `--check`). A
+    # founder action: lists EXACTLY which commits `D` will ship, so you never deploy blind. ⚠ if any
+    # carries a migration. Only appears when prod is actually behind (no empty header).
+    dep_projs = [p for p in projects if p.deploy_needs]
     if dep_projs:
-        total = sum(p.deploy_pending or 0 for p in dep_projs)
+        total = sum(len(p.deploy_commits) for p in dep_projs)
         mig = any(p.deploy_migration for p in dep_projs)
         add_band("AWAITING DEPLOY" + ("  ⚠ migration" if mig else ""), total)
-        shown = 0
         for p in dep_projs:
             for sha7, subj in (p.deploy_commits or []):
                 rows.append({"kind": "info", "id": f"__deploy::{p.name}::{sha7}", "sel": False,
                              "label": f"  SHIP    {sha7:<8} {p.name[:11]:<11} {subj}"})
-                shown += 1
-        if total > shown:
-            rows.append({"kind": "info", "id": "__deploy_more", "sel": False,
-                         "label": f"  +{total - shown} more  ·  press D to deploy"})
+        checks = [p.deploy_checked_at for p in dep_projs if p.deploy_checked_at]
+        if checks:
+            rows.append({"kind": "info", "id": "__deploy_meta", "sel": False,
+                         "label": f"  (prod checked {d.to_local_hhmm(max(checks))} · press D to deploy)"})
 
     # SCOPING — sparse tasks handed to the lead to flesh out (founder → `dais handoff <id> lead`);
     # the lead writes a real spec, then promotes to ready (or proposes new direction).

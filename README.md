@@ -120,9 +120,16 @@ done — the scheduler skips it and the panel marks it `⛓`.
 
 **Deploy** is a third gate for projects where **merge ≠ deploy** (e.g. an auto-merge project that
 deploys manually). Set a `deploy:` command in `project.yaml` (any shell — ssh pull, `fly deploy`,
-a script) and `dais deploy <project>` (or `D` in the panel) runs it founder-gated, logs it as a run,
-and records what went live. The panel shows a yellow **⬆ N DEPLOY** when `main` has merged commits
-that aren't deployed yet. Projects where merge *is* the deploy (e.g. beacon) simply set no `deploy:`.
+a script); `dais deploy <project>` (or `D` in the panel) runs it founder-gated and logs it as a run.
+A migration-inclusive variant lives in `deploy_migrate:` — `D` auto-selects it (with a loud confirm)
+when a pending commit touches a migration; deploys are always manual, never automatic.
+
+**"Needs deploy?" is the truth, not a guess.** Set `deployed_rev:` — a command that prints what SHA
+the *server* is running (e.g. `ssh … git rev-parse --short HEAD`). dais compares prod ↔ `main` and
+shows **⬆ DEPLOY** (yes/no) plus an **AWAITING DEPLOY** list of the exact commits that would ship —
+so you never have to know prod's state yourself. The panel refreshes that check in the background
+(`dais deploy <p> --check` caches it); a successful deploy updates the cache. Projects where merge
+*is* the deploy (e.g. beacon) simply set no `deploy:`.
 
 ## Playbooks: running any craft
 
@@ -168,7 +175,7 @@ A role's `handles` is reactive ownership: a cadence role (e.g. a `lead` on `ever
 | `dais handoff <id> <role>` | hand a task to a role (sets the status that role handles) |
 | `dais approve <id>` | approve a `proposed` initiative → `ready` |
 | `dais ship <project> <pr#>` | QA-gated, migration-aware squash-merge (founder gate) |
-| `dais deploy <project>` | run the project's `deploy:` command — the gate after merge (founder gate) |
+| `dais deploy <project> [--migrate] [--check]` | run the project's deploy (gate after merge); `--check` caches prod's live SHA |
 | `dais scaffold <project>` | create a new project from the template |
 | `dais role new <project> --desc "…"` | Claude designs a new role (persona + routing); you confirm |
 | `dais lint [project]` | validate a project (roles + project.yaml + playbooks + required files) |

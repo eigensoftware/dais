@@ -855,23 +855,31 @@ class TestDeployMigrate(unittest.TestCase):
         self.assertIn("no 'deploy_migrate:'", r.stdout + r.stderr)
 
 
-class TestDeployMark(unittest.TestCase):
-    """`dais deploy <p> --mark-deployed [SHA]` records a baseline WITHOUT running the deploy — to
-    bootstrap 'awaiting deploy' tracking or log an out-of-band deploy."""
+class TestDeployCheck(unittest.TestCase):
+    """`dais deploy <p> --check` asks the server (the deployed_rev: command) what SHA is live and
+    caches it in .deploy-rev — so the panel's needs-deploy is the truth (prod vs main). Runs no deploy."""
 
     def setUp(self):
         self.root = make_sandbox()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        d = os.path.join(self.root, "projects", "app")
-        os.makedirs(os.path.join(d, "logs"), exist_ok=True)
-        with open(os.path.join(d, "project.yaml"), "w") as f:
-            f.write("project: app\nrepo: %s\ndeploy: echo SHOULD-NOT-RUN\nstage_goal: x\n" % self.root)
+        self.pdir = os.path.join(self.root, "projects", "app")
+        os.makedirs(os.path.join(self.pdir, "logs"), exist_ok=True)
 
-    def test_mark_records_baseline_without_running(self):
-        r = dais(self.root, "deploy", "app", "--mark-deployed", "abc1234")
+    def _yaml(self, extra):
+        with open(os.path.join(self.pdir, "project.yaml"), "w") as f:
+            f.write("project: app\nrepo: %s\ndeploy: echo SHOULD-NOT-RUN\n%s\nstage_goal: x\n"
+                    % (self.root, extra))
+
+    def test_check_caches_prod_sha_without_deploying(self):
+        self._yaml("deployed_rev: echo abc1234")
+        r = dais(self.root, "deploy", "app", "--check")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertNotIn("SHOULD-NOT-RUN", r.stdout)            # the deploy command did NOT run
-        row = q(self.root, "SELECT agent, status, summary FROM runs WHERE project='app' ORDER BY id DESC LIMIT 1")
-        self.assertEqual((row[0], row[1]), ("deploy", "succeeded"))
-        self.assertIn("abc1234", row[2])
-        self.assertIn("marked", row[2])
+        self.assertNotIn("SHOULD-NOT-RUN", r.stdout)           # the deploy command did NOT run
+        with open(os.path.join(self.pdir, ".deploy-rev")) as f:
+            self.assertEqual(f.read().splitlines()[0], "abc1234")   # prod SHA cached
+
+    def test_check_without_deployed_rev_errors(self):
+        self._yaml("# no deployed_rev")
+        r = dais(self.root, "deploy", "app", "--check")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no 'deployed_rev:'", r.stdout + r.stderr)
