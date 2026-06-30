@@ -274,6 +274,14 @@ class TestPanelApp(unittest.TestCase):
         app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
         self.assertFalse(app.handle(ord("q"), app.left_rows(), 0, None))
 
+    def test_b_is_a_no_op_here(self):
+        # 'b' is the classic show/hide-parked toggle; the panel has its own backlog +
+        # deferred bands, so it's swallowed — stays alive, never flips the inherited flag.
+        app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
+        self.assertFalse(app.show_parked)
+        self.assertTrue(app.handle(ord("b"), app.left_rows(), 0, None))   # alive
+        self.assertFalse(app.show_parked)                                 # not toggled
+
     def test_a_on_work_selection_ships_in_panel_overlay(self):
         app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
                           "https://x/y/pull/7")])
@@ -409,14 +417,14 @@ class TestPanelWorkRows(unittest.TestCase):
         self.assertTrue(any(r["kind"] == "task" and r["status"] == "deferred" for r in rows))
 
     def test_backlog_caps_then_g_shows_all(self):
-        snap = self._snap(self._proj("x", backlog=pn._PARKED_CAP + 4))
+        snap = self._snap(self._proj("x", backlog=pn._BACKLOG_CAP + 4))
         capped = pn.panel_work_rows(snap)                   # default: capped + "+N more"
         n_capped = sum(1 for r in capped if r["kind"] == "task" and r["status"] == "backlog")
-        self.assertEqual(n_capped, pn._PARKED_CAP)
+        self.assertEqual(n_capped, pn._BACKLOG_CAP)
         self.assertTrue(any("more" in r.get("label", "") for r in capped))
         full = pn.panel_work_rows(snap, expanded=True)      # g shows all backlog
         n_full = sum(1 for r in full if r["kind"] == "task" and r["status"] == "backlog")
-        self.assertEqual(n_full, pn._PARKED_CAP + 4)
+        self.assertEqual(n_full, pn._BACKLOG_CAP + 4)
 
 
 class TestRenderWorkNative(unittest.TestCase):
@@ -658,11 +666,11 @@ class TestRolePalette(unittest.TestCase):
 
     def test_inspector_attr_rules(self):
         papp = self._papp([("z-1", "z", "t", "ready", "med", None)])
-        self.assertEqual(pn._inspector_attr(papp, 5, "12:59 gc      succeeded   2m"), 1000)  # green
-        self.assertEqual(pn._inspector_attr(papp, 5, "07:07 lead    failed      3m"), 2000)  # red
-        self.assertEqual(pn._inspector_attr(papp, 0, "notes:"), 3000 | curses.A_BOLD)        # header
-        self.assertEqual(pn._inspector_attr(papp, 0, "runs touching z-1:"), 3000 | curses.A_BOLD)
-        self.assertEqual(pn._inspector_attr(papp, 0,
+        self.assertEqual(pn._inspector_attr(papp, "12:59 gc      succeeded   2m"), 1000)  # green
+        self.assertEqual(pn._inspector_attr(papp, "07:07 lead    failed      3m"), 2000)  # red
+        self.assertEqual(pn._inspector_attr(papp, "notes:"), 3000 | curses.A_BOLD)        # header
+        self.assertEqual(pn._inspector_attr(papp, "runs touching z-1:"), 3000 | curses.A_BOLD)
+        self.assertEqual(pn._inspector_attr(papp,
                          "assignee founder · prio high · pr (none)"), 4000)         # yellow
 
     def test_inspector_note_body_and_title_stay_plain(self):
@@ -672,7 +680,7 @@ class TestRolePalette(unittest.TestCase):
                    "  ...then Step-8 verification. NOTE:",   # trailing ':' is NOT a section header
                    "  LEAD CALL: BLOCKED until win-103",     # 'blocked' in prose -> NOT red
                    '"fix the failing test"'):                # a title containing 'fail' -> NOT red
-            self.assertEqual(pn._inspector_attr(papp, 7, ln), 0, ln)
+            self.assertEqual(pn._inspector_attr(papp, ln), 0, ln)
 
     def test_inspector_head_line_is_structure_cyan(self):
         # the inspector's "<id> <status>" head line is a header → cyan-bold, not a per-status hue

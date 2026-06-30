@@ -3,7 +3,8 @@
 
 PanelApp subclasses dashboard.App: it inherits all data/action-engine/log/selection
 logic and overrides only the view (draw/handle) to render panes into a responsive
-layout. Reached via DAIS_PANEL=1; the classic `dais top` is unchanged.
+layout. This is the default `dais top`; `DAIS_CLASSIC=1 dais top` opts back into the
+classic single-pane UI.
 """
 from collections import namedtuple
 
@@ -16,7 +17,6 @@ from dashboard import _add, clip_cols, pad_cols, disp_width  # width-aware primi
 
 Rect = namedtuple("Rect", "y x h w")
 
-PANES = ("vitals", "rail", "work", "inspector", "feed", "bar")
 _MIN_FEED_H = 14          # below this terminal height, the feed is dropped
 _TWO_COL_MIN_W = 76       # below this width the columns stack into one (nothing is dropped)
 _INSP_MIN_W = 36          # the inspector is never narrower than this in two-column mode
@@ -189,7 +189,7 @@ def render_work(scr, rect, app, focused):
 _RUN_LINE_RE = re.compile(r"^\s*\d{1,2}:\d{2}\s")   # an inspector run row: a leading "HH:MM "
 
 
-def _inspector_attr(app, idx_in_doc, line):
+def _inspector_attr(app, line):
     """Color INSPECTOR lines by STRUCTURE, not by substrings in free text. Only a run row (a leading
     HH:MM time) carries its status color; only the exact section headers are cyan; the generated
     assignee/prio meta line is dim (yellow when prio is high). Titles and note-body prose stay plain
@@ -267,7 +267,7 @@ def render_inspector(scr, rect, app, focused):
         head_attr = app._cp(_STRUCTURE) | curses.A_BOLD     # the id/status head line is a header
     for idx, ln in enumerate(wrapped[start:start + inner.h]):
         doc_i = start + idx
-        attr = head_attr if doc_i == 0 else _inspector_attr(app, doc_i, ln)
+        attr = head_attr if doc_i == 0 else _inspector_attr(app, ln)
         _add(scr, inner.y + idx, inner.x, ln, inner.x + inner.w, attr)
 
 
@@ -534,7 +534,7 @@ class PanelApp(d.App):
         verdict = "done" if rc == 0 else f"FAILED (exit {rc})"
         self._overlay = {"title": f"ship {tid} — {verdict}",
                          "lines": (out.splitlines() or ["(no output)"])
-                         + ["", f"[exit {rc}]  press any key to return to dais top"]}
+                         + ["", f"[exit {rc}]  press any key to dismiss"]}
         self.show_overlay = True
         return rc
 
@@ -617,7 +617,9 @@ class PanelApp(d.App):
             self.project_filter = None if items[self._rail_i] == "ALL" else items[self._rail_i]
             self.sel_id = None                  # reset work selection to the filtered top
             return True
-        # everything else (j/k select, a/x/+/-/n/o/enter, /, b, ...) reuses App.handle,
+        if ch == ord("b"):                      # 'b' (classic show/hide-parked) is dead here —
+            return True                         # backlog + deferred are first-class sections now
+        # everything else (j/k select, a/x/+/-/n/o/enter, /, ...) reuses App.handle,
         # which already drives selection + the action engine on `rows`/`sel_row`.
         self.focus = "left"                     # App.handle's left-pane selection path
         return super().handle(ch, rows, sel_i, sel_row)
@@ -631,7 +633,7 @@ _ARCHIVE_STATUSES = ["done", "cancelled"]
 _BACKLOG_STATUSES = ["backlog"]
 _DEFERRED_STATUSES = ["deferred"]
 _ARCHIVE_CAP = 12
-_PARKED_CAP = 8
+_BACKLOG_CAP = 8
 
 
 def _band(name, count):
@@ -707,7 +709,7 @@ def panel_work_rows(snap, *, project=None, expanded=False):
     backlog = tasks_in(_BACKLOG_STATUSES)
     add_band("BACKLOG", len(backlog))
     if backlog:
-        shown = backlog if expanded else backlog[:_PARKED_CAP]
+        shown = backlog if expanded else backlog[:_BACKLOG_CAP]
         for proj, t in shown:
             rows.append(_task_row(proj, t, "BACK"))
         if len(backlog) > len(shown):
