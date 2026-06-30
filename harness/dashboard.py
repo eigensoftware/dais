@@ -142,6 +142,8 @@ class Project:
     deploy_checked_at: str = None     # when prod's live SHA was last fetched (.deploy-rev cache)
     deploy_migration: bool = False    # an un-deployed commit touches a migration → flag it loudly
     deploy_commits: list = field(default_factory=list)   # (sha7, subject) of what's awaiting deploy
+    deploy_failed: bool = False       # the most recent deploy ATTEMPT failed (not yet superseded)
+    deploy_failed_at: str = None      # when it failed
 
 
 @dataclass
@@ -265,11 +267,18 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 (name, agent)).fetchone()
             running.append((agent, since["started_at"] if since else None))
         dcfg, dneeds, dchecked, dmig, dcommits = deploy_state(root, name)
+        dfail, dfail_at = False, None
+        if dcfg:                                          # last deploy ATTEMPT failed (any status)?
+            frow = conn.execute("SELECT status, ended_at FROM runs WHERE project=? AND agent='deploy' "
+                                "ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+            if frow and frow["status"] == "failed":
+                dfail, dfail_at = True, frow["ended_at"]
         projects.append(Project(name=name, stage_goal=stage_goal(root, name),
                                 running=running, tasks_by_status=by_status,
                                 recent_runs=proj_runs, deploy_configured=dcfg,
                                 deploy_needs=dneeds, deploy_checked_at=dchecked,
-                                deploy_migration=dmig, deploy_commits=dcommits))
+                                deploy_migration=dmig, deploy_commits=dcommits,
+                                deploy_failed=dfail, deploy_failed_at=dfail_at))
     # resolve dependencies once across ALL projects (a predecessor may live in another project):
     # a task is blocked when its predecessor exists and isn't done/cancelled. A dangling ref
     # (predecessor missing) is treated as unblocked so a deleted prerequisite never strands work.
@@ -1558,6 +1567,29 @@ class App:
         if self._spawn_agent(cmd):
             self.flash = (f"deploying {proj} (migration) …" if mig else f"deploying {proj} …")
 
+    def file_deploy_fix(self, proj):
+        """File a task to fix the project's last FAILED deploy (its error + log path). Deliberate, not
+        automatic — deploy failures are often transient/ops, so this is founder-initiated. Lands in
+        backlog (high) for you to triage: promote if it's a build break, cancel if it was a blip."""
+        if not proj:
+            self.flash = "select a project"
+            return
+        row = self.conn.execute(
+            "SELECT summary, log_path FROM runs WHERE project=? AND agent='deploy' "
+            "AND status='failed' ORDER BY id DESC LIMIT 1", (proj,)).fetchone()
+        if not row:
+            self.flash = f"no failed deploy for {proj}"
+            return
+        if not self._confirm(f"file a fix task for {proj}'s failed deploy?"):
+            return
+        notes = (f"Last deploy FAILED: {row['summary'] or '(no summary)'}. "
+                 f"Log: {row['log_path'] or '(none)'}. Triage: ops/transient (retry with D?) vs a real "
+                 f"build break (then fix). Filed by founder from the panel.")
+        rc = self._dispatch(["task", "add", proj, f"deploy failed: {proj} — investigate",
+                             "--priority", "high", "--status", "backlog", "--notes", notes])
+        self.refresh()
+        self.flash = (f"filed deploy-fix task in {proj}" if rc == 0 else f"add failed (exit {rc})")
+
     # ---- the action engine (contextual bar + shared dispatcher) ----
     def _row_kind(self, row):
         """The engine's kind for a left row: 'project' | 'running' | 'task' (None for
@@ -1902,6 +1934,8 @@ class App:
             self.cancel_run(sel_row["project"] if sel_row else None)
         elif ch == ord("D"):                 # deploy the selected row's project (founder gate)
             self.deploy_project(sel_row["project"] if sel_row else None)
+        elif ch == ord("F"):                 # file a fix task for the project's last FAILED deploy
+            self.file_deploy_fix(sel_row["project"] if sel_row else None)
         elif 32 <= ch < 127 and (act := next(
                 (a for a in self._row_actions(sel_row) if a.key == chr(ch)), None)):
             self.do_action(act.id, sel_row)  # any contextual action by its key (a/x/o/s/h/e …)

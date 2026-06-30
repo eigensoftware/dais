@@ -694,6 +694,7 @@ _HELP_LINES = [
     "  c                 cancel the project's running agent",
     "  D deploy          run the project's deploy: command (confirms; flags + uses --migrate when a",
     "                    pending migration is involved). Always manual — there is no auto-deploy.",
+    "  F                 file a fix task for the project's last FAILED deploy (founder-initiated)",
     "",
     "",
     "  CONSISTENT KEYS",
@@ -1057,6 +1058,12 @@ def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
                 rows.append({"kind": "deploy", "id": f"__deploy::{p.name}::{sha7}", "sel": True,
                              "project": p.name, "sha": sha7, "subject": subj,
                              "label": f"  SHIP    {sha7:<8} {p.name[:11]:<11} {subj}"})
+        failed = [p for p in dep_projs if p.deploy_failed]
+        if failed:                                       # the last deploy ATTEMPT errored — say so loudly
+            when = d.to_local_hhmm(max(p.deploy_failed_at for p in failed if p.deploy_failed_at)) \
+                if any(p.deploy_failed_at for p in failed) else "?"
+            rows.append({"kind": "info", "id": "__deploy_failed", "sel": False,
+                         "label": f"  ⚠ last deploy FAILED {when} · r→l to see the log · F to file a fix task"})
         checks = [p.deploy_checked_at for p in dep_projs if p.deploy_checked_at]
         if checks:
             rows.append({"kind": "info", "id": "__deploy_meta", "sel": False,

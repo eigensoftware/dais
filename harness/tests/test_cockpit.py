@@ -751,3 +751,48 @@ class TestDeployMigrationPanel(unittest.TestCase):
         app.deploy_project("app")
         self.assertEqual(spawned, [])                      # refuse to deploy code ahead of the migration
         self.assertIn("MIGRATION", app.flash)
+
+
+class TestFileDeployFix(unittest.TestCase):
+    """`F` files a fix task for a project's last FAILED deploy — founder-initiated, not automatic."""
+
+    def _app(self):
+        app = make_app()
+        os.makedirs(os.path.join(app.root, "projects", "app"), exist_ok=True)
+        with open(os.path.join(app.root, "projects", "app", "project.yaml"), "w") as f:
+            f.write("project: app\nrepo: /tmp/x\ndeploy: echo d\n")
+        return app
+
+    def test_files_task_from_failed_deploy(self):
+        app = self._app()
+        app.conn.execute("INSERT INTO runs(project,agent,status,summary,log_path,started_at,ended_at) "
+                         "VALUES('app','deploy','failed','deploy failed (exit 2)','/l/x.log','t','t')")
+        app.conn.commit()
+        app._confirm = lambda *a: True
+        calls = []
+        app._dispatch = lambda cmd: calls.append(cmd) or 0
+        app.file_deploy_fix("app")
+        self.assertEqual(calls[0][:3], ["task", "add", "app"])
+        self.assertIn("--notes", calls[0])
+        notes = calls[0][calls[0].index("--notes") + 1]
+        self.assertIn("/l/x.log", notes)                    # the failed deploy's log path is captured
+
+    def test_no_failed_deploy_flashes(self):
+        app = self._app()                                   # no failed deploy run
+        app._confirm = lambda *a: True
+        calls = []
+        app._dispatch = lambda cmd: calls.append(cmd) or 0
+        app.file_deploy_fix("app")
+        self.assertEqual(calls, [])
+        self.assertIn("no failed deploy", app.flash)
+
+    def test_declined_does_not_file(self):
+        app = self._app()
+        app.conn.execute("INSERT INTO runs(project,agent,status,summary,started_at,ended_at) "
+                         "VALUES('app','deploy','failed','x','t','t')")
+        app.conn.commit()
+        app._confirm = lambda *a: False
+        calls = []
+        app._dispatch = lambda cmd: calls.append(cmd) or 0
+        app.file_deploy_fix("app")
+        self.assertEqual(calls, [])

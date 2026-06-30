@@ -2121,3 +2121,26 @@ class TestKeyStandardization(unittest.TestCase):
         for view in ("show_runs", "show_logwall"):
             papp = self._papp(); setattr(papp, view, True)
             self.assertFalse(papp.handle(ord("q"), [], 0, None), view)
+
+
+class TestDeployFailedFlag(unittest.TestCase):
+    """A failed deploy ATTEMPT is surfaced loudly in the AWAITING DEPLOY band (it leaves prod behind,
+    so the band stays up) with a pointer to the log + the F fix-task key."""
+
+    def test_band_flags_a_failed_deploy(self):
+        p = d.Project(name="cedar", stage_goal="", deploy_configured=True, deploy_needs=True,
+                      deploy_failed=True, deploy_failed_at="2026-06-30 14:32:00",
+                      deploy_commits=[("abc1234", "win-95: split")])
+        snap = d.Snapshot(projects=[p], recent_runs=[], cap_state=False,
+                          ts="2026-06-30 16:00:00", workspace="e")
+        text = "\n".join(r.get("label", "") for r in pn.panel_work_rows(snap, expanded=True))
+        self.assertIn("last deploy FAILED", text)
+        self.assertIn("F to file a fix task", text)
+
+    def test_no_failed_note_when_clean(self):
+        p = d.Project(name="cedar", stage_goal="", deploy_configured=True, deploy_needs=True,
+                      deploy_failed=False, deploy_commits=[("abc1234", "win-95: split")])
+        snap = d.Snapshot(projects=[p], recent_runs=[], cap_state=False,
+                          ts="2026-06-30 16:00:00", workspace="e")
+        text = "\n".join(r.get("label", "") for r in pn.panel_work_rows(snap, expanded=True))
+        self.assertNotIn("FAILED", text)
