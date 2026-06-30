@@ -141,6 +141,7 @@ class Project:
     deploy_pending: int = None        # commits on origin/main since the last deploy (None = unknown)
     last_deploy: str = None           # ended_at of the last successful deploy run
     deploy_migration: bool = False    # an un-deployed commit touches a migration → flag it loudly
+    deploy_commits: list = field(default_factory=list)   # (sha7, subject) of what's awaiting deploy
 
 
 @dataclass
@@ -263,11 +264,12 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 "AND status='running' ORDER BY id DESC LIMIT 1",
                 (name, agent)).fetchone()
             running.append((agent, since["started_at"] if since else None))
-        dcfg, dpending, dlast, dmig = deploy_state(root, name, conn)
+        dcfg, dpending, dlast, dmig, dcommits = deploy_state(root, name, conn)
         projects.append(Project(name=name, stage_goal=stage_goal(root, name),
                                 running=running, tasks_by_status=by_status,
                                 recent_runs=proj_runs, deploy_configured=dcfg,
-                                deploy_pending=dpending, last_deploy=dlast, deploy_migration=dmig))
+                                deploy_pending=dpending, last_deploy=dlast, deploy_migration=dmig,
+                                deploy_commits=dcommits))
     # resolve dependencies once across ALL projects (a predecessor may live in another project):
     # a task is blocked when its predecessor exists and isn't done/cancelled. A dangling ref
     # (predecessor missing) is treated as unblocked so a deleted prerequisite never strands work.
@@ -330,13 +332,30 @@ def _deploy_has_migration(root, project, repo, sha):
     return False
 
 
+def _deploy_commits(repo, sha, limit=25):
+    """The un-deployed commits (sha..origin/main), newest first, as (sha7, subject) — exactly what a
+    `dais deploy` would ship, so the panel can show what's pending instead of just a count. Local git."""
+    if not (repo and sha and sha != "?"):
+        return []
+    try:
+        out = subprocess.run(
+            ["git", "-C", os.path.expanduser(repo), "log", "--pretty=format:%h\x1f%s",
+             "-n", str(limit), "%s..origin/main" % sha],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            return [tuple(ln.split("\x1f", 1)) for ln in out.stdout.splitlines() if "\x1f" in ln]
+    except Exception:
+        pass
+    return []
+
+
 def deploy_state(root, project, conn):
-    """(configured, pending, last_deploy_ts, has_migration) for a project: whether it declares a
-    deploy: command, how many merged commits are still un-deployed (origin/main since the last
-    recorded deploy SHA), when it last deployed, and whether any of those un-deployed commits touch a
-    migration. The deploy SHA is parsed from the latest succeeded deploy run's summary."""
+    """(configured, pending, last_deploy_ts, has_migration, commits) for a project: whether it declares
+    a deploy: command, how many merged commits are still un-deployed (origin/main since the last
+    recorded deploy SHA), when it last deployed, whether any un-deployed commit touches a migration,
+    and the commit list (sha7, subject) of what would ship. SHA is parsed from the last deploy run."""
     if not project_field(root, project, "deploy"):
-        return (False, None, None, False)
+        return (False, None, None, False, [])
     row = conn.execute(
         "SELECT summary, ended_at FROM runs WHERE project=? AND agent='deploy' "
         "AND status='succeeded' ORDER BY id DESC LIMIT 1", (project,)).fetchone()
@@ -347,7 +366,8 @@ def deploy_state(root, project, conn):
     repo = project_field(root, project, "repo")
     pending = _deploy_pending(repo, sha)
     has_mig = _deploy_has_migration(root, project, repo, sha) if pending else False
-    return (True, pending, last_ts, has_mig)
+    commits = _deploy_commits(repo, sha) if pending else []
+    return (True, pending, last_ts, has_mig, commits)
 
 
 def load_runs(conn, limit=200):

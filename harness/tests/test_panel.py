@@ -1551,9 +1551,9 @@ class TestRailTable(unittest.TestCase):
                            ("a-2", "alpha", "y", "ready", "med", None),
                            ("a-3", "alpha", "w", "needs_scoping", "med", None),
                            ("b-1", "bravo", "z", "backlog", "low", None)])
-        self.assertEqual(pn._rail_counts(papp, "alpha"), (0, 1, 1, 1, 0))   # run, you, scp, que, bkl
-        self.assertEqual(pn._rail_counts(papp, "bravo"), (0, 0, 0, 0, 1))
-        self.assertEqual(pn._rail_counts(papp, "ALL"), (0, 1, 1, 1, 1))     # totals
+        self.assertEqual(pn._rail_counts(papp, "alpha"), (0, 1, 1, 1, 0, 0))   # run, you, scp, que, bkl, dep
+        self.assertEqual(pn._rail_counts(papp, "bravo"), (0, 0, 0, 0, 1, 0))
+        self.assertEqual(pn._rail_counts(papp, "ALL"), (0, 1, 1, 1, 1, 0))     # totals
 
     def test_narrow_rail_sheds_columns_keeps_name(self):
         papp = self._papp([("c-1", "acme", "x", "ready", "high", None)])
@@ -1903,30 +1903,34 @@ class TestDeployState(unittest.TestCase):
 
     def test_no_deploy_configured(self):
         root, conn = self._root_conn("# none")
-        self.assertEqual(d.deploy_state(root, "app", conn), (False, None, None, False))
+        self.assertEqual(d.deploy_state(root, "app", conn), (False, None, None, False, []))
 
-    def test_configured_parses_sha_and_time(self):
+    def test_configured_parses_sha_time_and_commits(self):
         root, conn = self._root_conn("deploy: echo hi")
         conn.execute("INSERT INTO runs(project,agent,status,summary,ended_at) "
                      "VALUES('app','deploy','succeeded','deployed abc1234','2026-06-30 10:00:00')")
         conn.commit()
         with mock.patch.object(d, "_deploy_pending", return_value=5) as mp, \
-             mock.patch.object(d, "_deploy_has_migration", return_value=True) as mh:
-            configured, pending, last, has_mig = d.deploy_state(root, "app", conn)
+             mock.patch.object(d, "_deploy_has_migration", return_value=True) as mh, \
+             mock.patch.object(d, "_deploy_commits", return_value=[("de54f1a", "win-95: split")]):
+            configured, pending, last, has_mig, commits = d.deploy_state(root, "app", conn)
         self.assertTrue(configured)
         self.assertEqual(pending, 5)
         self.assertEqual(last, "2026-06-30 10:00:00")
         self.assertTrue(has_mig)                            # migration detected in the pending range
+        self.assertEqual(commits, [("de54f1a", "win-95: split")])   # what would ship
         mp.assert_called_once_with("/tmp/x", "abc1234")    # SHA parsed from the run summary
         mh.assert_called_once_with(root, "app", "/tmp/x", "abc1234")
 
-    def test_no_migration_check_when_nothing_pending(self):
+    def test_no_migration_or_commit_check_when_nothing_pending(self):
         root, conn = self._root_conn("deploy: echo hi")
         with mock.patch.object(d, "_deploy_pending", return_value=0), \
-             mock.patch.object(d, "_deploy_has_migration") as mh:
-            _, _, _, has_mig = d.deploy_state(root, "app", conn)
+             mock.patch.object(d, "_deploy_has_migration") as mh, \
+             mock.patch.object(d, "_deploy_commits") as mc:
+            _, _, _, has_mig, commits = d.deploy_state(root, "app", conn)
         self.assertFalse(has_mig)
-        mh.assert_not_called()                             # don't probe git when there's nothing to deploy
+        self.assertEqual(commits, [])
+        mh.assert_not_called(); mc.assert_not_called()      # don't probe git when there's nothing to deploy
 
 
 class TestDeployMigrationVitals(unittest.TestCase):
@@ -1942,3 +1946,45 @@ class TestDeployMigrationVitals(unittest.TestCase):
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
         self.assertIn("⚠MIGRATION", "".join(c[2] for c in scr.calls))
+
+
+class TestAwaitingDeploy(unittest.TestCase):
+    """The AWAITING DEPLOY band + rail `dep` column show exactly what's merged-but-not-shipped, so a
+    deploy is never blind."""
+
+    def _snap(self, **proj_kw):
+        p = d.Project(name="cedar", stage_goal="", deploy_configured=True, **proj_kw)
+        return d.Snapshot(projects=[p], recent_runs=[], cap_state=False,
+                          ts="2026-06-30 16:00:00", workspace="e")
+
+    def test_band_lists_the_pending_commits(self):
+        snap = self._snap(deploy_pending=2, deploy_migration=True,
+                          deploy_commits=[("abc1234", "win-95: split the vault"),
+                                          ("def5678", "win-71: vault merge")])
+        rows = pn.panel_work_rows(snap, expanded=True)
+        text = "\n".join(r.get("label", "") for r in rows)
+        self.assertIn("AWAITING DEPLOY", text)
+        self.assertIn("⚠ migration", text)                  # the band flags a pending migration
+        self.assertIn("win-95: split the vault", text)      # the actual commits are listed
+        self.assertIn("abc1234", text)
+
+    def test_band_absent_when_nothing_pending(self):
+        snap = self._snap(deploy_pending=0, deploy_commits=[])
+        text = "\n".join(r.get("label", "") for r in pn.panel_work_rows(snap, expanded=True))
+        self.assertNotIn("AWAITING DEPLOY", text)
+
+    def test_rail_dep_column_counts_pending(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-rdep-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
+        papp.snap = self._snap(deploy_pending=3, deploy_commits=[("a", "x")] * 3)
+        papp._cp = lambda n: n * 1000
+        self.assertEqual(pn._rail_counts(papp, "cedar")[5], 3)   # the dep column
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 60), papp, focused=False)   # wide: all columns incl dep
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("dep", text)                          # the column header
+        # the dep cell (value 3) pops bold yellow like the needs-you gate
+        cell = next(c for c in scr.calls if c[2].strip() == "3")
+        self.assertEqual(cell[3], 4000 | curses.A_BOLD)

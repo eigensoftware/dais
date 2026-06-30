@@ -439,23 +439,25 @@ def _rail_items(app):
 
 
 _RAIL_COL_W = 4                                  # width of each numeric column (3-char header + a pad)
-_RAIL_COLS = ("run", "you", "scp", "que", "bkl")  # running · needs-you (gate) · scoping (lead) · queued · backlog
+_RAIL_COLS = ("run", "you", "scp", "que", "bkl", "dep")  # running · needs-you · scoping · queued · backlog · awaiting-deploy
 _RAIL_MIN_NAME_W = 12                            # below this the table sheds columns (right→left) for the name
 
 
 def _rail_counts(app, name):
-    """(running, needs_you, scoping, queued, backlog) for one project — or summed across all for ALL.
+    """(running, needs_you, scoping, queued, backlog, deploy) for one project — or summed for ALL.
     Mirrors the WORK bands: needs_you = founder-gate statuses, scoping = needs_scoping (the lead's
-    fill-out queue), queued = the loop's own statuses, backlog = unscheduled."""
+    fill-out queue), queued = the loop's own statuses, backlog = unscheduled, deploy = merged commits
+    awaiting deploy."""
     if not app.snap:
-        return (0, 0, 0, 0, 0)
+        return (0, 0, 0, 0, 0, 0)
     projs = (app.snap.projects if name == "ALL"
              else [p for p in app.snap.projects if p.name == name])
     def total(statuses):
         return sum(len(p.tasks_by_status.get(st, [])) for p in projs for st in statuses)
     run = sum(1 for p in projs if p.running)            # one agent per project, so 0/1 each
+    dep = sum(p.deploy_pending or 0 for p in projs)
     return (run, total(d.GATE_ORDER), total(_SCOPING_STATUSES),
-            total(_LOOP_STATUSES), total(_BACKLOG_STATUSES))
+            total(_LOOP_STATUSES), total(_BACKLOG_STATUSES), dep)
 
 
 def render_rail(scr, rect, app, focused):
@@ -488,7 +490,7 @@ def render_rail(scr, rect, app, focused):
         y = inner.y + 1 + vis_idx                       # +1: the column header occupies inner row 0
         active = (name == "ALL" and pf is None) or name == pf
         rev = curses.A_REVERSE if (focused and idx == ri) else 0
-        run, you, scp, que, bkl = _rail_counts(app, name)
+        run, you, scp, que, bkl, dep = _rail_counts(app, name)
         live = run > 0 and name != "ALL"                # ALL is an aggregate, never "the live one"
         rowattr = (app._cp(_LIVE) if live else 0) \
             | (curses.A_BOLD if (active and name != "ALL") else 0) | rev
@@ -497,9 +499,9 @@ def render_rail(scr, rect, app, focused):
         label = f"{mark}{dot} {name}"                    # mark · dot · a space so the ● isn't jammed to the name
         _add(scr, y, inner.x, pad_cols(clip_cols(label, name_w + 3), inner.w),
              inner.x + inner.w, rowattr)                # paint the row full-width so the cursor spans it
-        for ci, v in enumerate((run, you, scp, que, bkl)[:n_cols]):
+        for ci, v in enumerate((run, you, scp, que, bkl, dep)[:n_cols]):
             cell = f"{v:>{_RAIL_COL_W}}" if v else f"{'·':>{_RAIL_COL_W}}"
-            if v and ci == 1:                           # needs-you (founder gate) pops bold yellow
+            if v and ci in (1, 5):                      # needs-you + awaiting-deploy (founder gates) pop bold yellow
                 cattr = app._cp(_NEEDS_YOU) | curses.A_BOLD | rev
             elif v and ci == 2:                         # scoping (lead's queue) pops cyan, like the SCOPING band
                 cattr = app._cp(_STRUCTURE) | curses.A_BOLD | rev
@@ -960,6 +962,24 @@ def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
     add_band("NEEDS YOU", len(gates))
     for proj, t in gates:
         rows.append(_task_row(proj, t, _short_tag(t.status)))
+
+    # AWAITING DEPLOY — merged to main but not yet shipped (deploy-configured projects). A founder
+    # action: lists EXACTLY which commits `D` will ship, so you never deploy blind. ⚠ if any carries
+    # a migration. Only appears when something is pending (no empty header).
+    dep_projs = [p for p in projects if (p.deploy_pending or 0) > 0]
+    if dep_projs:
+        total = sum(p.deploy_pending or 0 for p in dep_projs)
+        mig = any(p.deploy_migration for p in dep_projs)
+        add_band("AWAITING DEPLOY" + ("  ⚠ migration" if mig else ""), total)
+        shown = 0
+        for p in dep_projs:
+            for sha7, subj in (p.deploy_commits or []):
+                rows.append({"kind": "info", "id": f"__deploy::{p.name}::{sha7}", "sel": False,
+                             "label": f"  SHIP    {sha7:<8} {p.name[:11]:<11} {subj}"})
+                shown += 1
+        if total > shown:
+            rows.append({"kind": "info", "id": "__deploy_more", "sel": False,
+                         "label": f"  +{total - shown} more  ·  press D to deploy"})
 
     # SCOPING — sparse tasks handed to the lead to flesh out (founder → `dais handoff <id> lead`);
     # the lead writes a real spec, then promotes to ready (or proposes new direction).
