@@ -362,7 +362,7 @@ class TestPanelWorkRows(unittest.TestCase):
         # a NEEDS YOU band bar, then tagged gate task rows
         bands = [r["label"] for r in rows if r["kind"] == "band"]
         self.assertTrue(any("NEEDS YOU" in b for b in bands), bands)
-        self.assertTrue(any("THE LOOP" in b for b in bands), bands)
+        self.assertTrue(any("IN FLIGHT" in b for b in bands), bands)
         tags = {r["tag"] for r in rows if r["kind"] == "task"}
         self.assertIn("MERGE", tags)
         self.assertIn("REVIEW", tags)
@@ -373,7 +373,7 @@ class TestPanelWorkRows(unittest.TestCase):
         # mission-control: a quiet band is ONE dim header (tagged empty), not a header + "(none)" row
         snap = self._snap(self._proj("x"))                  # nothing running / gated / in flight
         rows = pn.panel_work_rows(snap, mc=True)
-        for name in ("RUNNING", "NEEDS YOU", "THE LOOP"):
+        for name in ("RUNNING", "NEEDS YOU", "IN FLIGHT"):
             band = next(r for r in rows if r["kind"] == "band" and name in r["label"])
             self.assertTrue(band.get("empty"), name)        # flagged so render can dim it
         # the old two-row filler is gone
@@ -651,13 +651,13 @@ class TestRolePalette(unittest.TestCase):
         # consistency: every NON-EMPTY band header is the SAME cyan structure bar (not a per-band
         # hue); empty bands recede to dim (mission-control: the screen reads calm when nominal)
         papp = self._papp([("g-1", "p", "gate", "needs_review", "high", None),   # NEEDS YOU active
-                           ("l-1", "p", "loop", "ready", "med", None)])          # THE LOOP active
+                           ("l-1", "p", "loop", "ready", "med", None)])          # IN FLIGHT active
         papp._mc = True                                              # empty-band dimming is mission-control
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
         cyan = 3000 | curses.A_REVERSE | curses.A_BOLD                # _cp(3) = structure
         self.assertEqual(self._band_attr(scr, "NEEDS YOU"), cyan)     # two active bands, one color
-        self.assertEqual(self._band_attr(scr, "THE LOOP"), cyan)
+        self.assertEqual(self._band_attr(scr, "IN FLIGHT"), cyan)
         self.assertEqual(self._band_attr(scr, "RUNNING"), curses.A_DIM)  # empty -> recedes (nominal)
 
     def test_archive_rows_are_dim(self):
@@ -930,7 +930,7 @@ class TestFinalReviewFixes(unittest.TestCase):
         self.assertFalse(any(r["kind"] == "task" and r.get("id") == "w-9" for r in rows))
 
     def test_loop_band_count_and_rows_exclude_running_task(self):   # M-NEW-1
-        # one needs_qa task running, one not: the THE LOOP band header excludes the running one
+        # one needs_qa task running, one not: the IN FLIGHT band header excludes the running one
         # (count = 1) AND the loop rows show only the non-running task (no double-count).
         papp = self._papp([("w-9", "cedar", "qa", "needs_qa", "high", None),
                            ("w-8", "cedar", "qa2", "needs_qa", "high", None)])
@@ -938,8 +938,8 @@ class TestFinalReviewFixes(unittest.TestCase):
                   "since": "2026-06-29 00:00:00", "secs": 5, "log_path": "/tmp/x.log"}
         with mock.patch.object(d, "running_threads", return_value=[thread]):
             rows = papp.left_rows()
-        band = next(r for r in rows if r["kind"] == "band" and "THE LOOP" in r["label"])
-        self.assertIn("THE LOOP · 1", band["label"])   # header excludes the running task
+        band = next(r for r in rows if r["kind"] == "band" and "IN FLIGHT" in r["label"])
+        self.assertIn("IN FLIGHT · 1", band["label"])   # header excludes the running task
         loop_ids = [r.get("id") for r in rows if r["kind"] == "task" and r.get("status") == "needs_qa"]
         self.assertEqual(loop_ids, ["w-8"])            # only the non-running loop task is a row
 

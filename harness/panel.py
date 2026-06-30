@@ -718,10 +718,10 @@ def _task_row(proj, task, tag):
 
 
 def panel_work_rows(snap, *, project=None, expanded=False, mc=False):
-    """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · THE LOOP ·
+    """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · IN FLIGHT ·
     BACKLOG · DEFERRED · ARCHIVE). `project` limits to one project. `expanded` (the g key) shows
     the full BACKLOG, reveals DEFERRED rows, and uncaps the ARCHIVE. `mc` (mission-control skin)
-    collapses an empty RUNNING/NEEDS YOU/THE LOOP band to just its dim header; classic keeps the
+    collapses an empty RUNNING/NEEDS YOU/IN FLIGHT band to just its dim header; classic keeps the
     '(none …)' filler row."""
     rows = []
     if not snap:
@@ -768,9 +768,9 @@ def panel_work_rows(snap, *, project=None, expanded=False, mc=False):
         rows.append({"kind": "info", "id": "__gate_none", "sel": False,
                      "label": "  (nothing needs you)"})
 
-    # THE LOOP — the in-flight work, shown as rows by default (no g needed)
+    # IN FLIGHT — the in-flight work, shown as rows by default (no g needed)
     loop = tasks_in(_LOOP_STATUSES)
-    add_band("THE LOOP", len(loop))
+    add_band("IN FLIGHT", len(loop))
     for proj, t in loop:
         rows.append(_task_row(proj, t, t.status))
     if not loop and not mc:
