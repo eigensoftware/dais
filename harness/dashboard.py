@@ -1738,11 +1738,11 @@ def main(argv):
             print("dais top needs an interactive terminal; use `dais status`.",
                   file=sys.stderr)
             return 2
-        if os.environ.get("DAIS_PANEL"):
+        if os.environ.get("DAIS_CLASSIC"):       # opt back into the classic single-pane UI
+            curses.wrapper(lambda scr: App(scr, args.interval).run())
+        else:                                    # the control panel is the default `dais top`
             import panel
             curses.wrapper(lambda scr: panel.PanelApp(scr, args.interval).run())
-        else:
-            curses.wrapper(lambda scr: App(scr, args.interval).run())
         return 0
     with connect() as conn:
         print(render_plain(load_snapshot(conn)))

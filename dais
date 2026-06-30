@@ -110,6 +110,7 @@ MD
     python3 "$DAIS_ROOT/harness/dashboard.py" ;;
 
   top)
+    # the responsive control panel is the default; DAIS_CLASSIC=1 dais top → the old single-pane UI
     secs="${1:-2}"
     case "$secs" in ''|*[!0-9.]*) echo "top: secs must be a number"; exit 1;; esac
     [ -f "$DB" ] || db_init >/dev/null 2>&1
