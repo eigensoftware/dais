@@ -295,6 +295,23 @@ class TestPanelApp(unittest.TestCase):
         app.handle(ord(" "), app.left_rows(), 0, None)
         self.assertFalse(app.show_overlay)
 
+    def test_ship_failure_surfaces_in_overlay_and_flash(self):
+        app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
+                          "https://x/y/pull/7")])
+        app.pane_focus = "work"; app._confirm = lambda *a: True
+        app.sel_id = "lyr-1"
+        rows = app.left_rows()
+        i, row = next((i, r) for i, r in enumerate(rows)
+                      if r["kind"] == "task" and r["status"] == "ready_to_merge")
+        with mock.patch.object(d, "subprocess") as sub:
+            sub.run.return_value = mock.Mock(returncode=1, stdout="", stderr="✗ merge failed")
+            app.handle(ord("a"), rows, i, row)
+        self.assertTrue(app.show_overlay)
+        ov = "\n".join(app._overlay["lines"]) + " " + app._overlay["title"]
+        self.assertIn("FAILED", ov)              # the verdict surfaces the failure
+        self.assertIn("merge failed", ov)        # ... and the captured stderr
+        self.assertIn("NOT merged", app.flash)   # do_action's failure flash (rc != 0)
+
     def test_q_does_not_quit_while_filtering(self):
         """I2: pressing q while filtering must feed q into the filter, not quit."""
         app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
