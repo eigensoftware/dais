@@ -636,6 +636,14 @@ class TestBarAndHelp(unittest.TestCase):
         papp.handle(ord("x"), papp.left_rows(), 0, None)
         self.assertFalse(papp.show_help)
 
+    def test_help_overlay_is_wide_enough_to_not_clip_descriptions(self):
+        # the box must fit its widest help line so descriptions don't run off (e.g. on a 105-wide term)
+        scr = FakeScr(64, 105)
+        pn.render_help(scr, 64, 105)
+        drawn = "\n".join(c[2] for c in scr.calls)
+        for ln in pn._HELP_LINES:
+            self.assertIn(ln.strip(), drawn, "help line clipped: %r" % ln)
+
 
 class TestRolePalette(unittest.TestCase):
     def _papp(self, rows, project=None):

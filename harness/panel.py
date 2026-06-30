@@ -519,8 +519,9 @@ def render_overlay(scr, h, w, ov):
 
 
 def render_help(scr, h, w):
-    """Centered keymap overlay."""
-    bw = min(w - 4, 56)
+    """Centered keymap overlay, sized to its widest line so no description is clipped."""
+    content_w = max((disp_width(ln) for ln in _HELP_LINES), default=0)
+    bw = min(w - 4, content_w + 2)               # fit the content (+2 right margin); only clip if the screen is tiny
     bh = min(h - 2, len(_HELP_LINES) + 2)
     y0 = max(0, (h - bh) // 2)
     x0 = max(0, (w - bw) // 2)
