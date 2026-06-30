@@ -567,6 +567,12 @@ class PanelApp(d.App):
                              capture_output=True, text=True, stdin=d.subprocess.DEVNULL)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
 
+    def _dispatch(self, cmd):
+        """Override the inherited blocking dispatch to CAPTURE output instead of inheriting this
+        terminal — a quick action's stdout (e.g. 'updated win-105') printed over the curses screen
+        corrupts the panel. We don't need the text here; the panel redraws + flashes."""
+        return self._capture(cmd)[0]
+
     def _ship_pr(self, row, cmd):
         """Override the inherited console-drop: run ship IN the panel by capturing its output into a
         dismissible overlay. ship is non-interactive, so this can't hang; the merge itself (argv, QA

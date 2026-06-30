@@ -284,6 +284,35 @@ class TestPanelApp(unittest.TestCase):
         self.assertTrue(app.handle(ord("b"), app.left_rows(), 0, None))   # alive
         self.assertFalse(app.show_parked)                                 # not toggled
 
+    def test_dispatch_captures_never_inherits_terminal(self):
+        # a quick action's output (e.g. "updated win-105") must be CAPTURED, not printed over curses
+        app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
+        with mock.patch.object(d.subprocess, "run") as run, \
+             mock.patch.object(d.subprocess, "call") as call:
+            run.return_value = mock.Mock(returncode=0, stdout="updated lyr-1", stderr="")
+            rc = app._dispatch(["task", "set", "lyr-1", "--priority", "high"])
+        self.assertEqual(rc, 0)
+        run.assert_called_once()
+        self.assertTrue(run.call_args.kwargs.get("capture_output"))   # captured
+        call.assert_not_called()                                      # never the terminal-inheriting call
+
+    def test_start_action_backgrounds_the_agent(self):
+        # pressing `a` (start) on a ready task spawns the agent DETACHED (Popen), not inline
+        app = self._app([("lyr-1", "beacon", "build", "ready", "high", None)])
+        app.pane_focus = "work"; app._confirm = lambda *a: True
+        app.sel_id = "lyr-1"
+        rows = app.left_rows()
+        i, row = next((i, r) for i, r in enumerate(rows)
+                      if r["kind"] == "task" and r["status"] == "ready")
+        with mock.patch.object(d.subprocess, "Popen") as popen, \
+             mock.patch.object(d.subprocess, "call") as call, \
+             mock.patch.object(d.subprocess, "run") as run:
+            app.handle(ord("a"), rows, i, row)
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args[0][0], ["dais", "start", "lyr-1"])
+        self.assertTrue(popen.call_args.kwargs.get("start_new_session"))  # detached
+        call.assert_not_called(); run.assert_not_called()                 # never inline over curses
+
     def test_a_on_work_selection_ships_in_panel_overlay(self):
         app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
                           "https://x/y/pull/7")])

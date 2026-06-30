@@ -1430,6 +1430,20 @@ class App:
         subprocess seam the cockpit tests mock."""
         return subprocess.call([self._dais()] + [str(c) for c in cmd])
 
+    def _spawn_agent(self, cmd):
+        """Launch a STREAMING-agent command (e.g. `start`) DETACHED, with its output to the run log —
+        never inline. A foreground `claude -p` stream inherits this terminal and corrupts the curses
+        screen; backgrounding it (as the watch loop does) keeps the TUI intact, and the agent then
+        shows up in RUNNING with its per-role log tailed by `L`."""
+        try:
+            log = open(os.path.join(self.root, WATCH_LOG), "a")
+            subprocess.Popen([self._dais()] + [str(c) for c in cmd], stdout=log, stderr=log,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+            return True
+        except OSError as e:
+            self.flash = f"start failed: {e}"
+            return False
+
     def _ship_pr(self, row, cmd):
         """ship is a real merge that streams output → drop out of curses, run it,
         pause for the founder to read, then restore. The curses/`input` dance only
@@ -1479,6 +1493,11 @@ class App:
                 self.refresh()
                 self.flash = (f"shipped {t['id']}" if rc == 0
                               else f"ship: {t['id']} NOT merged (exit {rc}) — see output")
+                return
+            if action_id == "start":          # launches a streaming agent — background it (never over curses)
+                if self._spawn_agent(cmd):
+                    self.flash = f"started {t['id']} — see RUNNING / press L for the log"
+                self.refresh()
                 return
             rc = self._dispatch(cmd)
             self.refresh()

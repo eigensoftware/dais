@@ -281,13 +281,17 @@ class TestEnterMenu(unittest.TestCase):
                 status)
 
     def test_menu_dispatches_chosen_action(self):
+        # 'start' launches a streaming agent — it must be BACKGROUNDED (Popen, detached), never run
+        # inline via subprocess.call (which inherits the terminal and corrupts the curses screen).
         app = make_app()
         app._confirm = lambda *a: True
         app._menu = lambda *a, **k: 0          # first action == 'start' for ready
         with mock.patch.object(d, "subprocess") as sub:
-            sub.call.return_value = 0
             app._action_menu(task_row(status="ready"))
-            sub.call.assert_called_once_with(["dais", "start", "cou-1"])
+            sub.Popen.assert_called_once()
+            self.assertEqual(sub.Popen.call_args[0][0], ["dais", "start", "cou-1"])
+            self.assertTrue(sub.Popen.call_args.kwargs.get("start_new_session"))
+            sub.call.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
