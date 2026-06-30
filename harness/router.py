@@ -12,7 +12,8 @@ VALID_ACCESS = {"edit", "review", "draft", "none"}
 
 
 def parse_roles(path):
-    """Return (roles, problems). Each role dict: name, access, trigger, handles[], prec, line."""
+    """Return (roles, problems). Each role dict: name, access, trigger, handles[], prec, playbook, line.
+    `playbook` is the optional 6th column (the role's working-conventions file; '' if omitted)."""
     roles, problems = [], []
     if not os.path.exists(path):
         return roles, problems
@@ -29,7 +30,7 @@ def parse_roles(path):
                 "name": p[0], "access": p[1], "trigger": p[2],
                 "handles": [] if p[3] == "-" else p[3].split(","),
                 "prec": int(p[4]) if p[4].lstrip("-").isdigit() else 999,
-                "prec_raw": p[4], "line": ln,
+                "prec_raw": p[4], "playbook": p[5] if len(p) >= 6 else "", "line": ln,
             })
     return roles, problems
 
@@ -118,7 +119,24 @@ def lint_project(root, project):
             if not os.path.exists(persona):
                 warnings.append("role '%s': no persona file at projects/%s/agents/%s.md"
                                 % (r["name"], project, r["name"]))
+        if r["playbook"] and not _playbook_file(root, project, r["playbook"]):
+            warnings.append("role '%s': playbook '%s' has no file (looked in projects/%s/playbooks/ "
+                            "and harness/playbooks/); falls back to no conventions"
+                            % (r["name"], r["playbook"], project))
     return errors, warnings
+
+
+def _playbook_file(root, project, name):
+    """Resolve a playbook name to a file ('' if none): explicit path → project override → tool default.
+    Shared by lint and (mirrored in) run-agent.sh's resolution."""
+    if not name:
+        return ""
+    for cand in (name,
+                 os.path.join(root, "projects", project, "playbooks", name + ".md"),
+                 os.path.join(os.path.dirname(__file__), "playbooks", name + ".md")):
+        if os.path.isfile(cand):
+            return cand
+    return ""
 
 
 WORKSPACE_CONTEXT_MAX_LINES = 120  # injected into EVERY agent run -> must stay tight

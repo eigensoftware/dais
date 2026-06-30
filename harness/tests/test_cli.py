@@ -317,6 +317,74 @@ class TestWorkspaceContextInjection(CliTest):
         self.assertIn("Project context", r.stdout)         # project line unaffected
 
 
+class TestRolePlaybook(CliTest):
+    """Conventions are bound at the ROLE via a playbook (6th `roles` column → project default →
+    built-in `code`), injected into the agent prompt. De-codes the harness for non-code domains
+    while keeping coding conventions intact for code roles. Asserted via the DAIS_SHOW_PROMPT seam."""
+
+    def _scaffold_with_repo(self):
+        dais(self.root, "scaffold", "demo")
+        base = tempfile.mkdtemp(prefix="dais-repos-")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        os.makedirs(os.path.join(base, "demo"))
+        return base
+
+    def _prompt(self, base, agent="engineer"):
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_AGENT_REPOS": base, "DAIS_SHOW_PROMPT": "1"})
+        return subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", agent],
+                              capture_output=True, text=True, env=e, cwd=self.root).stdout
+
+    def _pin_engineer_playbook(self, name):
+        rolesf = os.path.join(self.root, "projects", "demo", "roles")
+        out = []
+        for l in open(rolesf).read().splitlines():
+            if l and not l.startswith("#") and l.split()[0] == "engineer":
+                l = l + "  " + name
+            out.append(l)
+        with open(rolesf, "w") as fh:
+            fh.write("\n".join(out) + "\n")
+
+    def test_code_role_keeps_coding_conventions(self):
+        base = self._scaffold_with_repo()
+        out = self._prompt(base)                     # engineer, no column -> project (none) -> code
+        self.assertIn("Working conventions (code)", out)
+        self.assertIn("Open PRs", out)
+        self.assertIn("origin/main", out)
+        self.assertIn("Coordination runs through", out)   # neutral contract intact
+
+    def test_legal_playbook_swaps_out_coding(self):
+        base = self._scaffold_with_repo()
+        pb = os.path.join(self.root, "projects", "demo", "playbooks")
+        os.makedirs(pb, exist_ok=True)
+        with open(os.path.join(pb, "legal.md"), "w") as fh:
+            fh.write("Cite authorities in Bluebook form. Nothing is filed without partner sign-off.\n")
+        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as fh:
+            fh.write("playbook: legal\n")
+        out = self._prompt(base)
+        self.assertIn("Working conventions (legal)", out)
+        self.assertIn("Bluebook", out)
+        self.assertNotIn("Open PRs", out)            # no coding mechanics for a legal role
+        self.assertNotIn("origin/main", out)
+
+    def test_role_column_overrides_project_default(self):
+        base = self._scaffold_with_repo()
+        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as fh:
+            fh.write("playbook: legal\n")            # project default = legal …
+        self._pin_engineer_playbook("code")          # … but the role pins code
+        out = self._prompt(base)
+        self.assertIn("Working conventions (code)", out)   # role wins
+        self.assertIn("Open PRs", out)
+
+    def test_lint_warns_on_unresolvable_playbook(self):
+        dais(self.root, "scaffold", "demo")
+        self._pin_engineer_playbook("ghostbook")     # no such playbook file anywhere
+        r = dais(self.root, "lint", "demo")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # warning, not error
+        self.assertIn("ghostbook", r.stdout + r.stderr)
+
+
 class TestWorkspaceContextBloatLint(CliTest):
     """`dais lint` (no project arg) warns — but does not error — when the workspace
     CONTEXT.md grows too large, since it is injected into every agent run."""

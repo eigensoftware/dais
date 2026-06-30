@@ -57,6 +57,22 @@ WS_CONTEXT=""
 [ -f "$DAIS_HOME/CONTEXT.md" ] && WS_CONTEXT="Workspace context: FIRST read $DAIS_HOME/CONTEXT.md — company-wide rules and founder decisions that apply to EVERY project (honor them). THEN read the project's $PDIR/CONTEXT.md.
 
 "
+# Working conventions (playbook): the craft-specific "how work is done here", bound at the ROLE level
+# so one harness runs many domains. Resolution — role's 6th `roles` column → project.yaml `playbook:`
+# → built-in 'code'; file — explicit path → projects/<proj>/playbooks/<name>.md → harness/playbooks/.
+PB="$(awk -v r="$AGENT" '!/^#/ && $1==r {print $6; exit}' "$PDIR/roles" 2>/dev/null)"
+[ -n "$PB" ] || PB="$(pcfg "$PROJECT" playbook)"
+[ -n "$PB" ] || PB="code"
+PB_FILE=""
+for cand in "$PB" "$PDIR/playbooks/$PB.md" "$DAIS_ROOT/harness/playbooks/$PB.md"; do
+  [ -f "$cand" ] && { PB_FILE="$cand"; break; }
+done
+PLAYBOOK=""
+[ -n "$PB_FILE" ] && PLAYBOOK="
+
+Working conventions ($PB) — how this kind of work is done here:
+$(cat "$PB_FILE")"
+
 STANDING="You are running headless as the **$AGENT** for the '$PROJECT' project.
 
 Stage goal: $STAGE_GOAL
@@ -69,11 +85,10 @@ Coordination runs through the dais CLI (at $DAIS_ROOT/dais) backed by a shared S
   - Update a task:   $DAIS_ROOT/dais task set <id> --status <s> [--pr <url>] [--notes \"...\"]
   - Hand off:        $DAIS_ROOT/dais handoff <id> <role> [\"note\"]   (sets the status that role handles)
 
-Statuses are a CLOSED set — use ONLY: backlog, ready, doing, needs_qa, changes_requested, ready_to_merge, needs_review, done, blocked, cancelled, deferred (plus any custom status your project's roles define, e.g. needs_marketing). NEVER invent a status (e.g. 'in_progress') — the CLI rejects unknown ones. A task that spans multiple runs stays 'ready'/'changes_requested' so it resumes next run; don't park it in a made-up status.
-Two founder gates, pick by whether there's a PR: use ready_to_merge ONLY for a QA-approved task that has a PR the founder git-merges; use needs_review for a finished NON-code deliverable with no PR (a draft, post, plan, or research pass) the founder reviews and closes. Never park no-PR work in ready_to_merge — set it with \`dais task set <id> --status needs_review --assignee founder\` (note: \`handoff <id> founder\` resolves to ready_to_merge, so it's wrong for no-PR work).
+Statuses are a CLOSED set — use ONLY: backlog, ready, doing, needs_qa, changes_requested, ready_to_merge, needs_review, done, blocked, cancelled, deferred (plus any custom status your project's roles define, e.g. needs_legal). NEVER invent a status (e.g. 'in_progress') — the CLI rejects unknown ones. A task that spans multiple runs stays in a re-pickable status (e.g. ready / changes_requested) so it resumes next run; don't park it in a made-up status.
+Finished work parks at a founder gate: use needs_review for a deliverable the founder reviews and closes — set it with \`dais task set <id> --status needs_review --assignee founder\`. (ready_to_merge is the code-specific variant for a QA-approved change that has a PR the founder merges — your working conventions below say when it applies. \`handoff <id> founder\` resolves to ready_to_merge, so don't use it for no-PR work.)
 
-Do ONE unit of work this run, then stop. Follow your role file exactly. Code work happens in the repo at $REPO (open PRs with gh — as ready-for-review, NOT draft; mark the PR ready BEFORE you handoff to QA, since a draft can't be merged at the founder gate). Do not start more than one task. When done, update the task's status / hand it off per your role.
-Base any new branch on the freshly-fetched origin/main, never on local refs you happen to find. A just-merged PR is squash-merged and its branch DELETED on the remote, but a stale local branch/worktree may linger — the dais board is the source of truth for what's merged: if a task is 'done', its work IS on origin/main, so build on top of main, never stack on that task's old branch."
+Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, update the task's status / hand it off per your role.${PLAYBOOK}"
 
 # Debug seam: dump the assembled agent prompt and exit, WITHOUT calling claude. Lets tests
 # assert prompt wiring (e.g. workspace-context injection) without an end-to-end model run.
