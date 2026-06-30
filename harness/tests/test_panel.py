@@ -282,19 +282,6 @@ class TestPanelApp(unittest.TestCase):
         self.assertTrue(app.handle(ord("b"), app.left_rows(), 0, None))   # alive
         self.assertFalse(app.show_parked)                                 # not toggled
 
-    def test_render_work_draws_an_active_loop_row(self):
-        # a live `dais loop` (from d.active_loops) shows as a ↻ LOOP row in RUNNING
-        app = self._app([("d-1", "demo", "make it green", "ready", "med", None)])
-        loop = [{"project": "demo", "task": "d-1", "attempt": "2", "max": "4",
-                 "until": "bun test", "pid": 1}]
-        with mock.patch.object(d, "active_loops", return_value=loop):
-            scr = FakeScr(40, 200)
-            pn.render_work(scr, pn.Rect(1, 0, 30, 160), app, focused=True)
-        text = "\n".join(c[2] for c in scr.calls)
-        self.assertIn("↻LOOP", text)
-        self.assertIn("attempt 2/4", text)
-        self.assertIn("bun test", text)
-
     def test_a_on_work_selection_ships_in_panel_overlay(self):
         app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
                           "https://x/y/pull/7")])
@@ -1353,56 +1340,3 @@ class TestSkinToggle(unittest.TestCase):
         self.assertTrue(papp._mc)                                           # flipped on
         papp.handle(ord("m"), papp.left_rows(), 0, None)
         self.assertFalse(papp._mc)                                          # and back off
-
-
-class TestLoopTracking(unittest.TestCase):
-    """`dais loop` runs surface in the panel: d.active_loops reads the state files; panel_work_rows
-    shows each as a ↻ LOOP row in RUNNING (in BOTH skins) and hides the looped task from other bands."""
-
-    def _root_with_loop(self, **kv):
-        import tempfile
-        root = tempfile.mkdtemp(prefix="dais-loops-")
-        pdir = os.path.join(root, "projects", kv["project"])
-        os.makedirs(pdir, exist_ok=True)
-        with open(os.path.join(pdir, ".loop-%s" % kv["task"]), "w") as fh:
-            fh.write("".join("%s=%s\n" % (k, v) for k, v in kv.items()))   # `until` written last
-        return root
-
-    def test_active_loops_reads_live_state(self):
-        root = self._root_with_loop(pid=os.getpid(), project="demo", task="d-1",
-                                    attempt="2", max="4", until="bun test")
-        loops = d.active_loops(root)
-        self.assertEqual([(l["task"], l["attempt"], l["max"], l["until"]) for l in loops],
-                         [("d-1", "2", "4", "bun test")])
-
-    def test_active_loops_skips_dead_pid(self):
-        root = self._root_with_loop(pid=2147480000, project="demo", task="d-1",
-                                    attempt="1", max="4", until="x")
-        self.assertEqual(d.active_loops(root), [])
-
-    def test_active_loops_until_may_contain_equals(self):
-        root = self._root_with_loop(pid=os.getpid(), project="demo", task="d-1",
-                                    attempt="1", max="2", until='[ "$n" = "1" ]')
-        self.assertEqual(d.active_loops(root)[0]["until"], '[ "$n" = "1" ]')
-
-    def _snap(self, *projects):
-        return d.Snapshot(projects=list(projects), recent_runs=[], cap_state=False,
-                          ts="2026-06-29 00:00:00")
-
-    def _proj(self, name, **by):
-        tbs = {st: [d.Task(id=f"{name}-{st}-{i}", title="t", status=st, priority="medium")
-                    for i in range(n)] for st, n in by.items()}
-        return d.Project(name=name, stage_goal="", running=[], tasks_by_status=tbs, recent_runs=[])
-
-    def test_loop_row_in_running_and_excluded_from_in_flight_in_both_skins(self):
-        snap = self._snap(self._proj("demo", ready=1))          # demo-ready-0 would be IN FLIGHT
-        loops = [{"project": "demo", "task": "demo-ready-0", "attempt": "2",
-                  "max": "4", "until": "bun test", "pid": 1}]
-        for mc in (False, True):                                # classic AND mission-control skins
-            rows = pn.panel_work_rows(snap, mc=mc, loops=loops)
-            run_band = next(r for r in rows if r["kind"] == "band" and "RUNNING" in r["label"])
-            self.assertIn("RUNNING · 1", run_band["label"], mc)
-            self.assertTrue(any(r["kind"] == "loop" and r["task_id"] == "demo-ready-0"
-                                for r in rows), mc)
-            self.assertFalse(any(r["kind"] == "task" and r["id"] == "demo-ready-0"
-                                 for r in rows), mc)            # not double-shown in IN FLIGHT

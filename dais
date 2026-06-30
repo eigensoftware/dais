@@ -31,7 +31,6 @@ dais — your agent company control panel
   dais actions <id>                    list the founder actions for a task + the exact command for each
   dais start <id>                      run the role that handles this task's status, now
   dais run <project> <agent>          run a specific agent now (headless claude)
-  dais loop <project> <id> --until "<cmd>" [--max N] [--role R]  iterate a builder until the verifier passes (exit 0) or --max
   dais ship <project> <pr#> [--migrated]  QA-gated, migration-aware squash-merge to main (founder gate)
   dais logs <project> [N]             recent runs
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md
@@ -306,68 +305,6 @@ MD
     [ -n "$role" ] || { echo "start: no role handles status '$st' in $proj/roles"; exit 1; }
     echo "▶ starting $proj/$role for $id ($st)…"
     exec "$DAIS_ROOT/harness/run-agent.sh" "$proj" "$role" ;;
-
-  loop)
-    # Goal-seeking SINGLE-task loop: run the builder, then a verifier command; repeat — feeding
-    # each failure back into the task's notes — until the verifier passes (exit 0) or --max attempts.
-    # The verifier's exit code is the authority; --max is the runaway brake. Founder-run, foreground.
-    proj="${1:?usage: dais loop <project> <task-id> --until \"<cmd>\" [--max N] [--role R]}"
-    tid="${2:?usage: dais loop <project> <task-id> --until \"<cmd>\" [--max N] [--role R]}"
-    shift 2
-    until_cmd=""; max=4; role="engineer"
-    while [ $# -gt 0 ]; do case "$1" in
-      --until) until_cmd="$2"; shift 2;;
-      --max)   max="$2"; shift 2;;
-      --role)  role="$2"; shift 2;;
-      *) echo "loop: unknown arg '$1'"; exit 1;;
-    esac; done
-    [ -n "$until_cmd" ] || { echo "loop: --until \"<cmd>\" is required (exit 0 = goal hit)"; exit 1; }
-    { [[ "$max" =~ ^[0-9]+$ ]] && [ "$max" -ge 1 ]; } || { echo "loop: --max must be a positive integer"; exit 1; }
-    prow="$(db -separator '|' "SELECT status,project FROM tasks WHERE id='$(sqlesc "$tid")';")"
-    [ -n "$prow" ] || { echo "loop: no such task: $tid"; exit 1; }
-    [ "${prow##*|}" = "$proj" ] || { echo "loop: task $tid is not in project '$proj'"; exit 1; }
-    repo="$(repo_path "$proj")"
-    [ -d "$repo" ] || { echo "loop: repo not found: $repo"; exit 1; }
-    builder="${DAIS_LOOP_BUILDER:-$DAIS_ROOT/harness/run-agent.sh}"
-    MARK="=== ↻ loop feedback ==="
-    # Live state file so `dais top` can show this loop (mirrors .lock-*/.watch.pid). Removed on ANY exit.
-    LOOPF="$DAIS_HOME/projects/$proj/.loop-$tid"
-    # EXIT owns cleanup; INT/TERM must actually terminate (their `exit` re-fires the EXIT trap),
-    # else Ctrl-C/kill would just clean the file and let the loop resume — an unstoppable loop.
-    trap 'rm -f "$LOOPF"' EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    base_notes="$(db "SELECT COALESCE(notes,'') FROM tasks WHERE id='$(sqlesc "$tid")';")"
-    base_notes="${base_notes%%"$MARK"*}"                 # drop any stale feedback block from a prior loop
-    attempt=0
-    while :; do
-      [ -f "$DAIS_HOME/projects/.paused" ] && { echo "loop: paused (dais resume to continue)"; exit 1; }
-      capped="$(db "SELECT COUNT(*) FROM runs WHERE status='capped' AND started_at > datetime('now','-90 minutes');")"
-      [ "${capped:-0}" -gt 0 ] && { echo "loop: subscription cap hit in the last 90 min — cooling down, retry later."; exit 1; }
-      attempt=$((attempt+1))
-      printf 'pid=%s\nproject=%s\ntask=%s\nattempt=%s\nmax=%s\nstatus=running\nuntil=%s\n' \
-        "$$" "$proj" "$tid" "$attempt" "$max" "$until_cmd" > "$LOOPF"
-      echo "↻ loop $tid — attempt $attempt/$max (verifier: $until_cmd)"
-      DAIS_TASK="$tid" "$builder" "$proj" "$role"
-      out="$(cd "$repo" && eval "$until_cmd" 2>&1)"; rc=$?
-      if [ "$rc" -eq 0 ]; then                            # HIT — strip the feedback block, hand to normal flow
-        db "UPDATE tasks SET notes=$([ -n "$base_notes" ] && echo "'$(sqlesc "$base_notes")'" || echo NULL), updated_at=datetime('now') WHERE id='$(sqlesc "$tid")';"
-        echo "✓ loop $tid — verifier passed on attempt $attempt. handed to the normal flow."
-        exit 0
-      fi
-      tail_out="$(printf '%s' "$out" | tail -n 40)"
-      if [ "$attempt" -ge "$max" ]; then                  # CEILING — park blocked for the founder
-        db "UPDATE tasks SET status='blocked', notes='$(sqlesc "$base_notes
-$MARK (FINAL, attempt $attempt/$max) — verifier \`$until_cmd\` still failing:
-$tail_out")', updated_at=datetime('now') WHERE id='$(sqlesc "$tid")';"
-        echo "✗ loop $tid — hit --max $max without passing. parked: blocked (see notes)."
-        exit 1
-      fi
-      # MISS, budget remains — feed the failure back + reset to a re-runnable status
-      db "UPDATE tasks SET status='ready', notes='$(sqlesc "$base_notes
-$MARK (attempt $attempt/$max) — verifier \`$until_cmd\` failed:
-$tail_out")', updated_at=datetime('now') WHERE id='$(sqlesc "$tid")';"
-    done ;;
 
   scaffold)
     name="${1:?usage: dais scaffold <project>}"

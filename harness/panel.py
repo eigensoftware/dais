@@ -178,13 +178,9 @@ def render_work(scr, rect, app, focused):
             _add(scr, y, inner.x, clip_cols(r["label"], inner.w), inner.x + inner.w,
                  curses.A_DIM)
             continue
-        # task / running / loop row: TAG  id  project  title
+        # task / running row: TAG  id  project  title
         selected = (base + idx) == sel_i and focused
-        if r["kind"] == "loop":                              # an active `dais loop` — headline live work
-            tag, tid, proj = "↻LOOP", (r.get("task_id") or "—"), r["project"]
-            title = f"attempt {r.get('attempt','?')}/{r.get('max','?')} · {r.get('until','')}"
-            base_attr = app._cp(_LIVE)
-        elif r["kind"] == "running":
+        if r["kind"] == "running":
             tag, tid, proj = "RUN", (r.get("task_id") or "—"), r["project"]
             title = f"{r.get('agent','')}"
             base_attr = app._cp(_LIVE)                        # running = green (live)
@@ -574,8 +570,7 @@ class PanelApp(d.App):
 
     def left_rows(self):
         rows = panel_work_rows(self.snap, project=self.project_filter,
-                               expanded=self._panel_expanded, mc=self._mc,
-                               loops=d.active_loops(self.root))
+                               expanded=self._panel_expanded, mc=self._mc)
         if self.filter:                          # honest filter: narrow to matching task/running rows
             rows = [r for r in rows if r["kind"] in ("task", "running")]
             rows = d.filter_rows(rows, self.filter, key=_row_search_text)
@@ -722,7 +717,7 @@ def _task_row(proj, task, tag):
             "status": task.status, "tag": tag, "sel": True}
 
 
-def panel_work_rows(snap, *, project=None, expanded=False, mc=False, loops=()):
+def panel_work_rows(snap, *, project=None, expanded=False, mc=False):
     """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · IN FLIGHT ·
     BACKLOG · DEFERRED · ARCHIVE). `project` limits to one project. `expanded` (the g key) shows
     the full BACKLOG, reveals DEFERRED rows, and uncaps the ARCHIVE. `mc` (mission-control skin)
@@ -732,16 +727,14 @@ def panel_work_rows(snap, *, project=None, expanded=False, mc=False, loops=()):
     if not snap:
         return rows
     projects = [p for p in snap.projects if project is None or p.name == project]
-    loops = [lp for lp in loops if project is None or lp["project"] == project]
-    looped_ids = {(lp["project"], lp["task"]) for lp in loops}   # a looped task shows ONLY as its loop row
 
     def tasks_in(statuses):
         out = []
         for p in projects:
             for st in statuses:
                 for t in p.tasks_by_status.get(st, []):
-                    if (p.name, t.id) in running_ids or (p.name, t.id) in looped_ids:
-                        continue                         # running/looped tasks show only in RUNNING
+                    if (p.name, t.id) in running_ids:    # a running task shows only in RUNNING
+                        continue
                     out.append((p.name, t))
         return out
 
@@ -750,25 +743,20 @@ def panel_work_rows(snap, *, project=None, expanded=False, mc=False, loops=()):
             rows.append({"kind": "spacer", "id": f"__sp::{name}", "sel": False, "label": ""})
         rows.append(_band(name, count))
 
-    # RUNNING — live agents + active `dais loop` runs (shown as ↻ LOOP rows; see d.active_loops)
+    # RUNNING
     now = "9999-12-31 00:00:00"            # elapsed not needed for the model; render computes it
     threads = [t for t in d.running_threads(snap, now)
                if project is None or t["project"] == project]
     running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
-    disp_threads = [t for t in threads if (t["project"], t.get("task")) not in looped_ids]
     # mc: an empty band collapses to just its dim header — the screen reads calm when nominal and
     # only the live/gated bands draw the eye. classic: keep the "(none …)" filler row.
-    add_band("RUNNING", len(loops) + len(disp_threads))
-    for lp in loops:                                      # a loop is headline live activity
-        rows.append({"kind": "loop", "id": f"loop::{lp['project']}::{lp['task']}",
-                     "project": lp["project"], "task_id": lp["task"], "attempt": lp["attempt"],
-                     "max": lp["max"], "until": lp["until"], "pid": lp["pid"], "sel": False})
-    for t in disp_threads:
+    add_band("RUNNING", len(threads))
+    for t in threads:
         rows.append({"kind": "running", "id": f"run::{t['project']}",
                      "project": t["project"], "task_id": t["task"], "task": None,
                      "status": "doing", "sel": True, "agent": t["agent"],
                      "since": t["since"], "log_path": t["log_path"]})
-    if not disp_threads and not loops and not mc:
+    if not threads and not mc:
         rows.append({"kind": "info", "id": "__run_none", "sel": False, "label": "  (none running)"})
 
     # NEEDS YOU (the founder gates)
