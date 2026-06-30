@@ -465,8 +465,35 @@ def render_logwall(scr, rect, app):
              inner.x + inner.w, curses.A_DIM)
 
 
+def render_runs(scr, rect, app):
+    """Full-body RUNS history: the org's completed runs, newest first — one row each
+    (HH:MM · project/agent · status · dur · what it touched), scrollable with j/k. Unlike the
+    one-line FEED, this keeps task-LESS runs (e.g. a lead planning pass) visible after they end,
+    so work that isn't tied to an open task doesn't just vanish."""
+    runs = getattr(app, "_runs", None) or []
+    h = max(1, rect.h - 1)                         # leave the title row for render_pane_title
+    top = max(0, min(getattr(app, "runs_scroll", 0), max(0, len(runs) - h)))
+    app.runs_scroll = top
+    span = f"  [{top + 1}-{min(len(runs), top + h)}]" if len(runs) > h else ""
+    inner = render_pane_title(scr, rect, f"RUNS · {len(runs)}{span}", True)
+    if not runs:
+        _add(scr, inner.y, inner.x, clip_cols("  (no runs yet)", inner.w),
+             inner.x + inner.w, curses.A_DIM)
+        return
+    for i, r in enumerate(runs[top:top + inner.h]):
+        dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
+        summ = d.short_summary(r.summary) or ("(running)" if r.status == "running" else "—")
+        line = f"  {d.to_local_hhmm(r.started_at):<5}  {r.agent:<24}  {r.status:<11}  {dur:>4}  {summ}"
+        _add(scr, inner.y + i, inner.x, clip_cols(line, inner.w),
+             inner.x + inner.w, _feed_attr(app, r.status))
+
+
 def render_bar(scr, rect, app, focus):
     """Contextual action bar (reused) + the panel's global keys."""
+    if getattr(app, "show_runs", False):
+        _add(scr, rect.y, rect.x, pad_cols(" j/k scroll · r/esc back · q quit", rect.w),
+             rect.x + rect.w, curses.A_REVERSE)
+        return
     if getattr(app, "show_logwall", False):
         _add(scr, rect.y, rect.x, pad_cols(" L/esc back · q quit", rect.w),
              rect.x + rect.w, curses.A_REVERSE)
@@ -474,7 +501,8 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    keys = "w watch · R run · t tick · tab · / filter · g expand · L logs · ? help · q quit"
+    keys = ("w watch · R run · t tick · tab · / filter · g expand · L logs · r runs · "
+            "? help · q quit")
     if getattr(app, "filtering", False):
         hint = f" /{app.filter}_  ·  {keys}"
     else:
@@ -496,6 +524,7 @@ _HELP_LINES = [
     "  rail + j/k        pick a project (ALL clears the filter)",
     "  l                 open the log pager for the selection",
     "  L logs            live log wall - all running agents (esc back)",
+    "  r runs            runs history - every completed run, incl. task-less (j/k scroll, esc back)",
     "",
     "  LOOP / RUN  (act on the selected row's project)",
     "  w                 start / stop the watch loop (whole workspace)",
@@ -561,8 +590,19 @@ class PanelApp(d.App):
         self.project_filter = None
         self.show_help = False
         self.show_logwall = False
+        self.show_runs = False           # full-body RUNS history (the `r` view)
+        self.runs_scroll = 0
+        self._runs = []
         self.show_overlay = False        # an action's captured output, shown in-panel (e.g. ship)
         self._overlay = None
+
+    def refresh(self):
+        super().refresh()
+        if self.show_runs:               # keep the open RUNS view live as new runs complete
+            try:
+                self._runs = d.load_runs(self.conn)
+            except d.sqlite3.Error:
+                pass                      # keep the last list; the next tick retries
 
     def left_rows(self):
         rows = panel_work_rows(self.snap, project=self.project_filter,
@@ -611,9 +651,10 @@ class PanelApp(d.App):
         scr = self.scr
         scr.erase()
         h, w = scr.getmaxyx()
-        if self.show_logwall:
+        if self.show_runs or self.show_logwall:
             render_vitals(scr, Rect(0, 0, 1, w), self)
-            render_logwall(scr, Rect(1, 0, max(1, h - 2), w), self)
+            body = render_runs if self.show_runs else render_logwall
+            body(scr, Rect(1, 0, max(1, h - 2), w), self)
             render_bar(scr, Rect(h - 1, 0, 1, w), self, self.pane_focus)
             if self.show_help:
                 render_help(scr, h, w)
@@ -647,6 +688,16 @@ class PanelApp(d.App):
         if ch == ord("?"):
             self.show_help = True
             return True
+        if self.show_runs:                      # the RUNS history is a scrollable full-body view
+            if ch == ord("q"):
+                return not self._confirm("quit dais top?")
+            if ch in (ord("r"), 27):            # r or esc returns to the control panel
+                self.show_runs = False
+            elif ch in (ord("j"), curses.KEY_DOWN):
+                self.runs_scroll += 1
+            elif ch in (ord("k"), curses.KEY_UP):
+                self.runs_scroll = max(0, self.runs_scroll - 1)
+            return True
         if self.show_logwall:                   # the wall is a passive full-body view
             if ch == ord("q"):
                 return not self._confirm("quit dais top?")
@@ -655,6 +706,14 @@ class PanelApp(d.App):
             return True
         if ch == ord("L"):                      # open the live log wall
             self.show_logwall = True
+            return True
+        if ch == ord("r"):                      # open the RUNS history (completed runs, incl task-less)
+            self.show_runs = True
+            self.runs_scroll = 0
+            try:
+                self._runs = d.load_runs(self.conn)
+            except d.sqlite3.Error:
+                self._runs = []
             return True
         # global panel keys first
         if ch == ord("q"):

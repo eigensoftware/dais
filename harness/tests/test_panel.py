@@ -1406,3 +1406,97 @@ class TestVitalsBar(unittest.TestCase):
     def test_converged_to_one_default_no_skin_flag(self):
         papp = self._papp([("z-1", "zeta", "t", "ready", "med", None)])
         self.assertFalse(hasattr(papp, "_mc"))     # one default look; the m-toggle is gone
+
+
+def _seed_runs(conn, runs):
+    """runs: list of (project, agent, status, summary, started_at, ended_at). Inserted in order,
+    so the LAST tuple is the newest (load_runs orders by id DESC)."""
+    conn.executemany(
+        "INSERT INTO runs(project,agent,status,summary,started_at,ended_at) VALUES(?,?,?,?,?,?)",
+        runs)
+    conn.commit()
+
+
+class TestRunsView(unittest.TestCase):
+    """#4 — the RUNS history view (key `r`): every completed run, incl. task-LESS ones (a lead
+    planning pass) that otherwise only flash by in the FEED. Full-body, scrollable, newest-first."""
+
+    def _papp(self, runs=()):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-runs-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn()
+        if runs:
+            _seed_runs(conn, runs)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def test_load_runs_newest_first_includes_taskless(self):
+        conn = _conn()
+        _seed_runs(conn, [
+            ("acme", "engineer", "succeeded", "cou-1: built X",
+             "2026-06-30 09:00:00", "2026-06-30 09:08:00"),
+            ("acme", "lead", "succeeded", "re-ranked backlog",   # task-less planning run
+             "2026-06-30 10:00:00", "2026-06-30 10:03:00"),
+        ])
+        runs = d.load_runs(conn)
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[0].agent, "acme/lead")      # newest first
+        self.assertEqual(runs[0].summary, "re-ranked backlog")  # the task-less run is present
+        self.assertEqual(runs[0].dur_min, 3)
+        self.assertEqual(runs[1].agent, "acme/engineer")
+
+    def test_load_runs_respects_limit(self):
+        conn = _conn()
+        _seed_runs(conn, [("p", "a", "succeeded", f"r{i}",
+                           "2026-06-30 09:00:00", "2026-06-30 09:01:00") for i in range(10)])
+        self.assertEqual(len(d.load_runs(conn, limit=3)), 3)
+
+    def test_r_opens_runs_view_and_loads(self):
+        papp = self._papp([("beacon", "qa", "succeeded", "lyr-2: verified",
+                            "2026-06-30 09:00:00", "2026-06-30 09:02:00")])
+        self.assertFalse(papp.show_runs)
+        papp.handle(ord("r"), papp.left_rows(), 0, None)
+        self.assertTrue(papp.show_runs)
+        self.assertEqual(len(papp._runs), 1)
+        self.assertEqual(papp.runs_scroll, 0)
+
+    def test_runs_view_renders_runs(self):
+        papp = self._papp([("beacon", "qa", "succeeded", "lyr-2: verified the redesign",
+                            "2026-06-30 09:00:00", "2026-06-30 09:02:00")])
+        papp.handle(ord("r"), papp.left_rows(), 0, None)
+        scr = FakeScr(40, 200)
+        pn.render_runs(scr, pn.Rect(1, 0, 30, 200), papp)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("RUNS · 1", text)
+        self.assertIn("beacon/qa", text)
+        self.assertIn("succeeded", text)
+        self.assertIn("verified the redesign", text)
+
+    def test_runs_view_empty_state(self):
+        papp = self._papp()
+        papp.handle(ord("r"), papp.left_rows(), 0, None)
+        scr = FakeScr(40, 200)
+        pn.render_runs(scr, pn.Rect(1, 0, 30, 200), papp)
+        self.assertIn("no runs yet", "\n".join(c[2] for c in scr.calls))
+
+    def test_runs_scroll_jk_and_close(self):
+        papp = self._papp([("p", "a", "succeeded", f"r{i}",
+                            "2026-06-30 09:00:00", "2026-06-30 09:01:00") for i in range(5)])
+        papp.handle(ord("r"), papp.left_rows(), 0, None)
+        papp.handle(ord("j"), [], 0, None)
+        self.assertEqual(papp.runs_scroll, 1)
+        papp.handle(ord("k"), [], 0, None)
+        papp.handle(ord("k"), [], 0, None)         # clamps at 0
+        self.assertEqual(papp.runs_scroll, 0)
+        papp.handle(27, [], 0, None)               # esc returns to the panel
+        self.assertFalse(papp.show_runs)
+
+    def test_r_in_runs_view_closes(self):
+        papp = self._papp([("p", "a", "succeeded", "r0",
+                            "2026-06-30 09:00:00", "2026-06-30 09:01:00")])
+        papp.handle(ord("r"), papp.left_rows(), 0, None)
+        papp.handle(ord("r"), [], 0, None)         # r toggles back out
+        self.assertFalse(papp.show_runs)

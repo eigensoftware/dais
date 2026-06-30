@@ -258,6 +258,21 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                     cap_state=capped > 0, ts=now, workspace=workspace_name(root))
 
 
+def load_runs(conn, limit=200):
+    """Org-wide run history (newest first) for the RUNS view — the full record, deeper than the
+    snapshot's small FEED slice. Includes task-LESS runs (e.g. a lead planning pass) so completed
+    work doesn't just flash by in the ticker and vanish."""
+    rows = conn.execute(
+        "SELECT started_at,ended_at,project,agent,status,summary,log_path FROM runs "
+        "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [Run(started_at=r["started_at"],
+                agent=f"{r['project']}/{r['agent']}",
+                status=r["status"], summary=r["summary"],
+                log_path=r["log_path"], project=r["project"],
+                dur_min=minutes_between(r["started_at"], r["ended_at"]))
+            for r in rows]
+
+
 # --------------------------------------------------------------------------- #
 # plain renderer (the cleaned-up one-shot `dais status`)
 # --------------------------------------------------------------------------- #
