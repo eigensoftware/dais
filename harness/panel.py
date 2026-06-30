@@ -699,10 +699,10 @@ def _task_row(proj, task, tag):
 
 
 def panel_work_rows(snap, *, project=None, expanded=False):
-    """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · IN FLIGHT ·
+    """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · QUEUED ·
     BACKLOG · DEFERRED · ARCHIVE). `project` limits to one project. `expanded` (the g key) shows
     the full BACKLOG, reveals DEFERRED rows, and uncaps the ARCHIVE. An empty RUNNING/NEEDS YOU/
-    IN FLIGHT band collapses to just its dim header (no '(none …)' filler)."""
+    QUEUED band collapses to just its dim header (no '(none …)' filler)."""
     rows = []
     if not snap:
         return rows
@@ -742,9 +742,10 @@ def panel_work_rows(snap, *, project=None, expanded=False):
     for proj, t in gates:
         rows.append(_task_row(proj, t, GATE_TAG.get(t.status, t.status.upper())))
 
-    # IN FLIGHT — the in-flight work, shown as rows by default (no g needed)
+    # QUEUED — work cycling through the build/QA loop (ready/needs_qa/changes_requested), waiting for
+    # its next turn; shown as rows by default (no g needed). RUNNING above = an agent live right now.
     loop = tasks_in(_LOOP_STATUSES)
-    add_band("IN FLIGHT", len(loop))
+    add_band("QUEUED", len(loop))
     for proj, t in loop:
         rows.append(_task_row(proj, t, t.status))
 
