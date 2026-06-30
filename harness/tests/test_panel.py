@@ -1616,3 +1616,39 @@ class TestDependenciesPanel(unittest.TestCase):
         chained = [c for c in scr.calls if "⛓" in c[2] and "A-thing" in c[2]]
         self.assertTrue(chained)                            # the blocked task shows the ⛓ marker
         self.assertTrue(chained[0][3] & curses.A_DIM)       # ...and is dimmed (won't run yet)
+
+
+class TestLiveLogColoring(unittest.TestCase):
+    """The live log (inspector + log wall) colors lines by their fmt-stream marker — 💬 cyan, 🔧
+    yellow, ✓ green, errors red — not just reddening errors. Regression guard for the richer view."""
+
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-llc-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000          # color pairs identifiable by value
+        return papp
+
+    def _logfile(self):
+        import tempfile
+        p = os.path.join(tempfile.mkdtemp(prefix="dais-log-"), "a.log")
+        with open(p, "w") as fh:
+            fh.write("💬 thinking about the fix\n🔧 Edit foo.py\n✓ done\n")
+        return p
+
+    def test_inspector_live_log_colors_by_marker(self):
+        papp = self._papp()
+        logf = self._logfile()
+        thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": logf}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            papp.sel_id = next(r for r in papp.left_rows() if r["kind"] == "running")["id"]
+            scr = FakeScr(40, 200)
+            pn.render_inspector(scr, pn.Rect(1, 0, 30, 120), papp, focused=False)
+        tool = next(c for c in scr.calls if "🔧" in c[2])
+        chat = next(c for c in scr.calls if "💬" in c[2])
+        self.assertEqual(tool[3], 4000)                       # 🔧 tool call → yellow (_cp 4)
+        self.assertEqual(chat[3], 3000)                       # 💬 narration → cyan (_cp 3)

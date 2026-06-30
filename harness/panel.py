@@ -302,7 +302,7 @@ def render_inspector_live_log(scr, inner, app, sel_row):
              inner.x + inner.w, curses.A_DIM)
         return
     for i, ln in enumerate(tail):
-        attr = app._cp(_BAD) if d._LOG_ERR_RE.search(ln) else 0
+        attr = app._log_attr(ln)                    # rich fmt-stream coloring (💬/🔧/✓/↳ · errors red)
         _add(scr, inner.y + used + i, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, attr)
 
 
@@ -520,7 +520,7 @@ def render_logwall(scr, rect, app):
                  inner.x + inner.w, curses.A_DIM)
             continue
         for i, ln in enumerate(lines):
-            attr = app._cp(_BAD) if d._LOG_ERR_RE.search(ln) else 0
+            attr = app._log_attr(ln)             # rich fmt-stream coloring (💬/🔧/✓/↳ · errors red)
             _add(scr, by + 1 + i, inner.x, clip_cols("  " + ln, inner.w),
                  inner.x + inner.w, attr)
     if note_n:
