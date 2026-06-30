@@ -3,9 +3,11 @@
 #   router.py <dais_root> <project>         -> prints the role to run next (nothing = idle)
 #   router.py --lint <dais_root> [project]  -> validates roles config(s); exit 1 on any error
 #
-# Model (status-driven board): a status maps to exactly ONE reactive role (its `handles`).
-# Reactive roles run first, by precedence (verify -> build -> plan, generalized from config);
-# then cadence roles (every:Nh) when no reactive work is pending; else idle.
+# Model (status-driven board): a status maps to exactly ONE schedulable role (its `handles`); that
+# role REACTIVELY owns the status. Reactive handling runs first, by precedence (verify -> build ->
+# plan, generalized from config) — this includes a cadence role like the lead, which reactively owns
+# needs_scoping AND still runs on its every:Nh clock for periodic discovery. When no reactive work is
+# pending, cadence roles run on their interval; else idle.
 import sys, os, sqlite3, re
 
 VALID_ACCESS = {"edit", "review", "draft", "none"}
@@ -58,8 +60,10 @@ def decide(root, project):
     db = sqlite3.connect(os.path.join(root, "dais.db"))
     dep = _UNBLOCKED if _has_blocked_on(db) else ""
 
-    # 1) reactive: lowest precedence with an actionable, NON-blocked task wins (verify before build)
-    for r in sorted([r for r in roles if r["trigger"] == "reactive" and r["handles"]],
+    # 1) reactive: lowest precedence with an actionable, NON-blocked task wins (verify before build).
+    #    ANY schedulable role with `handles` reactively owns those statuses — incl. a cadence role
+    #    like the lead (needs_scoping), which also runs periodically below for its own discovery.
+    for r in sorted([r for r in roles if r["trigger"] != "none" and r["handles"]],
                     key=lambda r: r["prec"]):
         ph = ",".join("?" * len(r["handles"]))
         n = db.execute("SELECT COUNT(*) FROM tasks t WHERE t.project=? AND t.status IN (%s) %s"
@@ -112,28 +116,19 @@ def lint_project(root, project):
     if not os.path.exists(os.path.join(root, "projects", project, "CONTEXT.md")):
         warnings.append("no CONTEXT.md (agents read it first for project memory)")
 
-    # 1) THE invariant: each reactive status maps to exactly one role. Two REACTIVE roles claiming the
-    #    same status means only the lowest-prec one ever runs; the other is silently starved → error.
-    reactive_by_status = {}
+    # THE invariant: each handled status maps to exactly one SCHEDULABLE role. Any role with `handles`
+    # reactively owns those statuses (including a cadence role like the lead, which also runs on its
+    # clock). Two owners → only the lowest-prec one ever runs; the other is silently starved → error.
+    # (trigger=none roles like the founder are excluded — they're gates, never scheduled.)
+    handler_by_status = {}
     for r in roles:
-        if r["trigger"] == "reactive":
+        if r["trigger"] != "none":
             for s in r["handles"]:
-                reactive_by_status.setdefault(s, []).append(r["name"])
-    for s, names in sorted(reactive_by_status.items()):
+                handler_by_status.setdefault(s, []).append(r["name"])
+    for s, names in sorted(handler_by_status.items()):
         if len(names) > 1:
-            errors.append("status '%s' is handled by multiple reactive roles %s — only the "
-                          "lowest-precedence one runs; the rest are silently starved" % (s, names))
-    # ...and catch the case the reactive-only check misses: a status owned by 2+ roles when a CADENCE
-    # role is involved (e.g. the lead). The router won't error, but the stage is ambiguously double-
-    # handled — warn so it's never silent.
-    all_by_status = {}
-    for r in roles:
-        for s in r["handles"]:
-            all_by_status.setdefault(s, []).append(r["name"])
-    for s, names in sorted(all_by_status.items()):
-        if len(names) > 1 and len(reactive_by_status.get(s, [])) <= 1:
-            warnings.append("status '%s' is claimed by multiple roles %s (mixed triggers) — a stage "
-                            "should have ONE owner; routing/handoff is ambiguous" % (s, names))
+            errors.append("status '%s' is handled by multiple roles %s — a stage must have ONE owner; "
+                          "only the lowest-precedence role runs, the rest are silently starved" % (s, names))
 
     # 2) field sanity (warn, don't fail — the router already degrades safely)
     for r in roles:

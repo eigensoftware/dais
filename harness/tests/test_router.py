@@ -16,6 +16,9 @@ ROLES_REACTIVE = (
     "engineer  edit    reactive  changes_requested,ready  2\n"
 )
 
+# qa + engineer + a CADENCE lead that also `handles needs_scoping` — the real-world shape.
+ROLES_WITH_LEAD = ROLES_REACTIVE + "lead  review  every:5h  needs_scoping  3\n"
+
 SCHEMA = (
     "CREATE TABLE tasks(id TEXT PRIMARY KEY, project TEXT, title TEXT, status TEXT,"
     " priority TEXT DEFAULT 'medium'%s);\n"
@@ -67,6 +70,36 @@ class TestDependencySkip(unittest.TestCase):
     def test_degrades_without_blocked_on_column(self):
         # a pre-migration DB (no blocked_on column) must still schedule, not crash.
         self.assertEqual(router.decide(_ws([("a", "ready")], with_dep_col=False), "p"), "engineer")
+
+
+class TestLeadReactiveOnScoping(unittest.TestCase):
+    """A cadence lead that `handles needs_scoping` reacts to it on the next tick (not just on its 5h
+    clock), while still keeping its periodic discovery run when no reactive work is pending."""
+
+    def test_lead_reacts_to_needs_scoping(self):
+        # a needs_scoping task with no qa/eng work → the lead is scheduled reactively this tick.
+        root = _ws([("a", "needs_scoping")], roles=ROLES_WITH_LEAD)
+        self.assertEqual(router.decide(root, "p"), "lead")
+
+    def test_builders_outrank_scoping(self):
+        # verify→build→plan: a ready task (engineer, prec 2) wins over scoping (lead, prec 3).
+        root = _ws([("a", "ready"), ("b", "needs_scoping")], roles=ROLES_WITH_LEAD)
+        self.assertEqual(router.decide(root, "p"), "engineer")
+
+    def test_lead_cadence_runs_for_discovery_when_idle(self):
+        # no reactive work at all → the lead still runs on its cadence (first run, never-run) for
+        # its own feature discovery / backlog re-ranking.
+        root = _ws([("a", "backlog")], roles=ROLES_WITH_LEAD)
+        self.assertEqual(router.decide(root, "p"), "lead")
+
+    def test_blocked_scoping_does_not_trigger_lead(self):
+        # the lone needs_scoping task is blocked → no reactive work; falls through to cadence (still
+        # the lead here, but via the cadence path) — proving the blocked task itself didn't trigger it.
+        root = _ws([("a", "needs_scoping", "b"), ("b", "backlog")], roles=ROLES_WITH_LEAD)
+        # with a prior lead run recorded, cadence wouldn't fire; assert the blocked task alone is
+        # not reactive by checking a no-lead roles set idles.
+        self.assertIsNone(router.decide(_ws([("a", "needs_scoping", "b"), ("b", "backlog")],
+                                            roles=ROLES_REACTIVE + "lead review reactive needs_scoping 3\n"), "p"))
 
 
 if __name__ == "__main__":
