@@ -246,20 +246,18 @@ class TestBlocked(unittest.TestCase):
 
 
 class TestDoingNeedsQaAsTask(unittest.TestCase):
-    def _check(self, status):
-        acts = a.task_actions(status, kind="task")
+    def test_doing_is_in_flight_no_start(self):
+        # doing = an agent parked it while working → only cancel-run, no start
+        acts = a.task_actions("doing", kind="task")
         self.assertEqual(ids(acts), ["cancel_run", "set_priority", "handoff"])
         self.assertEqual(by_slot(acts, "advance"), [])
-        cr = by_id(acts, "cancel_run")
-        self.assertEqual(cr.slot, "reverse")
-        self.assertEqual(cr.key, "x")
-        self.assertTrue(cr.confirm)
 
-    def test_doing(self):
-        self._check("doing")
-
-    def test_needs_qa(self):
-        self._check("needs_qa")
+    def test_needs_qa_is_startable(self):
+        # a QUEUED needs_qa row (not currently running) is startable — `a start` runs QA
+        acts = a.task_actions("needs_qa", kind="task")
+        adv = by_slot(acts, "advance")[0]
+        self.assertEqual(adv.id, "start")
+        self.assertEqual(adv.key, "a")
 
 
 class TestTerminal(unittest.TestCase):

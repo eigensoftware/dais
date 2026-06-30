@@ -84,7 +84,10 @@ def task_actions(status, kind="task", has_pr=False):
         out += [_m("set_priority"), _m("cancel")]
         return out
 
-    if status in ("ready", "changes_requested"):
+    # the loop's queued stages — startable on demand: `start` runs whichever role handles the status
+    # (ready/changes_requested → engineer, needs_qa → QA). A needs_qa row reaches here only when it's
+    # NOT currently running (a live QA run shows in RUNNING with cancel-run); queued, it's startable.
+    if status in ("ready", "changes_requested", "needs_qa"):
         return [_adv("start", "start now"),
                 _rev("defer", "defer → deferred"),
                 _m("set_priority"), _m("handoff"), _m("edit_title"),
@@ -105,7 +108,7 @@ def task_actions(status, kind="task", has_pr=False):
                 _rev("cancel", "cancel", True),
                 _m("set_priority"), _m("handoff"), _m("edit_title")]
 
-    if status in ("doing", "needs_qa"):
+    if status == "doing":                        # genuinely in-flight (an agent parks it here) — no start
         return [_rev("cancel_run", "cancel run", True),
                 _m("set_priority"), _m("handoff")]
 
