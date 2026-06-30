@@ -527,15 +527,17 @@ def render_overlay(scr, h, w, ov):
 
 
 def render_help(scr, h, w):
-    """Centered keymap overlay, sized to its widest line so no description is clipped."""
-    content_w = max((disp_width(ln) for ln in _HELP_LINES), default=0)
-    bw = min(w - 4, content_w + 2)               # fit the content (+2 right margin); only clip if the screen is tiny
-    bh = min(h - 2, len(_HELP_LINES) + 2)
+    """Centered keymap overlay. Consistent padding: a blank row top + bottom, a 2-space left margin
+    (carried by the lines), +2 right margin; sized to its widest line so no description is clipped."""
+    body = [""] + _HELP_LINES + [""]             # blank top/bottom rows = vertical padding
+    content_w = max((disp_width(ln) for ln in body), default=0)
+    bw = min(w - 4, content_w + 2)
+    bh = min(h - 2, len(body))
     y0 = max(0, (h - bh) // 2)
     x0 = max(0, (w - bw) // 2)
     for i in range(bh):
-        line = _HELP_LINES[i] if i < len(_HELP_LINES) else ""
-        attr = curses.A_REVERSE | (curses.A_BOLD if i == 0 else 0)
+        line = body[i]
+        attr = curses.A_REVERSE | (curses.A_BOLD if line.strip() == "KEYS" else 0)
         _add(scr, y0 + i, x0, pad_cols(line, bw), x0 + bw, attr)
 
 
@@ -796,9 +798,11 @@ def panel_work_rows(snap, *, project=None, expanded=False):
         rows.append({"kind": "info", "id": "__deferred_sum", "sel": False,
                      "label": f"  {len(deferred)} parked   (press g to show)"})
 
-    # ARCHIVE — history at the very bottom; shown when a project is picked or expanded; g UNCAPS it
+    # ARCHIVE — history at the very bottom; shown when a project is picked or expanded; g UNCAPS it.
+    # Newest-completed first (by last status change), so the most recent work is at the top.
     if expanded or project is not None:
-        arch = tasks_in(_ARCHIVE_STATUSES)
+        arch = sorted(tasks_in(_ARCHIVE_STATUSES),
+                      key=lambda pt: pt[1].updated_at or "", reverse=True)
         add_band("ARCHIVE", len(arch))
         shown = arch if expanded else arch[:_ARCHIVE_CAP]    # g shows the full history
         for proj, t in shown:

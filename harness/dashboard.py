@@ -113,6 +113,7 @@ class Task:
     assignee: str = None
     pr_url: str = None
     notes: str = None
+    updated_at: str = None   # last status change — used to sort the archive newest-first
 
 
 @dataclass
@@ -215,14 +216,14 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
         "SELECT DISTINCT project FROM tasks ORDER BY project")]
     for name in names:
         rows = conn.execute(
-            "SELECT id,title,status,priority,assignee,pr_url,notes FROM tasks "
+            "SELECT id,title,status,priority,assignee,pr_url,notes,updated_at FROM tasks "
             "WHERE project=? ORDER BY " + _PRIO + ", id", (name,)).fetchall()
         by_status = {}
         for r in rows:
             by_status.setdefault(r["status"], []).append(Task(
                 id=r["id"], title=r["title"], status=r["status"],
                 priority=r["priority"], assignee=r["assignee"],
-                pr_url=r["pr_url"], notes=r["notes"]))
+                pr_url=r["pr_url"], notes=r["notes"], updated_at=r["updated_at"]))
         run_rows = conn.execute(
             "SELECT started_at,ended_at,agent,status,summary,log_path FROM runs "
             "WHERE project=? ORDER BY id DESC LIMIT ?", (name, recent)).fetchall()
@@ -1263,13 +1264,15 @@ class App:
         if not options:
             return None
         h, w = self.scr.getmaxyx()
-        lines = [title] + [f"  {i + 1}. {o}" for i, o in enumerate(options[:9])]
-        lines.append("  (1-9 pick · esc cancel)")
+        # consistent padding: blank row top + bottom, a 2-space left margin on every line
+        # (the title included), +2 right margin — matches the panel's ? help overlay.
+        lines = ["", "  " + title] + [f"  {i + 1}. {o}" for i, o in enumerate(options[:9])]
+        lines += ["  (1-9 pick · esc cancel)", ""]
         bw = max(disp_width(s) for s in lines) + 2
         y0, x0 = max(0, h // 2 - len(lines) // 2), max(0, (w - bw) // 2)
         self.scr.timeout(-1)
         for i, ln in enumerate(lines):
-            attr = curses.A_REVERSE | (curses.A_BOLD if i == 0 else 0)
+            attr = curses.A_REVERSE | (curses.A_BOLD if i == 1 else 0)   # the title row (after blank top)
             _add(self.scr, y0 + i, x0, pad_cols(ln, bw), w, attr)
         self.scr.refresh()
         ch = self.scr.getch()

@@ -436,6 +436,15 @@ class TestPanelWorkRows(unittest.TestCase):
         self.assertFalse(any(r["kind"] == "task" and r["status"] == "needs_scoping"
                              and r["tag"] != "SCOPE" for r in rows))
 
+    def test_archive_is_newest_completed_first(self):
+        p = d.Project(name="x", stage_goal="", running=[], recent_runs=[],
+                      tasks_by_status={"done": [
+                          d.Task("x-1", "old", "done", "medium", updated_at="2026-06-01 00:00:00"),
+                          d.Task("x-2", "new", "done", "medium", updated_at="2026-06-30 00:00:00")]})
+        rows = pn.panel_work_rows(self._snap(p), project="x", expanded=True)
+        arch = [r["id"] for r in rows if r["kind"] == "task" and r.get("tag") in ("DONE", "CANC")]
+        self.assertEqual(arch, ["x-2", "x-1"])      # newest-completed first
+
     def test_g_uncaps_the_archive(self):
         # project picked, not expanded: archive capped + "+N older"; expanded (g): ALL archive rows
         snap = self._snap(self._proj("z", done=pn._ARCHIVE_CAP + 5))
