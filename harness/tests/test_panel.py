@@ -1709,3 +1709,68 @@ class TestRunningTaskGuess(unittest.TestCase):
         # by precedence the lead only runs when build/QA queues are empty → needs_scoping is the task.
         p = self._proj({"needs_scoping": ["s"]})
         self.assertEqual(d.running_task_id(p), "s")
+
+
+class TestInspectorLogWrapScroll(unittest.TestCase):
+    """The running inspector's live log wraps long lines (no cut-off) and scrolls — detail_scroll is
+    tail-anchored: 0 follows the latest, k scrolls up into history, j returns toward the tail."""
+
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-lws-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def _run_with_log(self, papp, body):
+        import tempfile
+        logf = os.path.join(tempfile.mkdtemp(prefix="dais-log-"), "a.log")
+        with open(logf, "w") as fh:
+            fh.write(body)
+        thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": logf}
+        return thread
+
+    def test_long_line_wraps_no_cutoff(self):
+        papp = self._papp()
+        thread = self._run_with_log(papp, "🔧 START " + "x" * 150 + " ENDTOKEN\n")
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            papp.sel_id = next(r for r in papp.left_rows() if r["kind"] == "running")["id"]
+            scr = FakeScr(40, 60)                        # narrow pane: the long line MUST wrap
+            pn.render_inspector(scr, pn.Rect(1, 0, 38, 60), papp, focused=False)
+            text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("ENDTOKEN", text)                  # the tail of the long line survived (wrapped)
+
+    def test_scroll_up_reveals_history(self):
+        papp = self._papp()
+        thread = self._run_with_log(papp, "".join(f"line{i:02d}\n" for i in range(30)))
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            papp.sel_id = next(r for r in papp.left_rows() if r["kind"] == "running")["id"]
+            rect = pn.Rect(1, 0, 12, 80)                 # small: only a few log rows fit
+            scr0 = FakeScr(40, 80)
+            pn.render_inspector(scr0, rect, papp, focused=False)   # detail_scroll=0 → tail
+            tail_text = "\n".join(c[2] for c in scr0.calls)
+            self.assertIn("line29", tail_text)           # newest visible
+            self.assertNotIn("line00", tail_text)        # oldest off-screen
+            papp.detail_scroll = 99                       # scroll all the way up (clamps to the top)
+            scr1 = FakeScr(40, 80)
+            pn.render_inspector(scr1, rect, papp, focused=False)
+            hist_text = "\n".join(c[2] for c in scr1.calls)
+            self.assertIn("line00", hist_text)           # the oldest line is now visible
+            self.assertNotIn("line29", hist_text)        # ...and the tail scrolled off
+            self.assertIn("↑", hist_text)                # the header flags the scroll position
+
+    def test_k_scrolls_up_j_follows_for_running(self):
+        papp = self._papp()
+        thread = self._run_with_log(papp, "".join(f"l{i}\n" for i in range(40)))
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            run_row = next(r for r in papp.left_rows() if r["kind"] == "running")
+            papp.sel_id = run_row["id"]
+            papp.pane_focus = "inspector"
+            papp.handle(ord("k"), papp.left_rows(), 0, run_row)   # up → into history
+            self.assertEqual(papp.detail_scroll, 1)
+            papp.handle(ord("j"), papp.left_rows(), 0, run_row)   # down → back toward the tail
+            self.assertEqual(papp.detail_scroll, 0)

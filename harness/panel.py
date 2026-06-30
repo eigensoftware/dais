@@ -330,20 +330,29 @@ def render_inspector_live_log(scr, inner, app, sel_row):
         if len(notes) > cap:
             _add(scr, y, inner.x, clip_cols("  …", inner.w), inner.x + inner.w, curses.A_DIM)
             y += 1
-    if y < bottom:
-        _add(scr, y, inner.x, clip_cols("─ live log ─", inner.w), inner.x + inner.w, curses.A_DIM)
-        y += 1
-    log_h = bottom - y
+    log_h = bottom - y - 1                          # reserve the row below for the live-log header
     if log_h <= 0:
         return
-    tail = d.tail_lines(sel_row.get("log_path"), log_h) if sel_row.get("log_path") else []
-    if not tail:
+    # WRAP each log line to the pane width (no more cut-off), coloring continuation rows like their
+    # source line; then the inspector's detail_scroll scrolls UP from the tail through this history.
+    raw = d.tail_lines(sel_row.get("log_path"), 400) if sel_row.get("log_path") else []
+    wrapped = []
+    for ln in raw:
+        a = app._log_attr(ln)
+        for piece in (d.wrap_cols(ln, inner.w) or [ln]):
+            wrapped.append((piece, a))
+    offset = max(0, min(getattr(app, "detail_scroll", 0), max(0, len(wrapped) - log_h)))
+    app.detail_scroll = offset                      # clamp (so j past the tail / k past the top stick)
+    head = "─ live log ─" if offset == 0 else f"─ live log · ↑{offset} (j → follow) ─"
+    _add(scr, y, inner.x, clip_cols(head, inner.w), inner.x + inner.w, curses.A_DIM)
+    y += 1
+    if not wrapped:
         _add(scr, y, inner.x, clip_cols("  (waiting for output…)", inner.w),
              inner.x + inner.w, curses.A_DIM)
         return
-    for i, ln in enumerate(tail):
-        attr = app._log_attr(ln)                    # rich fmt-stream coloring (💬/🔧/✓/↳ · errors red)
-        _add(scr, y + i, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, attr)
+    end = len(wrapped) - offset
+    for i, (txt, a) in enumerate(wrapped[max(0, end - log_h):end]):
+        _add(scr, y + i, inner.x, clip_cols(txt, inner.w), inner.x + inner.w, a)
 
 
 def render_inspector(scr, rect, app, focused):
@@ -835,7 +844,13 @@ class PanelApp(d.App):
         # navigation/actions route to the focused pane's selection via the inherited App
         if self.pane_focus == "inspector" and ch in (ord("j"), ord("k"),
                                                       curses.KEY_DOWN, curses.KEY_UP):
-            self.detail_scroll += 1 if ch in (ord("j"), curses.KEY_DOWN) else -1
+            up = ch in (ord("k"), curses.KEY_UP)
+            # the running log is tail-anchored (detail_scroll = rows scrolled UP from the latest):
+            # up → into history, down → back toward the live tail. Normal detail scrolls from the top.
+            if sel_row and sel_row.get("kind") == "running":
+                self.detail_scroll += 1 if up else -1
+            else:
+                self.detail_scroll += -1 if up else 1
             self.detail_scroll = max(0, self.detail_scroll)
             return True
         if ch == ord("g"):                      # expand/collapse loop + archive
