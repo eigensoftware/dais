@@ -40,9 +40,16 @@ tool can drive any number of independent workspaces.
 git clone https://github.com/eigensoftware/dais ~/dais
 ln -s ~/dais/dais ~/.local/bin/dais          # put `dais` on your PATH (a pointer, not a copy)
 
-# point it at a workspace (or skip this to run self-contained inside the clone)
-mkdir -p ~/.dais && echo "home=$HOME/my-workspace" > ~/.dais/config
+dais init ~/my-workspace                     # bootstrap a workspace — board + dais.yaml + CONTEXT.md + projects/
+mkdir -p ~/.dais && echo "home=$HOME/my-workspace" > ~/.dais/config   # make it your default DAIS_HOME
 ```
+
+`dais init` is the step that creates the workspace — without it you get a board and `projects/` but
+no `dais.yaml` or workspace `CONTEXT.md` (the latter is injected into every agent run). It's idempotent,
+so you can re-run it on an existing folder to backfill anything missing.
+
+Prefer a **self-contained** install (tool and workspace in one folder)? Run `dais init ~/dais` and skip
+the `~/.dais/config` line — with no config, `DAIS_HOME` falls back to the clone (`DAIS_ROOT`).
 
 Update the tool any time with `git pull` in `~/dais` — the symlink reflects it instantly.
 
