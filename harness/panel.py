@@ -30,9 +30,9 @@ _LEFT_GAP = 1             # blank separator row between PROJECTS and WORK in the
 
 
 def _projects_h(n_rail_items, mid_h):
-    """Height of the PROJECTS block (a title row + one row per rail item), capped so WORK keeps
-    room and never taller than the middle band."""
-    want = 1 + max(1, n_rail_items)
+    """Height of the PROJECTS block (a title row + a column-header row + one row per rail item),
+    capped so WORK keeps room and never taller than the middle band."""
+    want = 2 + max(1, n_rail_items)
     ceiling = max(1, mid_h - _MIN_WORK_H)
     return max(1, min(want, _PROJ_MAX_H, ceiling, mid_h))
 
@@ -349,44 +349,72 @@ def _rail_items(app):
     return ["ALL"] + names
 
 
+_RAIL_COL_W = 4                                  # width of each numeric column (3-char header + a pad)
+_RAIL_COLS = ("run", "you", "que", "bkl")        # running · needs-you (gate) · queued · backlog
+_RAIL_MIN_NAME_W = 12                            # below this the table sheds columns (right→left) for the name
+
+
+def _rail_counts(app, name):
+    """(running, needs_you, queued, backlog) for one project — or summed across all for the ALL row.
+    Mirrors the WORK bands: needs_you = the founder-gate statuses, queued = the loop's own statuses."""
+    if not app.snap:
+        return (0, 0, 0, 0)
+    projs = (app.snap.projects if name == "ALL"
+             else [p for p in app.snap.projects if p.name == name])
+    def total(statuses):
+        return sum(len(p.tasks_by_status.get(st, [])) for p in projs for st in statuses)
+    run = sum(1 for p in projs if p.running)            # one agent per project, so 0/1 each
+    return (run, total(d.GATE_ORDER), total(_LOOP_STATUSES), total(_BACKLOG_STATUSES))
+
+
 def render_rail(scr, rect, app, focused):
-    """Project navigator: ALL + per-project rows in one uniform color; only the live (running)
-    project is green; the active filter is bold with a » mark; the focused cursor is reverse.
-    When more projects than fit, the body scrolls to keep the cursor visible (same bottom-anchored
-    idiom as WORK) and the title badges the hidden count ("PROJECTS  +N") so the tail isn't silently
-    truncated."""
+    """Project navigator AND an at-a-glance table: per-project columns (running · needs-you · queued ·
+    backlog) plus an ALL row that totals them — so the founder sees the spread across projects, not
+    just one filtered at a time. One uniform color; only a live (running) project is green; the
+    needs-you count pops bold yellow; the active filter is bold with a » mark; the focused cursor is
+    reverse. Scrolls when more projects than fit (the title badges the hidden count) so the tail is
+    never silently truncated."""
     items = _rail_items(app)
     ri = getattr(app, "_rail_i", 0)
-    body_h = max(0, rect.h - 1)                          # rows for items; the title takes the first
+    body_h = max(0, rect.h - 2)                          # title row + the column-header row
     base = max(0, ri - body_h + 1) if body_h else 0      # scroll so the selected row stays on-screen
     hidden = max(0, len(items) - body_h)                 # projects off-screen at any scroll position
     title = "PROJECTS" if not hidden else f"PROJECTS  +{hidden}"
     inner = render_pane_title(scr, rect, title, focused)
+    # shed columns (right→left) on a narrow rail so the project name always stays readable; real
+    # two-column layouts give the rail ≥40 cols, where all four columns fit.
+    # -3 = the 2-col name indent + a 1-col right margin (so the rightmost cell isn't clipped by _add,
+    # which never writes a row's final column).
+    n_cols = max(0, min(len(_RAIL_COLS), (inner.w - 3 - _RAIL_MIN_NAME_W) // _RAIL_COL_W))
+    cols = _RAIL_COLS[:n_cols]
+    name_w = max(6, inner.w - 3 - n_cols * _RAIL_COL_W)
+    cols_x = inner.x + 2 + name_w
+    hdr = " " * (2 + name_w) + "".join(f"{c:>{_RAIL_COL_W}}" for c in cols)
+    _add(scr, inner.y, inner.x, clip_cols(hdr, inner.w), inner.x + inner.w, curses.A_DIM)
     pf = getattr(app, "project_filter", None)
-    for vis_idx, name in enumerate(items[base:base + inner.h]):
+    for vis_idx, name in enumerate(items[base:base + max(0, inner.h - 1)]):
         idx = base + vis_idx                            # index into items (cursor/active test on this)
+        y = inner.y + 1 + vis_idx                       # +1: the column header occupies inner row 0
         active = (name == "ALL" and pf is None) or name == pf
+        rev = curses.A_REVERSE if (focused and idx == ri) else 0
+        run, you, que, bkl = _rail_counts(app, name)
+        live = run > 0 and name != "ALL"                # ALL is an aggregate, never "the live one"
+        rowattr = (app._cp(_LIVE) if live else 0) \
+            | (curses.A_BOLD if (active and name != "ALL") else 0) | rev
         mark = "\xbb" if active else " "                    # »
-        p = (next((x for x in app.snap.projects if x.name == name), None)
-             if (app.snap and name != "ALL") else None)
-        running = bool(p and getattr(p, "running", False))
-        hue = app._cp(_LIVE) if running else 0              # uniform: only a live project is colored
-        attr = hue | (curses.A_BOLD if (active and name != "ALL") else 0) | \
-            (curses.A_REVERSE if (focused and idx == ri) else 0)
-        if p is not None:
-            ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER)
-            run = _DOT_RUN if running else " "              # ● marks the live project (shared with vitals)
-            name_str = f"{mark}{run}{name}"
-            _add(scr, inner.y + vis_idx, inner.x, clip_cols(name_str, inner.w),
-                 inner.x + inner.w, attr)
-            if ng:                                          # needs-you count: bold yellow so it pops
-                chip_attr = app._cp(_NEEDS_YOU) | curses.A_BOLD | \
-                    (curses.A_REVERSE if (focused and idx == ri) else 0)
-                _add(scr, inner.y + vis_idx, inner.x + disp_width(name_str), f" !{ng}",
-                     inner.x + inner.w, chip_attr)
-        else:
-            _add(scr, inner.y + vis_idx, inner.x, clip_cols(f"{mark} {name}", inner.w),
-                 inner.x + inner.w, attr)
+        dot = _DOT_RUN if live else " "                 # ● marks the live project (shared with vitals)
+        label = f"{mark}{dot}{name}"
+        _add(scr, y, inner.x, pad_cols(clip_cols(label, name_w + 2), inner.w),
+             inner.x + inner.w, rowattr)                # paint the row full-width so the cursor spans it
+        for ci, v in enumerate((run, you, que, bkl)[:n_cols]):
+            cell = f"{v:>{_RAIL_COL_W}}" if v else f"{'·':>{_RAIL_COL_W}}"
+            if v and ci == 1:                           # the needs-you (gate) count pops bold yellow
+                cattr = app._cp(_NEEDS_YOU) | curses.A_BOLD | rev
+            elif v:
+                cattr = rowattr if live else rev
+            else:
+                cattr = curses.A_DIM | rev              # a zero is a faint · — present, not shouting
+            _add(scr, y, cols_x + ci * _RAIL_COL_W, cell, inner.x + inner.w, cattr)
 
 
 def _feed_attr(app, status):

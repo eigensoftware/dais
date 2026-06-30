@@ -1230,15 +1230,16 @@ class TestRailNeedsYouChip(unittest.TestCase):
         papp._cp = lambda n: n * 1000
         return papp
 
-    def test_needs_you_chip_is_bold_yellow_and_separate(self):
+    def test_needs_you_count_is_bold_yellow_and_separate(self):
         papp = self._papp()
         scr = FakeScr(40, 80)
         pn.render_rail(scr, pn.Rect(1, 0, 20, 24), papp, focused=False)
-        chips = [c for c in scr.calls if "!1" in c[2]]
-        self.assertTrue(chips)                                  # the gate count renders
-        self.assertEqual(chips[0][3], 4000 | curses.A_BOLD)     # bold yellow (_cp(4)), not the name hue
-        name_calls = [c for c in scr.calls if "alpha" in c[2] and "!1" not in c[2]]
-        self.assertTrue(name_calls)                             # chip is a SEPARATE _add from the name
+        # the table's `you` column shows the gate count (alpha has one needs_review task)
+        cells = [c for c in scr.calls if c[2].strip() == "1"]
+        self.assertTrue(cells)                                  # the gate count renders
+        self.assertEqual(cells[0][3], 4000 | curses.A_BOLD)     # bold yellow (_cp(4)), not the name hue
+        name_calls = [c for c in scr.calls if "alpha" in c[2] and "1" not in c[2]]
+        self.assertTrue(name_calls)                             # count is a SEPARATE _add from the name
 
 
 class TestFeedTicker(unittest.TestCase):
@@ -1314,7 +1315,7 @@ class TestRailScroll(unittest.TestCase):
         items = pn._rail_items(papp)             # "ALL" + 15 projects = 16 rail items
         papp._rail_i = len(items) - 1            # select the very last project
         scr = FakeScr(40, 200)
-        pn.render_rail(scr, pn.Rect(1, 0, 6, 30), papp, focused=True)   # body_h = 5
+        pn.render_rail(scr, pn.Rect(1, 0, 6, 30), papp, focused=True)   # body_h = 4 (title+header)
         text = "\n".join(c[2] for c in scr.calls)
         self.assertIn(items[-1], text)           # the tail project is now on-screen (was truncated)
         self.assertNotIn("ALL", text)            # the top scrolled off to make room
@@ -1322,12 +1323,12 @@ class TestRailScroll(unittest.TestCase):
         self.assertTrue(cursor)                  # the reverse cursor lands on the selected row
 
     def test_overflow_badge_counts_hidden_projects(self):
-        papp = self._papp(15)                    # 16 items, body_h 5 -> 11 hidden
+        papp = self._papp(15)                    # 16 items, body_h 4 (title+header) -> 12 hidden
         scr = FakeScr(40, 200)
         pn.render_rail(scr, pn.Rect(1, 0, 6, 30), papp, focused=True)
         title = scr.calls[0][2]                  # the pane-title row is the first _add
         self.assertIn("PROJECTS", title)
-        self.assertIn("+11", title)
+        self.assertIn("+12", title)
 
     def test_no_badge_and_top_anchored_when_all_fit(self):
         papp = self._papp(4)                     # 5 items, comfortably inside body_h
@@ -1500,3 +1501,43 @@ class TestRunsView(unittest.TestCase):
         papp.handle(ord("r"), papp.left_rows(), 0, None)
         papp.handle(ord("r"), [], 0, None)         # r toggles back out
         self.assertFalse(papp.show_runs)
+
+
+class TestRailTable(unittest.TestCase):
+    """#5 — the rail is a per-project table (running · needs-you · queued · backlog) with an ALL row
+    that totals across projects, so the founder sees the spread, not one filtered project at a time."""
+
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-tbl-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def test_header_and_columns_render_at_real_width(self):
+        papp = self._papp([("a-1", "alpha", "x", "needs_review", "high", None),
+                           ("a-2", "alpha", "y", "ready", "med", None),
+                           ("b-1", "bravo", "z", "backlog", "low", None)])
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 50), papp, focused=False)   # 50 cols -> all 4 columns
+        text = "\n".join(c[2] for c in scr.calls)
+        for head in ("run", "you", "que", "bkl"):
+            self.assertIn(head, text)
+
+    def test_all_row_totals_across_projects(self):
+        # alpha: 1 needs_review (you) + 1 ready (que); bravo: 1 backlog (bkl). ALL sums them.
+        papp = self._papp([("a-1", "alpha", "x", "needs_review", "high", None),
+                           ("a-2", "alpha", "y", "ready", "med", None),
+                           ("b-1", "bravo", "z", "backlog", "low", None)])
+        self.assertEqual(pn._rail_counts(papp, "alpha"), (0, 1, 1, 0))
+        self.assertEqual(pn._rail_counts(papp, "bravo"), (0, 0, 0, 1))
+        self.assertEqual(pn._rail_counts(papp, "ALL"), (0, 1, 1, 1))   # totals
+
+    def test_narrow_rail_sheds_columns_keeps_name(self):
+        papp = self._papp([("c-1", "acme", "x", "ready", "high", None)])
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 20), papp, focused=False)   # tight: name must survive
+        self.assertIn("acme", "\n".join(c[2] for c in scr.calls))
