@@ -1323,7 +1323,7 @@ class TestVitalsBar(unittest.TestCase):
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
         base = scr.calls[0][3]                                          # the full-width base bar
-        self.assertEqual(base, (pn._VITALS * 1000) | curses.A_REVERSE | curses.A_BOLD)
+        self.assertEqual(base, (pn._VITALS * 1000) | curses.A_BOLD)     # its own pair (bold white on blue)
         self.assertNotEqual(base, curses.A_REVERSE | curses.A_BOLD)     # ≠ a focused pane title bar
 
     def test_converged_to_one_default_no_skin_flag(self):

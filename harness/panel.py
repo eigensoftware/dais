@@ -123,8 +123,9 @@ _STRUCTURE = 3      # cyan   — section/band headers + the inspector's header l
 _LIVE = 1           # green  — running agents, the live project, succeeded/pass
 _NEEDS_YOU = 4      # yellow — founder-gated work: gate rows, counts, chips, "prio high"
 _BAD = 2            # red    — failed/error/blocked lines
-_VITALS = 5         # magenta — the top vitals readout bar; a distinct background so it never reads
-                    #           as a focused pane title (white reverse bar) or a band header (cyan)
+_VITALS = 8         # the top vitals readout bar (dashboard pair 8 = bold white on blue): a distinct,
+                    # high-contrast bar so it never reads as a focused pane title (white reverse bar)
+                    # or a band header (cyan)
 # focus/selection  = curses.A_REVERSE | curses.A_BOLD (a bright bar; no color pair)
 # inactive         = curses.A_DIM (history, parked, placeholders, labels)
 _BAND_DIM = {"ARCHIVE", "DEFERRED"}                          # history/parked headers recede (inactive)
@@ -333,7 +334,7 @@ def render_vitals(scr, rect, app):
     sep = " · "                                            # between the two hero tokens
     ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}  {clk}"
     line = pre + run_tok + sep + gate_tok + ctx
-    bar = app._cp(_VITALS) | curses.A_REVERSE | curses.A_BOLD   # the readout's own background colour
+    bar = app._cp(_VITALS) | curses.A_BOLD                 # the readout's own bar (bold white on blue)
     _add(scr, rect.y, rect.x, pad_cols(line, rect.w), rect.x + rect.w, bar)
     if threads:                                            # the run token glows green while agents are live
         _add(scr, rect.y, rect.x + disp_width(pre), run_tok, rect.x + rect.w,

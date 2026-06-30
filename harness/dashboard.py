@@ -877,6 +877,9 @@ class App:
         for pid, col in palette.items():
             curses.init_pair(pid, col, -1)
         curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        # pair 8: the panel's vitals readout bar — bold white on blue (a classic statusline). High,
+        # reliable contrast in any colour depth; distinct from white (focus) and cyan (band headers).
+        curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_BLUE)
 
     def _cp(self, n):
         return curses.color_pair(n) if self.has_color else 0
