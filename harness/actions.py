@@ -41,7 +41,7 @@ _MENU = {
     "cancel": ("cancel", True, ""),
     "to_ready": ("→ ready", False, ""),
     "open_pr": ("open PR", False, "o"),
-    "scope": ("send to lead → scope", False, ""),
+    "scope": ("scope (→ needs_scoping)", False, ""),
 }
 
 
@@ -155,7 +155,7 @@ def action_command(action_id, task):
     if action_id == "undefer":
         return ["task", "set", tid, "--status", "backlog"]
     if action_id == "scope":
-        return ["handoff", tid, "lead"]      # hand to the lead → its first handled status (needs_scoping)
+        return ["task", "set", tid, "--status", "needs_scoping"]   # whoever owns needs_scoping scopes it
     if action_id == "cancel_run":
         return ["cancel", task.get("project")]
     # set_priority, handoff, edit_title, new, open_pr, unknown → interactive/None

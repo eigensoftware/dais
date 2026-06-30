@@ -96,17 +96,28 @@ def lint_project(root, project):
     if not os.path.exists(os.path.join(root, "projects", project, "CONTEXT.md")):
         warnings.append("no CONTEXT.md (agents read it first for project memory)")
 
-    # 1) THE invariant: each reactive status maps to exactly one role. Two roles claiming the
-    #    same status means only the lowest-prec one ever runs; the other is silently starved.
-    by_status = {}
+    # 1) THE invariant: each reactive status maps to exactly one role. Two REACTIVE roles claiming the
+    #    same status means only the lowest-prec one ever runs; the other is silently starved → error.
+    reactive_by_status = {}
     for r in roles:
         if r["trigger"] == "reactive":
             for s in r["handles"]:
-                by_status.setdefault(s, []).append(r["name"])
-    for s, names in sorted(by_status.items()):
+                reactive_by_status.setdefault(s, []).append(r["name"])
+    for s, names in sorted(reactive_by_status.items()):
         if len(names) > 1:
             errors.append("status '%s' is handled by multiple reactive roles %s — only the "
                           "lowest-precedence one runs; the rest are silently starved" % (s, names))
+    # ...and catch the case the reactive-only check misses: a status owned by 2+ roles when a CADENCE
+    # role is involved (e.g. the lead). The router won't error, but the stage is ambiguously double-
+    # handled — warn so it's never silent.
+    all_by_status = {}
+    for r in roles:
+        for s in r["handles"]:
+            all_by_status.setdefault(s, []).append(r["name"])
+    for s, names in sorted(all_by_status.items()):
+        if len(names) > 1 and len(reactive_by_status.get(s, [])) <= 1:
+            warnings.append("status '%s' is claimed by multiple roles %s (mixed triggers) — a stage "
+                            "should have ONE owner; routing/handoff is ambiguous" % (s, names))
 
     # 2) field sanity (warn, don't fail — the router already degrades safely)
     for r in roles:

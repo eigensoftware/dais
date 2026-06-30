@@ -425,6 +425,16 @@ class TestPanelWorkRows(unittest.TestCase):
         gate = next(r for r in rows if r["kind"] == "band" and "NEEDS YOU" in r["label"])
         self.assertFalse(gate.get("empty"))
 
+    def test_unknown_status_is_auto_surfaced_as_its_own_band(self):
+        # a custom status with no hardcoded band (e.g. needs_design) still shows — no panel change
+        snap = self._snap(self._proj("x", needs_design=2))
+        rows = pn.panel_work_rows(snap)
+        band = next((r for r in rows if r["kind"] == "band" and "NEEDS DESIGN" in r["label"]), None)
+        self.assertIsNotNone(band, "custom status not surfaced as a band")
+        self.assertIn("NEEDS DESIGN · 2", band["label"])
+        self.assertEqual(sum(1 for r in rows if r["kind"] == "task"
+                             and r["status"] == "needs_design"), 2)
+
     def test_scoping_band_shows_needs_scoping_tasks(self):
         # a task handed to the lead (needs_scoping) appears in its own SCOPING band, tagged SCOPE
         snap = self._snap(self._proj("x", needs_scoping=2))

@@ -317,8 +317,10 @@ class TestActionCommand(unittest.TestCase):
     def test_start(self):
         self.assertEqual(a.action_command("start", SAMPLE), ["start", "cou-9"])
 
-    def test_scope_hands_to_lead(self):
-        self.assertEqual(a.action_command("scope", SAMPLE), ["handoff", "cou-9", "lead"])
+    def test_scope_sets_needs_scoping(self):
+        # name-agnostic: scope sets the needs_scoping status; whatever role owns it picks it up
+        self.assertEqual(a.action_command("scope", SAMPLE),
+                         ["task", "set", "cou-9", "--status", "needs_scoping"])
 
     def test_backlog_offers_scope(self):
         ids = [act.id for act in a.task_actions("backlog")]

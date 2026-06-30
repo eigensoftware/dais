@@ -774,6 +774,19 @@ def panel_work_rows(snap, *, project=None, expanded=False):
     for proj, t in loop:
         rows.append(_task_row(proj, t, t.status))
 
+    # OTHER STAGES — any custom status not covered by a band above (e.g. a project that adds a
+    # `needs_design` stage) is auto-surfaced as its own band, so adding a status needs no panel change.
+    known = ({"doing"} | set(d.GATE_ORDER) | set(_SCOPING_STATUSES) | set(_LOOP_STATUSES)
+             | set(_BACKLOG_STATUSES) | set(_DEFERRED_STATUSES) | set(_ARCHIVE_STATUSES))
+    present = {st for p in projects for st, ts in p.tasks_by_status.items() if ts}
+    for st in sorted(present - known):
+        extra = tasks_in([st])
+        if not extra:
+            continue
+        add_band(st.upper().replace("_", " "), len(extra))
+        for proj, t in extra:
+            rows.append(_task_row(proj, t, t.status))
+
     # BACKLOG — the queue-able pool, always visible so you can pull from it (a promotes -> ready)
     backlog = tasks_in(_BACKLOG_STATUSES)
     add_band("BACKLOG", len(backlog))
