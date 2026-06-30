@@ -88,7 +88,7 @@ key; `?` opens the full map. Case is literal: a **capital** letter means Shift (
   ship …) · `x` reverse (defer / cancel / reject …) · `s` scope · `h` handoff · `e` edit title ·
   `+`/`-` priority · `o` open PR · `n` new task · `↵` action menu (the same keys, listed).
 - **Loop / run** (act on the selected row's project): `w` start/stop watch · `R` run a role now ·
-  `t` tick once · `p` pause/resume · `c` cancel the running agent.
+  `t` tick once · `p` pause/resume · `c` cancel the running agent · `D` deploy (confirms).
 - **Views:** `r` runs history (every completed run, incl. task-less) · `l` log pager · `L` live log
   wall (all running agents) · `q` quit (confirms).
 
@@ -117,6 +117,12 @@ built) and the back-door deliverable gate — **`ready_to_merge`** (a QA-approve
 **`needs_review`** (a finished non-code deliverable you review and close). **Dependencies:**
 `dais task set <id> --depends-on <other>` keeps a task out of the queue until its predecessor is
 done — the scheduler skips it and the panel marks it `⛓`.
+
+**Deploy** is a third gate for projects where **merge ≠ deploy** (e.g. an auto-merge project that
+deploys manually). Set a `deploy:` command in `project.yaml` (any shell — ssh pull, `fly deploy`,
+a script) and `dais deploy <project>` (or `D` in the panel) runs it founder-gated, logs it as a run,
+and records what went live. The panel shows a yellow **⬆ N DEPLOY** when `main` has merged commits
+that aren't deployed yet. Projects where merge *is* the deploy (e.g. beacon) simply set no `deploy:`.
 
 ## Playbooks: running any craft
 
@@ -162,6 +168,7 @@ A role's `handles` is reactive ownership: a cadence role (e.g. a `lead` on `ever
 | `dais handoff <id> <role>` | hand a task to a role (sets the status that role handles) |
 | `dais approve <id>` | approve a `proposed` initiative → `ready` |
 | `dais ship <project> <pr#>` | QA-gated, migration-aware squash-merge (founder gate) |
+| `dais deploy <project>` | run the project's `deploy:` command — the gate after merge (founder gate) |
 | `dais scaffold <project>` | create a new project from the template |
 | `dais role new <project> --desc "…"` | Claude designs a new role (persona + routing); you confirm |
 | `dais lint [project]` | validate a project (roles + project.yaml + playbooks + required files) |
@@ -188,7 +195,7 @@ harness/
 ```
 
 In a workspace, each project lives under `projects/<name>/`:
-`project.yaml` (repo, model, stage goal, optional `playbook:` default), `roles` (who exists +
+`project.yaml` (repo, model, stage goal, optional `playbook:` default + `deploy:` command), `roles` (who exists +
 how scheduled + each role's playbook), `agents/*.md` (role personas), `CONTEXT.md` (project
 memory agents read first), and optional `playbooks/` (project-specific craft overrides).
 
