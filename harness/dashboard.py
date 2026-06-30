@@ -1639,18 +1639,28 @@ class App:
         self.flash = (f"added task in {proj}" if rc == 0 else f"add failed (exit {rc})")
 
     def _prompt(self, label):
-        """Read a single line in the footer (esc cancels → ''). Curses-simple, mirrors
-        the `/` filter input loop."""
+        """Read a line in the footer (esc cancels → ''). WRAPS onto multiple rows that grow upward,
+        so a long title stays fully visible instead of scrolling off the right edge. The trailing
+        '_' is the cursor (and keeps wrap_cols from rstrip-ing a real trailing space)."""
         buf = ""
         self.scr.timeout(-1)
         try:
             curses.curs_set(1)
         except curses.error:
             pass
+        used = 1
         while True:
             h, w = self.scr.getmaxyx()
-            _add(self.scr, h - 1, 0, pad_cols(f"  {label}: {buf}_", w - 1), w,
-                 curses.A_REVERSE | curses.A_BOLD)
+            bw = max(1, w - 1)
+            lines = wrap_cols(f"  {label}: {buf}_", bw)
+            lines = lines[-max(1, h - 1):]               # never taller than the screen; keep the tail
+            used = max(used, len(lines))
+            for i in range(used):                        # clear the region the prompt has ever used
+                _add(self.scr, h - used + i, 0, pad_cols("", bw), w, 0)
+            y0 = h - len(lines)                          # bottom-anchored, growing upward
+            for i, ln in enumerate(lines):
+                _add(self.scr, y0 + i, 0, pad_cols(ln, bw), w,
+                     curses.A_REVERSE | curses.A_BOLD)
             self.scr.refresh()
             ch = self.scr.getch()
             if ch in (10, 13):               # enter — accept

@@ -635,3 +635,28 @@ class TestGateBannerHeaderConsistency(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPromptWrapping(unittest.TestCase):
+    """The footer prompt wraps a long title onto multiple rows (grows upward) so you can see the
+    whole thing while typing, instead of it scrolling off the right edge."""
+
+    def test_long_title_is_fully_captured(self):
+        app = make_app(h=24, w=40)
+        title = "buy milk and " * 8 + "done"          # ~108 cols, far wider than 40
+        app.scr._keys = [ord(c) for c in title] + [10]  # type it, then enter
+        got = app._prompt("new task title")
+        self.assertEqual(got, title)                    # full title, not clipped to one row
+
+    def test_long_title_wraps_to_multiple_rows(self):
+        app = make_app(h=24, w=40)
+        app.scr._keys = [ord("x")] * 90 + [10]
+        app._prompt("new task title")
+        rows_drawn = {c[0] for c in app.scr.calls}      # distinct y coordinates written
+        self.assertGreater(len(rows_drawn), 1)          # it used more than the single footer row
+
+    def test_short_title_stays_one_row(self):
+        app = make_app(h=24, w=80)
+        app.scr._keys = [ord(c) for c in "quick"] + [10]
+        got = app._prompt("title")
+        self.assertEqual(got, "quick")
