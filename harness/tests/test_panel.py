@@ -1116,3 +1116,56 @@ class TestRailNeedsYouChip(unittest.TestCase):
         self.assertEqual(chips[0][3], 4000 | curses.A_BOLD)     # bold yellow (_cp(4)), not the name hue
         name_calls = [c for c in scr.calls if "alpha" in c[2] and "!1" not in c[2]]
         self.assertTrue(name_calls)                             # chip is a SEPARATE _add from the name
+
+
+class TestFeedTicker(unittest.TestCase):
+    def _papp(self, runs):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-feed-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
+        papp.snap = d.Snapshot(projects=[], recent_runs=runs, cap_state=False,
+                               ts="2026-06-29 16:00:00", workspace="eigen")
+        papp._cp = lambda n: n * 1000          # make color pairs identifiable by value
+        return papp
+
+    def _run(self, hhmm, project, agent, status):
+        # load_snapshot stores agent pre-combined as 'project/agent'; mirror that here
+        return d.Run(started_at=f"2026-06-29 {hhmm}:00", agent=f"{project}/{agent}",
+                     status=status, project=project)
+
+    def test_feed_shows_recent_runs_newest_first(self):
+        papp = self._papp([self._run("23:00", "cedar", "qa", "succeeded"),
+                           self._run("22:00", "acme", "lead", "running")])
+        scr = FakeScr(40, 200)
+        pn.render_feed(scr, pn.Rect(38, 0, 1, 200), papp)
+        text = "".join(c[2] for c in scr.calls)
+        self.assertIn("FEED", text)
+        self.assertIn("cedar/qa", text)
+        self.assertIn("acme/lead", text)
+        self.assertLess(text.index("cedar/qa"), text.index("acme/lead"))   # newest first
+
+    def test_feed_colors_results_by_palette(self):
+        papp = self._papp([self._run("23:00", "p", "qa", "succeeded"),
+                           self._run("22:00", "p", "eng", "failed")])
+        scr = FakeScr(40, 200)
+        pn.render_feed(scr, pn.Rect(38, 0, 1, 200), papp)
+        succ = next(c for c in scr.calls if "succeeded" in c[2])
+        fail = next(c for c in scr.calls if "failed" in c[2])
+        self.assertEqual(succ[3], 1000)            # _cp(1) green = good/live
+        self.assertEqual(fail[3], 2000)            # _cp(2) red = bad
+
+    def test_feed_empty_state(self):
+        papp = self._papp([])
+        scr = FakeScr(40, 200)
+        pn.render_feed(scr, pn.Rect(38, 0, 1, 200), papp)
+        self.assertIn("no recent runs", "".join(c[2] for c in scr.calls))
+
+    def test_feed_clips_within_rect(self):
+        runs = [self._run("23:00", f"project-{i}", "agent", "succeeded") for i in range(20)]
+        papp = self._papp(runs)
+        scr = FakeScr(40, 60)
+        pn.render_feed(scr, pn.Rect(38, 0, 1, 60), papp)
+        for (y, x, s, _a) in scr.calls:
+            self.assertEqual(y, 38)
+            self.assertLessEqual(pn.disp_width(s), 60 - x)   # nothing escapes the rect

@@ -337,10 +337,40 @@ def render_rail(scr, rect, app, focused):
                  inner.x + inner.w, attr)
 
 
+def _feed_attr(app, status):
+    """Activity-ticker color by run result, consistent with the panel palette."""
+    if status == "succeeded":
+        return app._cp(_LIVE)
+    if status in ("failed", "capped"):
+        return app._cp(_BAD)
+    if status == "interrupted":
+        return app._cp(_NEEDS_YOU)
+    if status == "running":
+        return app._cp(_LIVE) | curses.A_BOLD
+    return 0
+
+
 def render_feed(scr, rect, app):
-    """Phase-A placeholder line; the real activity feed lands in the feed/vitals phase."""
-    _add(scr, rect.y, rect.x, pad_cols(" FEED  (activity ticker — coming next phase)",
-         rect.w), rect.x + rect.w, curses.A_DIM)
+    """One-line activity ticker: the most recent agent runs across the org (newest first), each
+    colored by result. Straight from snap.recent_runs — honest, no fabrication."""
+    runs = app.snap.recent_runs if app.snap else []
+    x, end = rect.x, rect.x + rect.w
+    label = " FEED  "
+    _add(scr, rect.y, x, label, end, curses.A_DIM)
+    x += disp_width(label)
+    if not runs:
+        _add(scr, rect.y, x, clip_cols("(no recent runs)", end - x), end, curses.A_DIM)
+        return
+    for i, r in enumerate(runs):
+        if x >= end:
+            break
+        seg = f"{d.to_local_hhmm(r.started_at)} {r.agent} {r.status}"   # r.agent is already 'project/agent'
+        sep = "  ·  " if i < len(runs) - 1 else ""
+        text = clip_cols(seg + sep, end - x)
+        if not text:
+            break
+        _add(scr, rect.y, x, text, end, _feed_attr(app, r.status))
+        x += disp_width(text)
 
 
 def render_logwall(scr, rect, app):
