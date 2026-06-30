@@ -180,8 +180,13 @@ def render_work(scr, rect, app, focused):
             _add(scr, y, inner.x, clip_cols(r["label"], inner.w), inner.x + inner.w,
                  curses.A_DIM)
             continue
-        # task / running row: TAG  id  project  title
         selected = (base + idx) == sel_i and focused
+        if r["kind"] == "deploy":                            # an awaiting-deploy commit — selectable
+            attr = (curses.A_REVERSE | curses.A_BOLD) if selected else app._cp(_NEEDS_YOU)
+            _add(scr, y, inner.x, pad_cols(clip_cols(r["label"], inner.w), inner.w),
+                 inner.x + inner.w, attr)
+            continue
+        # task / running row: TAG  id  project  title
         if r["kind"] == "running":
             tag, tid, proj = "RUN", (r.get("task_id") or "—"), r["project"]
             title = f"{r.get('agent','')}"
@@ -355,6 +360,27 @@ def render_inspector_live_log(scr, inner, app, sel_row):
         _add(scr, y + i, inner.x, clip_cols(txt, inner.w), inner.x + inner.w, a)
 
 
+def _deploy_detail_lines(app, sel_row):
+    """Inspector detail for a selected AWAITING-DEPLOY commit: header (sha · project), subject, then
+    the commit's author/date/message + changed-file stat from `git show` — so you can inspect exactly
+    what each pending commit does before shipping."""
+    proj, sha = sel_row.get("project"), sel_row.get("sha")
+    out = [f"{sha}  {proj}", f'"{sel_row.get("subject", "")}"', "",
+           f"⬆ awaiting deploy — press D to ship {proj}", ""]
+    repo = d.project_field(app.root, proj, "repo")
+    if repo and sha:
+        try:
+            r = d.subprocess.run(
+                ["git", "-C", d.os.path.expanduser(repo), "show", "--stat",
+                 "--format=%an · %ad%n%n%B", "--date=short", sha],
+                capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                out += r.stdout.splitlines()[:60]
+        except Exception:
+            pass
+    return out
+
+
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
     Running selections stream their live log (render_inspector_live_log) instead of task detail."""
@@ -366,7 +392,10 @@ def render_inspector(scr, rect, app, focused):
     if sel_row and sel_row.get("kind") == "running":
         render_inspector_live_log(scr, inner, app, sel_row)
         return
-    lines = _panel_detail_lines(app, sel_row)
+    if sel_row and sel_row.get("kind") == "deploy":
+        lines = _deploy_detail_lines(app, sel_row)
+    else:
+        lines = _panel_detail_lines(app, sel_row)
     wrapped = []
     for ln in lines:
         if disp_width(ln) <= inner.w:
@@ -988,7 +1017,8 @@ def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
         add_band("AWAITING DEPLOY" + ("  ⚠ migration" if mig else ""), total)
         for p in dep_projs:
             for sha7, subj in (p.deploy_commits or []):
-                rows.append({"kind": "info", "id": f"__deploy::{p.name}::{sha7}", "sel": False,
+                rows.append({"kind": "deploy", "id": f"__deploy::{p.name}::{sha7}", "sel": True,
+                             "project": p.name, "sha": sha7, "subject": subj,
                              "label": f"  SHIP    {sha7:<8} {p.name[:11]:<11} {subj}"})
         checks = [p.deploy_checked_at for p in dep_projs if p.deploy_checked_at]
         if checks:

@@ -2028,3 +2028,45 @@ class TestAutoDeployCheck(unittest.TestCase):
         papp = self._papp(deployed_rev=True)
         papp.refresh(); papp.refresh()                       # second refresh is throttled
         self.assertEqual(papp._spawned.count(["deploy", "cedar", "--check"]), 1)
+
+
+class TestDeployRowSelectable(unittest.TestCase):
+    """Awaiting-deploy commits are selectable rows (kind='deploy'), and the inspector shows the
+    commit's details — so you can inspect what each pending commit does before shipping."""
+
+    def _snap(self):
+        p = d.Project(name="cedar", stage_goal="", deploy_configured=True, deploy_needs=True,
+                      deploy_checked_at="2026-06-30 15:00:00",
+                      deploy_commits=[("abc1234", "win-95: split the vault"),
+                                      ("def5678", "win-71: merge people")])
+        return d.Snapshot(projects=[p], recent_runs=[], cap_state=False,
+                          ts="2026-06-30 16:00:00", workspace="e")
+
+    def test_deploy_rows_are_selectable(self):
+        rows = pn.panel_work_rows(self._snap(), expanded=True)
+        deps = [r for r in rows if r.get("kind") == "deploy"]
+        self.assertEqual(len(deps), 2)
+        for r in deps:
+            self.assertTrue(r.get("sel"))                    # selectable (was the bug: info/sel=False)
+            self.assertEqual(r["project"], "cedar")
+            self.assertTrue(r["sha"] and r["subject"])
+
+    def test_band_has_a_leading_spacer(self):
+        rows = pn.panel_work_rows(self._snap(), expanded=True)
+        i = next(i for i, r in enumerate(rows) if r["kind"] == "band" and "AWAITING DEPLOY" in r["label"])
+        self.assertEqual(rows[i - 1]["kind"], "spacer")      # consistent section spacing
+
+    def test_inspector_shows_commit_header(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-dsel-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
+        papp.snap = self._snap()
+        dep = next(r for r in papp.left_rows() if r.get("kind") == "deploy" and r["sha"] == "abc1234")
+        papp.sel_id = dep["id"]
+        scr = FakeScr(40, 200)
+        pn.render_inspector(scr, pn.Rect(1, 0, 30, 120), papp, focused=False)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("abc1234", text)
+        self.assertIn("win-95: split the vault", text)       # the subject
+        self.assertIn("awaiting deploy", text)               # the action hint
