@@ -238,8 +238,16 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
     now = now or utc_now()
     projects = []
     dep = ",blocked_on" if _has_column(conn, "tasks", "blocked_on") else ""
-    names = [r["project"] for r in conn.execute(
-        "SELECT DISTINCT project FROM tasks ORDER BY project")]
+    # Projects to render = those configured on disk (a dir under projects/ with a `roles` file —
+    # the same test the router and linter use) UNIONed with any project referenced by a task. The
+    # union keeps a configured-but-taskless project visible in the panel, and still surfaces an
+    # "orphaned" project whose directory was removed but whose tasks linger on the board.
+    pdir = os.path.join(root, "projects")
+    on_disk = ([d for d in os.listdir(pdir)
+                if os.path.exists(os.path.join(pdir, d, "roles"))]
+               if os.path.isdir(pdir) else [])
+    tasked = [r["project"] for r in conn.execute("SELECT DISTINCT project FROM tasks")]
+    names = sorted(set(on_disk) | set(tasked))
     for name in names:
         rows = conn.execute(
             "SELECT id,title,status,priority,assignee,pr_url,notes,updated_at" + dep + " FROM tasks "
