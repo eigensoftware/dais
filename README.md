@@ -88,9 +88,12 @@ key; `?` opens the full map. Case is literal: a **capital** letter means Shift (
   ship …) · `x` reverse (defer / cancel / reject …) · `s` scope · `h` handoff · `e` edit title ·
   `+`/`-` priority · `o` open PR · `n` new task · `↵` action menu (the same keys, listed).
 - **Loop / run** (act on the selected row's project): `w` start/stop watch · `R` run a role now ·
-  `t` tick once · `p` pause/resume · `c` cancel the running agent · `D` deploy (confirms).
-- **Views:** `r` runs history (every completed run, incl. task-less) · `l` log pager · `L` live log
-  wall (all running agents) · `q` quit (confirms).
+  `t` tick once · `p` pause/resume · `c` cancel the running agent · `D` deploy (confirms) · `F` file
+  a fix task for a failed deploy.
+- **Views:** `r` runs history (every completed run, incl. task-less — `j`/`k` to a run, `l`/`↵` opens
+  its saved log) · `l` log pager · `L` live log wall (all running agents).
+- **Everywhere:** `q` quits (asks to confirm) from any screen; `esc` backs out of a view/overlay one
+  level. `q` never just closes a screen — it always quits.
 
 **Manual vs. the loop.** `dais watch` is the continuous auto-dispatcher (it's what `PAUSED` refers
 to). `a start`, `R`, and `t` are **on-demand** runs that fire one agent now and **bypass pause** — so
@@ -126,10 +129,16 @@ when a pending commit touches a migration; deploys are always manual, never auto
 
 **"Needs deploy?" is the truth, not a guess.** Set `deployed_rev:` — a command that prints what SHA
 the *server* is running (e.g. `ssh … git rev-parse --short HEAD`). dais compares prod ↔ `main` and
-shows **⬆ DEPLOY** (yes/no) plus an **AWAITING DEPLOY** list of the exact commits that would ship —
-so you never have to know prod's state yourself. The panel refreshes that check in the background
-(`dais deploy <p> --check` caches it); a successful deploy updates the cache. Projects where merge
-*is* the deploy (e.g. beacon) simply set no `deploy:`.
+shows **⬆ DEPLOY** (yes/no) plus an **AWAITING DEPLOY** band listing the exact commits that would
+ship (select one for its full detail in the inspector) — so you never have to know prod's state
+yourself. The panel refreshes that check in the background (`dais deploy <p> --check` caches it); a
+successful deploy updates the cache. Projects where merge *is* the deploy (e.g. beacon) set no
+`deploy:`.
+
+Every deploy is **logged like a run** (full output saved under `projects/<p>/logs/`, openable from
+the runs view). A failed deploy is surfaced loudly in the band (`⚠ last deploy FAILED …`) and leaves
+prod behind, so it can't be missed; **`F`** files a fix task from it (founder-initiated — deploy
+failures are often transient/ops, so nothing is auto-created).
 
 ## Playbooks: running any craft
 
