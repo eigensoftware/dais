@@ -137,6 +137,9 @@ class Project:
     running: list = field(default_factory=list)
     tasks_by_status: dict = field(default_factory=dict)
     recent_runs: list = field(default_factory=list)
+    deploy_configured: bool = False   # project.yaml has a deploy: command
+    deploy_pending: int = None        # commits on origin/main since the last deploy (None = unknown)
+    last_deploy: str = None           # ended_at of the last successful deploy run
 
 
 @dataclass
@@ -191,16 +194,22 @@ def running_agents(project_dir, is_alive=_pid_alive):
     return sorted(out)
 
 
-def stage_goal(root, name):
+def project_field(root, name, key):
+    """First-line value of `key:` from a project's project.yaml ('' if absent). Line-based, matching
+    the bash `pcfg` reader — used for stage_goal, deploy, etc."""
     path = os.path.join(root, "projects", name, "project.yaml")
     try:
         with open(path) as fh:
             for line in fh:
-                if line.startswith("stage_goal:"):
+                if line.startswith(key + ":"):
                     return line.split(":", 1)[1].strip()
     except OSError:
         pass
     return ""
+
+
+def stage_goal(root, name):
+    return project_field(root, name, "stage_goal")
 
 
 def workspace_name(home=HOME):
@@ -253,9 +262,11 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 "AND status='running' ORDER BY id DESC LIMIT 1",
                 (name, agent)).fetchone()
             running.append((agent, since["started_at"] if since else None))
+        dcfg, dpending, dlast = deploy_state(root, name, conn)
         projects.append(Project(name=name, stage_goal=stage_goal(root, name),
                                 running=running, tasks_by_status=by_status,
-                                recent_runs=proj_runs))
+                                recent_runs=proj_runs, deploy_configured=dcfg,
+                                deploy_pending=dpending, last_deploy=dlast))
     # resolve dependencies once across ALL projects (a predecessor may live in another project):
     # a task is blocked when its predecessor exists and isn't done/cancelled. A dangling ref
     # (predecessor missing) is treated as unblocked so a deleted prerequisite never strands work.
@@ -280,6 +291,39 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
         "AND started_at > datetime(?, '-90 minutes')", (now,)).fetchone()["c"]
     return Snapshot(projects=projects, recent_runs=recent_runs,
                     cap_state=capped > 0, ts=now, workspace=workspace_name(root))
+
+
+def _deploy_pending(repo, sha):
+    """How many commits are on origin/main ahead of `sha` (the last-deployed commit), or None if it
+    can't be told. Local git only — origin/main is kept current by agents' `git fetch` on each run,
+    so this needs no network in the refresh loop."""
+    if not (repo and sha and sha != "?"):
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "-C", os.path.expanduser(repo), "rev-list", "--count", "%s..origin/main" % sha],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip().isdigit():
+            return int(out.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def deploy_state(root, project, conn):
+    """(configured, pending, last_deploy_ts) for a project: whether it declares a deploy: command,
+    how many merged commits are still un-deployed (origin/main since the last recorded deploy SHA),
+    and when it last deployed. The deploy SHA is parsed from the latest succeeded deploy run's summary."""
+    if not project_field(root, project, "deploy"):
+        return (False, None, None)
+    row = conn.execute(
+        "SELECT summary, ended_at FROM runs WHERE project=? AND agent='deploy' "
+        "AND status='succeeded' ORDER BY id DESC LIMIT 1", (project,)).fetchone()
+    sha, last_ts = "", (row["ended_at"] if row else None)
+    if row and row["summary"]:
+        m = re.search(r"deployed (\S+)", row["summary"])
+        sha = m.group(1) if m else ""
+    return (True, _deploy_pending(project_field(root, project, "repo"), sha), last_ts)
 
 
 def load_runs(conn, limit=200):
@@ -568,27 +612,28 @@ _INFLIGHT_ORDER = ["doing", "needs_qa", "changes_requested", "needs_review"]
 
 
 def _agent_handles(root, project, agent):
-    """The statuses a role handles, from the project's roles file ([] if unreadable). Guides the
-    running-task guess so an ENGINEER run isn't labeled as QA's needs_qa or the lead's needs_scoping."""
+    """The statuses a role handles, from the project's roles file. Returns [] for a role with no
+    handles, or None when the agent isn't a role at all (e.g. 'deploy') so the caller treats it as
+    task-less. Guides the running-task guess so an engineer run isn't labeled as QA's/the lead's task."""
     try:
         roles, _ = router.parse_roles(os.path.join(root, "projects", project, "roles"))
     except Exception:
-        return []
+        return None
     for r in roles:
         if r["name"] == agent:
             return r["handles"]
-    return []
+    return None
 
 
 def running_task_id(project, statuses=None):
     """Best guess at the task a running agent is working, or '' (the live log is the real signal).
     With `statuses` (the running role's handled statuses), guess only among 'doing' + those — so an
-    engineer run shows its doing/ready task, never QA's needs_qa or the lead's needs_scoping. Without
-    it, fall back to the generic in-flight → ready → needs_scoping order."""
-    if statuses:
-        order = ["doing"] + [s for s in statuses if s != "doing"]
-    else:
+    engineer run shows its doing/ready task, never QA's needs_qa or the lead's needs_scoping. With
+    `statuses=None`, fall back to the generic in-flight → ready → needs_scoping order."""
+    if statuses is None:
         order = _INFLIGHT_ORDER + ["ready", "needs_scoping"]
+    else:
+        order = ["doing"] + [s for s in statuses if s != "doing"]
     for st in order:
         tasks = project.tasks_by_status.get(st)
         if tasks:
@@ -598,14 +643,22 @@ def running_task_id(project, statuses=None):
 
 def running_threads(snap, now=None, root=HOME):
     """Every concurrent agent across all projects -> dicts for the RUNNING band. The task each agent
-    is on is guessed agent-awarely (from the role's handled statuses) so it isn't mislabeled."""
+    is on is guessed agent-awarely (from the role's handled statuses) so it isn't mislabeled; a
+    non-role runner like 'deploy' is task-less."""
     now = now or utc_now()
     out = []
     for p in snap.projects:
         live_log = (p.recent_runs[0].log_path
                     if p.recent_runs and p.recent_runs[0].status == "running" else None)
+        roles_exist = os.path.exists(os.path.join(root, "projects", p.name, "roles"))
         for agent, since in p.running:
-            task = running_task_id(p, _agent_handles(root, p.name, agent))
+            handles = _agent_handles(root, p.name, agent)
+            if handles is not None:                  # a known role → agent-aware guess
+                task = running_task_id(p, handles)
+            elif roles_exist:                        # roles file present, agent absent → non-role (deploy) → task-less
+                task = ""
+            else:                                    # no roles file at all → generic fallback guess
+                task = running_task_id(p)
             out.append(dict(project=p.name, agent=agent, since=since,
                             secs=seconds_between(since, now),
                             task=task, log_path=live_log))
@@ -1439,6 +1492,21 @@ class App:
         subprocess.call([self._dais(), "cancel", proj])
         self.flash = f"cancelled {proj}"
 
+    def deploy_project(self, proj):
+        """Founder-gate: run the project's `deploy:` command (project.yaml). Outward → confirm first,
+        then launch detached so it streams to the run log + shows in RUNNING (the third gate after
+        build → merge, for merge≠deploy projects). No deploy: configured → say so, don't pretend."""
+        if not proj:
+            self.flash = "select a project to deploy"
+            return
+        if not project_field(self.root, proj, "deploy"):
+            self.flash = f"{proj} has no deploy: command (set one in project.yaml)"
+            return
+        if not self._confirm(f"deploy {proj}? (this goes LIVE)"):
+            return
+        if self._spawn_agent(["deploy", proj]):
+            self.flash = f"deploying {proj} …"
+
     # ---- the action engine (contextual bar + shared dispatcher) ----
     def _row_kind(self, row):
         """The engine's kind for a left row: 'project' | 'running' | 'task' (None for
@@ -1781,6 +1849,8 @@ class App:
             self.run_role(sel_row["project"] if sel_row else None)
         elif ch == ord("c"):
             self.cancel_run(sel_row["project"] if sel_row else None)
+        elif ch == ord("D"):                 # deploy the selected row's project (founder gate)
+            self.deploy_project(sel_row["project"] if sel_row else None)
         elif 32 <= ch < 127 and (act := next(
                 (a for a in self._row_actions(sel_row) if a.key == chr(ch)), None)):
             self.do_action(act.id, sel_row)  # any contextual action by its key (a/x/o/s/h/e …)

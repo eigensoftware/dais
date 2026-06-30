@@ -781,3 +781,40 @@ class TestStartVerb(CliTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDeploy(unittest.TestCase):
+    """`dais deploy <project>` runs the project's deploy: command (any shell), logs it as a run
+    (agent='deploy') so it shows in the FEED/history, and reports success/failure."""
+
+    def setUp(self):
+        self.root = make_sandbox()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def _project(self, deploy_line):
+        d = os.path.join(self.root, "projects", "app")
+        os.makedirs(os.path.join(d, "logs"), exist_ok=True)
+        with open(os.path.join(d, "project.yaml"), "w") as f:
+            f.write("project: app\nrepo: %s\nstage_goal: x\n%s\n" % (self.root, deploy_line))
+
+    def test_deploy_runs_command_and_logs_succeeded_run(self):
+        self._project("deploy: echo DEPLOYED-OK")
+        r = dais(self.root, "deploy", "app")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("DEPLOYED-OK", r.stdout)                 # the project's command actually ran
+        row = q(self.root, "SELECT agent, status FROM runs WHERE project='app' ORDER BY id DESC LIMIT 1")
+        self.assertEqual(row[0], "deploy")
+        self.assertEqual(row[1], "succeeded")
+
+    def test_deploy_without_command_errors(self):
+        self._project("# no deploy here")
+        r = dais(self.root, "deploy", "app")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no 'deploy:'", r.stdout + r.stderr)
+
+    def test_deploy_failure_records_failed_run(self):
+        self._project("deploy: exit 3")
+        r = dais(self.root, "deploy", "app")
+        self.assertNotEqual(r.returncode, 0)
+        row = q(self.root, "SELECT status FROM runs WHERE project='app' ORDER BY id DESC LIMIT 1")
+        self.assertEqual(row[0], "failed")

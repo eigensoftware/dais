@@ -408,13 +408,15 @@ def render_vitals(scr, rect, app):
     pf = getattr(app, "project_filter", None)
     proj_seg = " · all projects" if pf is None else f" · {pf}"
     ident = f" DAIS {_BRAND} {ws}" if ws else " DAIS"     # honesty comes from the watch badge, not a literal "LIVE"
+    n_deploy = sum(1 for p in (snap.projects if snap else []) if (p.deploy_pending or 0) > 0)
     run_dot = _DOT_RUN if threads else _DOT_IDLE
     run_tok = f"{run_dot} {len(threads)} running"
     gate_tok = f"{_DOT_GATE} {ng} NEED YOU" if ng > 0 else f"{_DOT_IDLE} {ng} need you"
+    deploy_tok = f" · ⬆ {n_deploy} DEPLOY" if n_deploy else ""   # merged-but-not-deployed: a founder gate
     pre = ident + "   "
     sep = " · "                                            # between the two hero tokens
     ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}  {clk}"
-    line = pre + run_tok + sep + gate_tok + ctx
+    line = pre + run_tok + sep + gate_tok + deploy_tok + ctx
     bar = app._cp(_VITALS) | curses.A_BOLD                 # the readout's own bar (bold white on blue)
     _add(scr, rect.y, rect.x, pad_cols(line, rect.w), rect.x + rect.w, bar)
     if threads:                                            # the run token glows green while agents are live
@@ -422,6 +424,9 @@ def render_vitals(scr, rect, app):
              app._cp(_LIVE) | curses.A_REVERSE | curses.A_BOLD)
     if ng > 0:                                             # the gate token is the alarm: yellow hero
         _add(scr, rect.y, rect.x + disp_width(pre + run_tok + sep), gate_tok,
+             rect.x + rect.w, app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
+    if n_deploy:                                           # un-deployed merges also pull the eye yellow
+        _add(scr, rect.y, rect.x + disp_width(pre + run_tok + sep + gate_tok), deploy_tok,
              rect.x + rect.w, app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
 
 
@@ -614,7 +619,7 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    keys = ("w watch · R run · t tick · tab · / filter · g expand · L logs · r runs · "
+    keys = ("w watch · R run · t tick · D deploy · tab · / filter · g expand · L logs · r runs · "
             "? help · q quit")
     if getattr(app, "filtering", False):
         hint = f" /{app.filter}_  ·  {keys}"
@@ -645,6 +650,7 @@ _HELP_LINES = [
     "  t                 tick — run the project's next eligible agent once",
     "  p                 pause / resume the loop",
     "  c                 cancel the project's running agent",
+    "  D deploy          run the project's deploy: command — the gate after merge (asks to confirm)",
     "",
     "  ? help            this overlay (any key closes)",
     "  q                 quit (asks to confirm)",

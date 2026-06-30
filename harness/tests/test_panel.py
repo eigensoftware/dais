@@ -1726,7 +1726,7 @@ class TestRunningTaskGuess(unittest.TestCase):
             f.write("qa review reactive needs_qa 1\nengineer edit reactive changes_requested,ready 2\n")
         self.assertEqual(d._agent_handles(root, "p", "engineer"), ["changes_requested", "ready"])
         self.assertEqual(d._agent_handles(root, "p", "qa"), ["needs_qa"])
-        self.assertEqual(d._agent_handles(root, "p", "ghost"), [])      # unknown role → []
+        self.assertIsNone(d._agent_handles(root, "p", "ghost"))         # not a role → None (task-less)
 
 
 class TestInspectorLogWrapScroll(unittest.TestCase):
@@ -1856,3 +1856,63 @@ class TestOverlayPadding(unittest.TestCase):
         self.assertTrue(title.startswith("  "))              # 2-space left margin
         body = next(t for t in texts if "shipping" in t)
         self.assertTrue(body.startswith("  "))               # body indented too
+
+
+class TestDeployVitals(unittest.TestCase):
+    """The vitals strip shows a yellow ⬆ N DEPLOY token when projects have merged-but-undeployed work."""
+
+    def _papp(self, pending):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-dep-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
+        projs = [d.Project(name="cedar", stage_goal="", deploy_configured=True,
+                           deploy_pending=pending)]
+        papp.snap = d.Snapshot(projects=projs, recent_runs=[], cap_state=False,
+                               ts="2026-06-30 16:00:00", workspace="eigen")
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def test_deploy_token_shows_when_pending(self):
+        papp = self._papp(3)
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        text = "".join(c[2] for c in scr.calls)
+        self.assertIn("⬆ 1 DEPLOY", text)                       # 1 project has undeployed merges
+        tok = next(c for c in scr.calls if "DEPLOY" in c[2] and c[3] != (pn._VITALS * 1000 | curses.A_BOLD))
+        self.assertEqual(tok[3], 4000 | curses.A_REVERSE | curses.A_BOLD)   # yellow founder-gate hue
+
+    def test_no_token_when_nothing_pending(self):
+        papp = self._papp(0)
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        self.assertNotIn("DEPLOY", "".join(c[2] for c in scr.calls))
+
+
+class TestDeployState(unittest.TestCase):
+    """deploy_state: detects a deploy: command, parses the deployed SHA from the latest succeeded
+    deploy run, and reports the pending count (git is stubbed here — exercised live by the CLI)."""
+
+    def _root_conn(self, deploy_line):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-ds-")
+        os.makedirs(os.path.join(root, "projects", "app"))
+        with open(os.path.join(root, "projects", "app", "project.yaml"), "w") as f:
+            f.write("project: app\nrepo: /tmp/x\n%s\n" % deploy_line)
+        return root, _conn()
+
+    def test_no_deploy_configured(self):
+        root, conn = self._root_conn("# none")
+        self.assertEqual(d.deploy_state(root, "app", conn), (False, None, None))
+
+    def test_configured_parses_sha_and_time(self):
+        root, conn = self._root_conn("deploy: echo hi")
+        conn.execute("INSERT INTO runs(project,agent,status,summary,ended_at) "
+                     "VALUES('app','deploy','succeeded','deployed abc1234','2026-06-30 10:00:00')")
+        conn.commit()
+        with mock.patch.object(d, "_deploy_pending", return_value=5) as mp:
+            configured, pending, last = d.deploy_state(root, "app", conn)
+        self.assertTrue(configured)
+        self.assertEqual(pending, 5)
+        self.assertEqual(last, "2026-06-30 10:00:00")
+        mp.assert_called_once_with("/tmp/x", "abc1234")    # SHA parsed from the run summary

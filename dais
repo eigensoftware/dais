@@ -331,6 +331,40 @@ MD
     echo "▶ starting $proj/$role for $id ($st)…"
     exec "$DAIS_ROOT/harness/run-agent.sh" "$proj" "$role" ;;
 
+  deploy)
+    # founder-gate: run the project's own `deploy:` command (project.yaml) — the THIRD gate after
+    # build → merge, for projects where merge != deploy (e.g. cedar auto-merges but deploys
+    # manually). Domain-neutral: deploy: is any shell command (ssh pull, fly/vercel, a script, …).
+    # Logged as a run (agent='deploy') so it shows in the FEED / runs history + is cancellable; on
+    # success it records the deployed origin/main SHA in the summary so the panel can show how many
+    # merged commits are still un-deployed.
+    proj="${1:?usage: dais deploy <project>}"; pe="$(sqlesc "$proj")"
+    [ -d "$DAIS_HOME/projects/$proj" ] || { echo "no such project: $proj"; exit 1; }
+    cmd="$(pcfg "$proj" deploy)"
+    [ -n "$cmd" ] || { echo "deploy: no 'deploy:' command in projects/$proj/project.yaml — nothing to run"; exit 1; }
+    PDIR="$DAIS_HOME/projects/$proj"; mkdir -p "$PDIR/logs"
+    LOCK="$PDIR/.lock-deploy"
+    if [ -e "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+      echo "deploy: already deploying $proj (pid $(cat "$LOCK"))"; exit 0; fi
+    echo $$ > "$LOCK"; trap 'rm -f "$LOCK"' EXIT INT TERM
+    LOG="$PDIR/logs/deploy-$(date +%Y%m%d-%H%M%S).log"
+    RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$pe','deploy','$LOG'); SELECT last_insert_rowid();")"
+    rp="$(repo_path "$proj")"
+    echo "▶ deploying $proj — running its deploy: command…" | tee "$LOG"
+    ( cd "$rp" 2>/dev/null; eval "$cmd" ) 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    if [ "$rc" -eq 0 ]; then
+      git -C "$rp" fetch -q origin main 2>/dev/null || true   # record what's now live (remote main)
+      sha="$(git -C "$rp" rev-parse --short origin/main 2>/dev/null || git -C "$rp" rev-parse --short HEAD 2>/dev/null || echo '?')"
+      db "UPDATE runs SET ended_at=datetime('now'), status='succeeded', summary='deployed $sha' WHERE id=$RUNID;"
+      echo "✓ deployed $proj ($sha)"
+    else
+      db "UPDATE runs SET ended_at=datetime('now'), status='failed', summary='deploy failed (exit $rc)' WHERE id=$RUNID;"
+      echo "✗ deploy failed (exit $rc) — see $LOG"
+    fi
+    rm -f "$LOCK"; trap - EXIT INT TERM
+    [ "$rc" -eq 0 ] ;;
+
   scaffold)
     name="${1:?usage: dais scaffold <project>}"
     [[ "$name" =~ ^[a-z0-9._-]+$ ]] || { echo "scaffold: name must be a slug (a-z 0-9 . _ -)"; exit 1; }

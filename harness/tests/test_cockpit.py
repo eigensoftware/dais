@@ -674,3 +674,39 @@ class TestConfirmPadding(unittest.TestCase):
         self.assertIn("[y/N]", msg)
         self.assertTrue(msg.startswith("  "))                # 2-space left margin
         self.assertTrue(any(t.strip() == "" for t in texts))  # has blank padding row(s)
+
+
+class TestDeployAction(unittest.TestCase):
+    """`D` deploys the selected row's project: founder-gated (confirm), launched detached."""
+
+    def _app_with_deploy(self, deploy_line="deploy: echo hi"):
+        app = make_app()
+        os.makedirs(os.path.join(app.root, "projects", "app"), exist_ok=True)
+        with open(os.path.join(app.root, "projects", "app", "project.yaml"), "w") as f:
+            f.write("project: app\nrepo: /tmp/x\n%s\n" % deploy_line)
+        return app
+
+    def test_deploy_confirms_then_spawns(self):
+        app = self._app_with_deploy()
+        app._confirm = lambda *a: True
+        spawned = []
+        app._spawn_agent = lambda cmd: spawned.append(cmd) or True
+        app.deploy_project("app")
+        self.assertEqual(spawned, [["deploy", "app"]])
+
+    def test_deploy_declined_does_not_spawn(self):
+        app = self._app_with_deploy()
+        app._confirm = lambda *a: False
+        spawned = []
+        app._spawn_agent = lambda cmd: spawned.append(cmd) or True
+        app.deploy_project("app")
+        self.assertEqual(spawned, [])
+
+    def test_deploy_without_command_flashes(self):
+        app = self._app_with_deploy("# no deploy")
+        app._confirm = lambda *a: True
+        spawned = []
+        app._spawn_agent = lambda cmd: spawned.append(cmd) or True
+        app.deploy_project("app")
+        self.assertEqual(spawned, [])
+        self.assertIn("no deploy", app.flash)
