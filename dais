@@ -136,20 +136,29 @@ MD
       --assignee) where="$where AND assignee='$(sqlesc "$2")'"; shift 2;;
       --status)   where="$where AND status='$(sqlesc "$2")'"; shift 2;;
       *) shift;; esac; done
-    db -separator ' | ' "SELECT id, status, priority, COALESCE(assignee,'-'), title FROM tasks WHERE $where ORDER BY updated_at DESC;" || true ;;
+    if has_blocked_on; then
+      db -separator ' | ' "SELECT t.id, t.status, t.priority, COALESCE(t.assignee,'-'),
+        CASE WHEN t.blocked_on IS NOT NULL AND t.blocked_on<>'' AND EXISTS(
+               SELECT 1 FROM tasks p WHERE p.id=t.blocked_on AND p.status NOT IN ('done','cancelled'))
+             THEN '⛓on '||t.blocked_on||'  '||t.title ELSE t.title END
+        FROM tasks t WHERE $where ORDER BY updated_at DESC;" || true
+    else
+      db -separator ' | ' "SELECT id, status, priority, COALESCE(assignee,'-'), title FROM tasks WHERE $where ORDER BY updated_at DESC;" || true
+    fi ;;
 
   task)
     sub="${1:?task add|set}"; shift 2>/dev/null || true
     case "$sub" in
       add)
-        proj="${1:?usage: dais task add <project> \"title\" [--id X] [--priority P] [--status S] [--assignee A] [--notes \"...\"]}"; shift
-        id=""; title=""; pri="medium"; st="backlog"; asg=""; notes=""
+        proj="${1:?usage: dais task add <project> \"title\" [--id X] [--priority P] [--status S] [--assignee A] [--notes \"...\"] [--depends-on ID]}"; shift
+        id=""; title=""; pri="medium"; st="backlog"; asg=""; notes=""; dep=""
         while [ $# -gt 0 ]; do case "$1" in
-          --id)       id="$2"; shift 2;;
-          --priority) pri="$2"; shift 2;;
-          --status)   st="$2"; shift 2;;
-          --assignee) asg="$2"; shift 2;;
-          --notes)    notes="$2"; shift 2;;
+          --id)         id="$2"; shift 2;;
+          --priority)   pri="$2"; shift 2;;
+          --status)     st="$2"; shift 2;;
+          --assignee)   asg="$2"; shift 2;;
+          --notes)      notes="$2"; shift 2;;
+          --depends-on) dep="$2"; shift 2;;
           *) [ -z "$title" ] && title="$1"; shift;;
         esac; done
         [ -n "$title" ] || { echo "need a title"; exit 1; }
@@ -161,19 +170,34 @@ MD
           id="${abbr}-${n}"
           while [ -n "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$id")';")" ]; do n=$((n+1)); id="${abbr}-${n}"; done
         fi
-        db "INSERT INTO tasks(id,project,title,priority,status,assignee,notes) VALUES('$(sqlesc "$id")','$pe','$(sqlesc "$title")','$(sqlesc "$pri")','$(sqlesc "$st")',$([ -n "$asg" ] && echo "'$(sqlesc "$asg")'" || echo NULL),$([ -n "$notes" ] && echo "'$(sqlesc "$notes")'" || echo NULL));" \
-          && echo "added $id  [$st${asg:+ -> $asg}]" ;;
+        if [ -n "$dep" ]; then
+          has_blocked_on || { echo "task add: dependencies need a schema upgrade — run 'dais migrate' first"; exit 1; }
+          [ -z "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$dep")';")" ] && { echo "task add: no such predecessor task: $dep"; exit 1; }
+        fi
+        cols="id,project,title,priority,status,assignee,notes"; vals="'$(sqlesc "$id")','$pe','$(sqlesc "$title")','$(sqlesc "$pri")','$(sqlesc "$st")',$([ -n "$asg" ] && echo "'$(sqlesc "$asg")'" || echo NULL),$([ -n "$notes" ] && echo "'$(sqlesc "$notes")'" || echo NULL)"
+        [ -n "$dep" ] && { cols="$cols,blocked_on"; vals="$vals,'$(sqlesc "$dep")'"; }
+        db "INSERT INTO tasks($cols) VALUES($vals);" \
+          && echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]" ;;
       set)
         id="$1"; shift
-        sets=""; newst=""
+        sets=""; newst=""; dep=""; depset=0
         while [ $# -gt 0 ]; do case "$1" in
-          --status)   newst="$2"; sets="$sets, status='$(sqlesc "$2")'"; shift 2;;
-          --assignee) sets="$sets, assignee='$(sqlesc "$2")'"; shift 2;;
-          --pr)       sets="$sets, pr_url='$(sqlesc "$2")'"; shift 2;;
-          --priority) sets="$sets, priority='$(sqlesc "$2")'"; shift 2;;
-          --notes)    sets="$sets, notes='$(sqlesc "$2")'"; shift 2;;
-          --title)    sets="$sets, title='$(sqlesc "$2")'"; shift 2;;
+          --status)     newst="$2"; sets="$sets, status='$(sqlesc "$2")'"; shift 2;;
+          --assignee)   sets="$sets, assignee='$(sqlesc "$2")'"; shift 2;;
+          --pr)         sets="$sets, pr_url='$(sqlesc "$2")'"; shift 2;;
+          --priority)   sets="$sets, priority='$(sqlesc "$2")'"; shift 2;;
+          --notes)      sets="$sets, notes='$(sqlesc "$2")'"; shift 2;;
+          --title)      sets="$sets, title='$(sqlesc "$2")'"; shift 2;;
+          --depends-on) dep="$2"; depset=1                       # '' clears the dependency
+                        sets="$sets, blocked_on=$([ -n "$2" ] && echo "'$(sqlesc "$2")'" || echo NULL)"; shift 2;;
           *) shift;; esac; done
+        if [ "$depset" = 1 ]; then
+          has_blocked_on || { echo "task set: dependencies need a schema upgrade — run 'dais migrate' first"; exit 1; }
+          if [ -n "$dep" ]; then
+            [ "$dep" = "$id" ] && { echo "task set: a task can't depend on itself"; exit 1; }
+            [ -z "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$dep")';")" ] && { echo "task set: no such predecessor task: $dep"; exit 1; }
+          fi
+        fi
         sets="${sets#, }"
         [ -z "$sets" ] && { echo "nothing to set"; exit 1; }
         if [ -n "$newst" ]; then

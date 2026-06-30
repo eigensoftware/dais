@@ -114,6 +114,8 @@ class Task:
     pr_url: str = None
     notes: str = None
     updated_at: str = None   # last status change — used to sort the archive newest-first
+    blocked_on: str = None   # predecessor task id this task waits on (dependency)
+    blocked: bool = False     # computed: blocked_on is set AND that predecessor isn't done/cancelled
 
 
 @dataclass
@@ -149,6 +151,15 @@ def connect(db=DB):
     conn = sqlite3.connect(db, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _has_column(conn, table, col):
+    """True if `table` has column `col`. Lets readers degrade gracefully on a dais.db that hasn't had
+    `dais migrate` run yet (e.g. blocked_on) instead of crashing the panel/scheduler on a missing col."""
+    try:
+        return any(r["name"] == col for r in conn.execute("PRAGMA table_info(%s)" % table))
+    except sqlite3.Error:
+        return False
 
 
 def _pid_alive(pid):
@@ -212,18 +223,20 @@ _PRIO = ("CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
 def load_snapshot(conn, root=HOME, now=None, recent=6):
     now = now or utc_now()
     projects = []
+    dep = ",blocked_on" if _has_column(conn, "tasks", "blocked_on") else ""
     names = [r["project"] for r in conn.execute(
         "SELECT DISTINCT project FROM tasks ORDER BY project")]
     for name in names:
         rows = conn.execute(
-            "SELECT id,title,status,priority,assignee,pr_url,notes,updated_at FROM tasks "
+            "SELECT id,title,status,priority,assignee,pr_url,notes,updated_at" + dep + " FROM tasks "
             "WHERE project=? ORDER BY " + _PRIO + ", id", (name,)).fetchall()
         by_status = {}
         for r in rows:
             by_status.setdefault(r["status"], []).append(Task(
                 id=r["id"], title=r["title"], status=r["status"],
                 priority=r["priority"], assignee=r["assignee"],
-                pr_url=r["pr_url"], notes=r["notes"], updated_at=r["updated_at"]))
+                pr_url=r["pr_url"], notes=r["notes"], updated_at=r["updated_at"],
+                blocked_on=(r["blocked_on"] if dep else None)))
         run_rows = conn.execute(
             "SELECT started_at,ended_at,agent,status,summary,log_path FROM runs "
             "WHERE project=? ORDER BY id DESC LIMIT ?", (name, recent)).fetchall()
@@ -242,6 +255,16 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
         projects.append(Project(name=name, stage_goal=stage_goal(root, name),
                                 running=running, tasks_by_status=by_status,
                                 recent_runs=proj_runs))
+    # resolve dependencies once across ALL projects (a predecessor may live in another project):
+    # a task is blocked when its predecessor exists and isn't done/cancelled. A dangling ref
+    # (predecessor missing) is treated as unblocked so a deleted prerequisite never strands work.
+    status_by_id = {t.id: t.status for p in projects
+                    for ts in p.tasks_by_status.values() for t in ts}
+    for p in projects:
+        for ts in p.tasks_by_status.values():
+            for t in ts:
+                t.blocked = bool(t.blocked_on) and \
+                    status_by_id.get(t.blocked_on) not in (None, "done", "cancelled")
     grows = conn.execute(
         "SELECT started_at,ended_at,project,agent,status,summary,log_path FROM runs "
         "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()

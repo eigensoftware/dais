@@ -35,19 +35,35 @@ def parse_roles(path):
     return roles, problems
 
 
+def _has_blocked_on(db):
+    """True if tasks.blocked_on exists — lets decide() degrade safely on a pre-`dais migrate` DB."""
+    try:
+        return any(row[1] == "blocked_on" for row in db.execute("PRAGMA table_info(tasks)"))
+    except sqlite3.Error:
+        return False
+
+
+# a task is NOT actionable while it waits on a predecessor that isn't done/cancelled (dependency).
+# A dangling ref (predecessor missing) counts as unblocked so deleted prerequisites never strand work.
+_UNBLOCKED = ("AND NOT (t.blocked_on IS NOT NULL AND t.blocked_on<>'' AND EXISTS("
+              "SELECT 1 FROM tasks p WHERE p.id=t.blocked_on "
+              "AND p.status NOT IN ('done','cancelled')))")
+
+
 def decide(root, project):
     """Which role should run next for this project (or None = idle)."""
     roles, _ = parse_roles(os.path.join(root, "projects", project, "roles"))
     if not roles:
         return None
     db = sqlite3.connect(os.path.join(root, "dais.db"))
+    dep = _UNBLOCKED if _has_blocked_on(db) else ""
 
-    # 1) reactive: lowest precedence with an actionable task wins (verify before build)
+    # 1) reactive: lowest precedence with an actionable, NON-blocked task wins (verify before build)
     for r in sorted([r for r in roles if r["trigger"] == "reactive" and r["handles"]],
                     key=lambda r: r["prec"]):
         ph = ",".join("?" * len(r["handles"]))
-        n = db.execute("SELECT COUNT(*) FROM tasks WHERE project=? AND status IN (%s)" % ph,
-                       [project] + r["handles"]).fetchone()[0]
+        n = db.execute("SELECT COUNT(*) FROM tasks t WHERE t.project=? AND t.status IN (%s) %s"
+                       % (ph, dep), [project] + r["handles"]).fetchone()[0]
         if n > 0:
             return r["name"]
 

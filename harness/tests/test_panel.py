@@ -1560,3 +1560,59 @@ class TestRailTable(unittest.TestCase):
         scr = FakeScr(40, 200)
         pn.render_rail(scr, pn.Rect(1, 0, 20, 20), papp, focused=False)   # tight: name must survive
         self.assertIn("acme", "\n".join(c[2] for c in scr.calls))
+
+
+class TestDependenciesPanel(unittest.TestCase):
+    """#6-B task dependencies: load_snapshot computes `blocked`, and the WORK list marks a blocked
+    task with ⛓ + dims it (it won't be picked up until its predecessor is done)."""
+
+    def _papp_with(self, inserts):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-dep-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn()
+        for sql_args in inserts:
+            conn.execute("INSERT INTO tasks(id,project,title,status,priority,blocked_on) "
+                         "VALUES(?,?,?,?,?,?)", sql_args)
+        conn.commit()
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def _task(self, papp, tid):
+        for p in papp.snap.projects:
+            for ts in p.tasks_by_status.values():
+                for t in ts:
+                    if t.id == tid:
+                        return t
+        return None
+
+    def test_blocked_computed_when_predecessor_unfinished(self):
+        papp = self._papp_with([("a", "p", "A", "ready", "medium", "b"),
+                                ("b", "p", "B", "ready", "medium", None)])
+        self.assertTrue(self._task(papp, "a").blocked)      # b is ready (not done) → a is blocked
+        self.assertFalse(self._task(papp, "b").blocked)
+
+    def test_not_blocked_when_predecessor_done(self):
+        papp = self._papp_with([("a", "p", "A", "ready", "medium", "b"),
+                                ("b", "p", "B", "done", "medium", None)])
+        self.assertFalse(self._task(papp, "a").blocked)     # b done → a unblocked
+
+    def test_dangling_dependency_not_blocked(self):
+        papp = self._papp_with([("a", "p", "A", "ready", "medium", "ghost")])
+        self.assertFalse(self._task(papp, "a").blocked)     # missing predecessor → not blocked
+
+    def test_cross_project_dependency(self):
+        papp = self._papp_with([("a", "p", "A", "ready", "medium", "z"),
+                                ("z", "q", "Z", "ready", "medium", None)])
+        self.assertTrue(self._task(papp, "a").blocked)      # predecessor in another project still counts
+
+    def test_work_row_marks_blocked_and_dims(self):
+        papp = self._papp_with([("a", "p", "A-thing", "ready", "high", "b"),
+                                ("b", "p", "B", "ready", "medium", None)])
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 200), papp, focused=False)   # unfocused: no cursor highlight
+        chained = [c for c in scr.calls if "⛓" in c[2] and "A-thing" in c[2]]
+        self.assertTrue(chained)                            # the blocked task shows the ⛓ marker
+        self.assertTrue(chained[0][3] & curses.A_DIM)       # ...and is dimmed (won't run yet)

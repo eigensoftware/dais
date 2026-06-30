@@ -54,6 +54,10 @@ db_init(){
   done
 }
 db(){ [ -f "$DB" ] || db_init >/dev/null 2>&1; sqlite3 -cmd ".timeout 10000" "$DB" "$@"; }
+
+# True if the tasks table has the dependency column (added by migration 0001). Lets the CLI degrade
+# gracefully on a dais.db that hasn't had `dais migrate` run yet, instead of erroring on blocked_on.
+has_blocked_on(){ [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='blocked_on';" 2>/dev/null)" ]; }
 sqlesc(){ printf '%s' "${1:-}" | sed "s/'/''/g"; }
 
 # read a single-line field from projects/<project>/project.yaml

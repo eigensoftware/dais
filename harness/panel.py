@@ -186,13 +186,18 @@ def render_work(scr, rect, app, focused):
             tag, tid, proj = "RUN", (r.get("task_id") or "—"), r["project"]
             title = f"{r.get('agent','')}"
             base_attr = app._cp(_LIVE)                        # running = green (live)
+            blocked = getattr(r["task"], "blocked", False)
         else:
             tag, tid, proj = r["tag"], r["id"], r["project"]
             title = r["task"].title
             base_attr = _tag_attr(app, r.get("status", ""))
+            blocked = getattr(r["task"], "blocked", False)
+        if r["kind"] != "running" and blocked:                # ⛓ a task waiting on an unfinished predecessor
+            title = "⛓ " + title
         line = f"  {tag:<7} {tid:<8} {proj[:11]:<11} {title}"
-        # selection is ONE uniform bright bar (same as the focused pane title), not the row's hue
-        attr = (curses.A_REVERSE | curses.A_BOLD) if selected else base_attr
+        # selection is ONE uniform bright bar (same as the focused pane title), not the row's hue;
+        # a blocked task dims (it won't be picked up until its predecessor is done).
+        attr = (curses.A_REVERSE | curses.A_BOLD) if selected else (curses.A_DIM if blocked else base_attr)
         _add(scr, y, inner.x, pad_cols(clip_cols(line, inner.w), inner.w),
              inner.x + inner.w, attr)
 
@@ -252,8 +257,10 @@ def _panel_detail_lines(app, sel_row):
     out = [f"{task.id}  {task.status}",
            f'"{task.title}"',
            f"assignee {task.assignee or '-'} · prio {task.priority} · "
-           f"pr {task.pr_url or '(none)'}",
-           ""]
+           f"pr {task.pr_url or '(none)'}"]
+    if getattr(task, "blocked", False):                 # waiting on an unfinished predecessor
+        out.append(f"⛓ blocked on {task.blocked_on} — won't run until it's done")
+    out.append("")
     if task.notes:
         out.append("notes:")
         for ln in task.notes.split("\n"):           # keep the author's structure; blanks stay blank
