@@ -1501,17 +1501,35 @@ class TestRunsView(unittest.TestCase):
         pn.render_runs(scr, pn.Rect(1, 0, 30, 200), papp)
         self.assertIn("no runs yet", "\n".join(c[2] for c in scr.calls))
 
-    def test_runs_scroll_jk_and_close(self):
+    def test_runs_select_jk_and_close(self):
         papp = self._papp([("p", "a", "succeeded", f"r{i}",
                             "2026-06-30 09:00:00", "2026-06-30 09:01:00") for i in range(5)])
         papp.handle(ord("r"), papp.left_rows(), 0, None)
-        papp.handle(ord("j"), [], 0, None)
-        self.assertEqual(papp.runs_scroll, 1)
+        papp.handle(ord("j"), [], 0, None)         # j moves the SELECTION (not raw scroll)
+        self.assertEqual(papp.runs_sel, 1)
         papp.handle(ord("k"), [], 0, None)
         papp.handle(ord("k"), [], 0, None)         # clamps at 0
-        self.assertEqual(papp.runs_scroll, 0)
+        self.assertEqual(papp.runs_sel, 0)
         papp.handle(27, [], 0, None)               # esc returns to the panel
         self.assertFalse(papp.show_runs)
+
+    def test_l_routes_to_open_run_log(self):
+        papp = self._papp([("cedar", "deploy", "succeeded", "deployed abc",
+                            "2026-06-30 09:00:00", "2026-06-30 09:05:00")])
+        papp.handle(ord("r"), papp.left_rows(), 0, None)   # open the runs view
+        opened = {}
+        papp._open_run_log = lambda: opened.setdefault("hit", True)
+        papp.handle(ord("l"), [], 0, None)         # l opens the selected run's log
+        self.assertTrue(opened.get("hit"))
+
+    def test_open_run_log_without_file_flashes(self):
+        papp = self._papp([("cedar", "deploy", "failed", "deploy failed",
+                            "2026-06-30 09:00:00", "2026-06-30 09:05:00")])
+        papp.handle(ord("r"), papp.left_rows(), 0, None)
+        papp._runs[0].log_path = None
+        papp.runs_sel = 0
+        papp._open_run_log()
+        self.assertIn("no log", papp.flash)
 
     def test_r_in_runs_view_closes(self):
         papp = self._papp([("p", "a", "succeeded", "r0",
@@ -2070,3 +2088,36 @@ class TestDeployRowSelectable(unittest.TestCase):
         self.assertIn("abc1234", text)
         self.assertIn("win-95: split the vault", text)       # the subject
         self.assertIn("awaiting deploy", text)               # the action hint
+
+
+class TestKeyStandardization(unittest.TestCase):
+    """Consistent keys: q ALWAYS quits (asks to confirm) from any overlay/view; esc/any other key
+    just backs out one level. q is never overloaded to mean "close this screen"."""
+
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-keys-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("z-1", "zeta", "t", "ready", "med", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._confirm = lambda *a: True              # confirm "yes" → quit
+        return papp
+
+    def test_q_quits_from_help(self):
+        papp = self._papp(); papp.show_help = True
+        self.assertFalse(papp.handle(ord("q"), [], 0, None))   # q → quit (handle returns False)
+
+    def test_other_key_closes_help(self):
+        papp = self._papp(); papp.show_help = True
+        self.assertTrue(papp.handle(ord("j"), [], 0, None))    # any other key just closes
+        self.assertFalse(papp.show_help)
+
+    def test_q_quits_from_overlay(self):
+        papp = self._papp(); papp.show_overlay = True
+        self.assertFalse(papp.handle(ord("q"), [], 0, None))
+
+    def test_q_quits_from_runs_and_logwall(self):
+        for view in ("show_runs", "show_logwall"):
+            papp = self._papp(); setattr(papp, view, True)
+            self.assertFalse(papp.handle(ord("q"), [], 0, None), view)
