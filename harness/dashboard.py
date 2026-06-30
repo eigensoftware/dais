@@ -140,6 +140,7 @@ class Project:
     deploy_configured: bool = False   # project.yaml has a deploy: command
     deploy_pending: int = None        # commits on origin/main since the last deploy (None = unknown)
     last_deploy: str = None           # ended_at of the last successful deploy run
+    deploy_migration: bool = False    # an un-deployed commit touches a migration → flag it loudly
 
 
 @dataclass
@@ -262,11 +263,11 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 "AND status='running' ORDER BY id DESC LIMIT 1",
                 (name, agent)).fetchone()
             running.append((agent, since["started_at"] if since else None))
-        dcfg, dpending, dlast = deploy_state(root, name, conn)
+        dcfg, dpending, dlast, dmig = deploy_state(root, name, conn)
         projects.append(Project(name=name, stage_goal=stage_goal(root, name),
                                 running=running, tasks_by_status=by_status,
                                 recent_runs=proj_runs, deploy_configured=dcfg,
-                                deploy_pending=dpending, last_deploy=dlast))
+                                deploy_pending=dpending, last_deploy=dlast, deploy_migration=dmig))
     # resolve dependencies once across ALL projects (a predecessor may live in another project):
     # a task is blocked when its predecessor exists and isn't done/cancelled. A dangling ref
     # (predecessor missing) is treated as unblocked so a deleted prerequisite never strands work.
@@ -310,12 +311,32 @@ def _deploy_pending(repo, sha):
     return None
 
 
+def _deploy_has_migration(root, project, repo, sha):
+    """True if any un-deployed commit (sha..origin/main) touches a migration file, per the project's
+    migrations_glob (default */migrations/*.sql) — so a deploy that includes a migration can be
+    flagged loudly. Local git only."""
+    if not (repo and sha and sha != "?"):
+        return False
+    glob = project_field(root, project, "migrations_glob") or "*/migrations/*.sql"
+    rx = re.compile(re.escape(glob).replace(r"\*", ".*") + "$")   # glob → regex (mirrors lib.sh migrations_re)
+    try:
+        out = subprocess.run(
+            ["git", "-C", os.path.expanduser(repo), "diff", "--name-only", "%s..origin/main" % sha],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            return any(rx.search(p) for p in out.stdout.splitlines())
+    except Exception:
+        pass
+    return False
+
+
 def deploy_state(root, project, conn):
-    """(configured, pending, last_deploy_ts) for a project: whether it declares a deploy: command,
-    how many merged commits are still un-deployed (origin/main since the last recorded deploy SHA),
-    and when it last deployed. The deploy SHA is parsed from the latest succeeded deploy run's summary."""
+    """(configured, pending, last_deploy_ts, has_migration) for a project: whether it declares a
+    deploy: command, how many merged commits are still un-deployed (origin/main since the last
+    recorded deploy SHA), when it last deployed, and whether any of those un-deployed commits touch a
+    migration. The deploy SHA is parsed from the latest succeeded deploy run's summary."""
     if not project_field(root, project, "deploy"):
-        return (False, None, None)
+        return (False, None, None, False)
     row = conn.execute(
         "SELECT summary, ended_at FROM runs WHERE project=? AND agent='deploy' "
         "AND status='succeeded' ORDER BY id DESC LIMIT 1", (project,)).fetchone()
@@ -323,7 +344,10 @@ def deploy_state(root, project, conn):
     if row and row["summary"]:
         m = re.search(r"deployed (\S+)", row["summary"])
         sha = m.group(1) if m else ""
-    return (True, _deploy_pending(project_field(root, project, "repo"), sha), last_ts)
+    repo = project_field(root, project, "repo")
+    pending = _deploy_pending(repo, sha)
+    has_mig = _deploy_has_migration(root, project, repo, sha) if pending else False
+    return (True, pending, last_ts, has_mig)
 
 
 def load_runs(conn, limit=200):
@@ -1493,19 +1517,29 @@ class App:
         self.flash = f"cancelled {proj}"
 
     def deploy_project(self, proj):
-        """Founder-gate: run the project's `deploy:` command (project.yaml). Outward → confirm first,
-        then launch detached so it streams to the run log + shows in RUNNING (the third gate after
-        build → merge, for merge≠deploy projects). No deploy: configured → say so, don't pretend."""
+        """Founder-gate (always manual): run the project's `deploy:` command. Outward → confirm first,
+        then launch detached so it streams to the run log + shows in RUNNING. If the un-deployed
+        commits include a MIGRATION, say so loudly and run the `deploy_migrate:` path (the migration
+        was already founder-merged + pre-flighted by now); if there's no deploy_migrate: for it, stop
+        and point at the runbook rather than deploy code ahead of an un-run migration."""
         if not proj:
             self.flash = "select a project to deploy"
             return
         if not project_field(self.root, proj, "deploy"):
             self.flash = f"{proj} has no deploy: command (set one in project.yaml)"
             return
-        if not self._confirm(f"deploy {proj}? (this goes LIVE)"):
+        p = next((x for x in (self.snap.projects if self.snap else []) if x.name == proj), None)
+        mig = bool(p and getattr(p, "deploy_migration", False))
+        if mig and not project_field(self.root, proj, "deploy_migrate"):
+            self.flash = f"{proj}: pending deploy includes a MIGRATION but no deploy_migrate: set — deploy via the runbook"
             return
-        if self._spawn_agent(["deploy", proj]):
-            self.flash = f"deploying {proj} …"
+        msg = (f"deploy {proj} — ⚠ includes a DB MIGRATION (pre-flight done?)" if mig
+               else f"deploy {proj}? (this goes LIVE)")
+        if not self._confirm(msg):
+            return
+        cmd = ["deploy", proj, "--migrate"] if mig else ["deploy", proj]
+        if self._spawn_agent(cmd):
+            self.flash = (f"deploying {proj} (migration) …" if mig else f"deploying {proj} …")
 
     # ---- the action engine (contextual bar + shared dispatcher) ----
     def _row_kind(self, row):

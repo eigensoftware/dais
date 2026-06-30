@@ -1903,16 +1903,42 @@ class TestDeployState(unittest.TestCase):
 
     def test_no_deploy_configured(self):
         root, conn = self._root_conn("# none")
-        self.assertEqual(d.deploy_state(root, "app", conn), (False, None, None))
+        self.assertEqual(d.deploy_state(root, "app", conn), (False, None, None, False))
 
     def test_configured_parses_sha_and_time(self):
         root, conn = self._root_conn("deploy: echo hi")
         conn.execute("INSERT INTO runs(project,agent,status,summary,ended_at) "
                      "VALUES('app','deploy','succeeded','deployed abc1234','2026-06-30 10:00:00')")
         conn.commit()
-        with mock.patch.object(d, "_deploy_pending", return_value=5) as mp:
-            configured, pending, last = d.deploy_state(root, "app", conn)
+        with mock.patch.object(d, "_deploy_pending", return_value=5) as mp, \
+             mock.patch.object(d, "_deploy_has_migration", return_value=True) as mh:
+            configured, pending, last, has_mig = d.deploy_state(root, "app", conn)
         self.assertTrue(configured)
         self.assertEqual(pending, 5)
         self.assertEqual(last, "2026-06-30 10:00:00")
+        self.assertTrue(has_mig)                            # migration detected in the pending range
         mp.assert_called_once_with("/tmp/x", "abc1234")    # SHA parsed from the run summary
+        mh.assert_called_once_with(root, "app", "/tmp/x", "abc1234")
+
+    def test_no_migration_check_when_nothing_pending(self):
+        root, conn = self._root_conn("deploy: echo hi")
+        with mock.patch.object(d, "_deploy_pending", return_value=0), \
+             mock.patch.object(d, "_deploy_has_migration") as mh:
+            _, _, _, has_mig = d.deploy_state(root, "app", conn)
+        self.assertFalse(has_mig)
+        mh.assert_not_called()                             # don't probe git when there's nothing to deploy
+
+
+class TestDeployMigrationVitals(unittest.TestCase):
+    def test_vitals_flags_pending_migration(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-dm-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
+        papp.snap = d.Snapshot(projects=[d.Project(name="cedar", stage_goal="",
+                               deploy_configured=True, deploy_pending=2, deploy_migration=True)],
+                               recent_runs=[], cap_state=False, ts="2026-06-30 16:00:00", workspace="e")
+        papp._cp = lambda n: n * 1000
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        self.assertIn("⚠MIGRATION", "".join(c[2] for c in scr.calls))

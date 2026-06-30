@@ -408,11 +408,14 @@ def render_vitals(scr, rect, app):
     pf = getattr(app, "project_filter", None)
     proj_seg = " · all projects" if pf is None else f" · {pf}"
     ident = f" DAIS {_BRAND} {ws}" if ws else " DAIS"     # honesty comes from the watch badge, not a literal "LIVE"
-    n_deploy = sum(1 for p in (snap.projects if snap else []) if (p.deploy_pending or 0) > 0)
+    pend = [p for p in (snap.projects if snap else []) if (p.deploy_pending or 0) > 0]
+    n_deploy = len(pend)
+    mig_pending = any(getattr(p, "deploy_migration", False) for p in pend)
     run_dot = _DOT_RUN if threads else _DOT_IDLE
     run_tok = f"{run_dot} {len(threads)} running"
     gate_tok = f"{_DOT_GATE} {ng} NEED YOU" if ng > 0 else f"{_DOT_IDLE} {ng} need you"
-    deploy_tok = f" · ⬆ {n_deploy} DEPLOY" if n_deploy else ""   # merged-but-not-deployed: a founder gate
+    deploy_tok = (f" · ⬆ {n_deploy} DEPLOY{' ⚠MIGRATION' if mig_pending else ''}"
+                  if n_deploy else "")        # merged-but-not-deployed: a founder gate; ⚠ if it has a migration
     pre = ident + "   "
     sep = " · "                                            # between the two hero tokens
     ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}  {clk}"
@@ -650,7 +653,8 @@ _HELP_LINES = [
     "  t                 tick — run the project's next eligible agent once",
     "  p                 pause / resume the loop",
     "  c                 cancel the project's running agent",
-    "  D deploy          run the project's deploy: command — the gate after merge (asks to confirm)",
+    "  D deploy          run the project's deploy: command (confirms; flags + uses --migrate when a",
+    "                    pending migration is involved). Always manual — there is no auto-deploy.",
     "",
     "  ? help            this overlay (any key closes)",
     "  q                 quit (asks to confirm)",

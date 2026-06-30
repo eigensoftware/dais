@@ -710,3 +710,44 @@ class TestDeployAction(unittest.TestCase):
         app.deploy_project("app")
         self.assertEqual(spawned, [])
         self.assertIn("no deploy", app.flash)
+
+
+class TestDeployMigrationPanel(unittest.TestCase):
+    """Panel D detects a migration in the pending deploy: it confirms loudly and runs the --migrate
+    path (the migration is founder-merged + pre-flighted by deploy time). No deploy_migrate: → blocks."""
+
+    def _app(self, lines, migration):
+        app = make_app()
+        os.makedirs(os.path.join(app.root, "projects", "app"), exist_ok=True)
+        with open(os.path.join(app.root, "projects", "app", "project.yaml"), "w") as f:
+            f.write("project: app\nrepo: /tmp/x\n%s\n" % lines)
+        app.snap = d.Snapshot(projects=[d.Project(name="app", stage_goal="", deploy_pending=2,
+                                                  deploy_migration=migration)],
+                              recent_runs=[], cap_state=False, ts="t", workspace="w")
+        return app
+
+    def test_migration_runs_migrate_path_with_loud_confirm(self):
+        app = self._app("deploy: echo std\ndeploy_migrate: echo mig", migration=True)
+        msgs, spawned = [], []
+        app._confirm = lambda m: msgs.append(m) or True
+        app._spawn_agent = lambda cmd: spawned.append(cmd) or True
+        app.deploy_project("app")
+        self.assertEqual(spawned, [["deploy", "app", "--migrate"]])
+        self.assertIn("MIGRATION", msgs[0])               # the confirm makes the migration clear
+
+    def test_no_migration_runs_standard(self):
+        app = self._app("deploy: echo std\ndeploy_migrate: echo mig", migration=False)
+        app._confirm = lambda *a: True
+        spawned = []
+        app._spawn_agent = lambda cmd: spawned.append(cmd) or True
+        app.deploy_project("app")
+        self.assertEqual(spawned, [["deploy", "app"]])
+
+    def test_migration_without_migrate_command_blocks(self):
+        app = self._app("deploy: echo std", migration=True)  # no deploy_migrate:
+        app._confirm = lambda *a: True
+        spawned = []
+        app._spawn_agent = lambda cmd: spawned.append(cmd) or True
+        app.deploy_project("app")
+        self.assertEqual(spawned, [])                      # refuse to deploy code ahead of the migration
+        self.assertIn("MIGRATION", app.flash)
