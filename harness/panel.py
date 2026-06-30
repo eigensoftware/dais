@@ -396,7 +396,7 @@ def render_vitals(scr, rect, app):
     snap = app.snap
     ws = snap.workspace if snap else None
     now = app._now()
-    threads = d.running_threads(snap, now) if snap else []
+    threads = d.running_threads(snap, now, app.root) if snap else []
     running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
     wstate, wint, wpar = d.watch_state(app.root)
     badge = (f"watch {wint or '?'}s x{wpar or '?'}" if wstate == "running"
@@ -541,7 +541,7 @@ def render_feed(scr, rect, app):
 def render_logwall(scr, rect, app):
     """Full-body live log wall: one full-width band per running agent (green header + live tail).
     Reuses running_threads + tail_lines + _LOG_ERR_RE; tailed each draw so the text streams live."""
-    threads = d.running_threads(app.snap, app._now()) if app.snap else []
+    threads = d.running_threads(app.snap, app._now(), app.root) if app.snap else []
     inner = render_pane_title(scr, rect, f"LOG WALL · {len(threads)} agents", True)
     if not threads:
         _add(scr, inner.y, inner.x, clip_cols("  (no agents running)", inner.w),
@@ -719,7 +719,7 @@ class PanelApp(d.App):
 
     def left_rows(self):
         rows = panel_work_rows(self.snap, project=self.project_filter,
-                               expanded=self._panel_expanded)
+                               expanded=self._panel_expanded, root=self.root)
         if self.filter:                          # honest filter: narrow to matching task/running rows
             rows = [r for r in rows if r["kind"] in ("task", "running")]
             rows = d.filter_rows(rows, self.filter, key=_row_search_text)
@@ -904,7 +904,7 @@ def _task_row(proj, task, tag):
             "status": task.status, "tag": tag, "sel": True}
 
 
-def panel_work_rows(snap, *, project=None, expanded=False):
+def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
     """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · QUEUED ·
     BACKLOG · DEFERRED · ARCHIVE). `project` limits to one project. `expanded` (the g key) shows
     the full BACKLOG, reveals DEFERRED rows, and uncaps the ARCHIVE. An empty RUNNING/NEEDS YOU/
@@ -932,7 +932,7 @@ def panel_work_rows(snap, *, project=None, expanded=False):
     # RUNNING — an empty band collapses to just its dim header (no "(none …)" filler), so the
     # screen reads calm when nominal and only the live/gated bands draw the eye.
     now = "9999-12-31 00:00:00"            # elapsed not needed for the model; render computes it
-    threads = [t for t in d.running_threads(snap, now)
+    threads = [t for t in d.running_threads(snap, now, root)
                if project is None or t["project"] == project]
     running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
     add_band("RUNNING", len(threads))

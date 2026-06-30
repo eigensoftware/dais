@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 # as a script (so harness/ is sys.path[0]) and the tests insert harness/ on the path,
 # so a bare `from actions import …` resolves in both.
 from actions import task_actions, action_command, priority_cycle, Action  # noqa: F401
+import router  # parse_roles — so the running-task guess can be agent-aware (which statuses a role owns)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # tool code dir
 HOME = os.environ.get("DAIS_HOME") or ROOT                           # workspace (data) dir
@@ -566,31 +567,48 @@ def short_summary(summary, limit=1):
 _INFLIGHT_ORDER = ["doing", "needs_qa", "changes_requested", "needs_review"]
 
 
-def running_task_id(project):
+def _agent_handles(root, project, agent):
+    """The statuses a role handles, from the project's roles file ([] if unreadable). Guides the
+    running-task guess so an ENGINEER run isn't labeled as QA's needs_qa or the lead's needs_scoping."""
+    try:
+        roles, _ = router.parse_roles(os.path.join(root, "projects", project, "roles"))
+    except Exception:
+        return []
+    for r in roles:
+        if r["name"] == agent:
+            return r["handles"]
+    return []
+
+
+def running_task_id(project, statuses=None):
     """Best guess at the task a running agent is working, or '' (the live log is the real signal).
-    One agent per project, so this is project-scoped. Order: in-flight (doing/qa/changes/review) →
-    ready (the builder's pulled task) → needs_scoping LAST. needs_scoping only surfaces when nothing
-    earlier exists — which, by the verify→build→plan precedence, is exactly when the LEAD (not a
-    builder) is the one running. So a running LEAD shows the task it's scoping, while an engineer run
-    is never mislabeled as the lead's needs_scoping task (it shows the builder's doing/ready task)."""
-    for st in _INFLIGHT_ORDER + ["ready", "needs_scoping"]:
+    With `statuses` (the running role's handled statuses), guess only among 'doing' + those — so an
+    engineer run shows its doing/ready task, never QA's needs_qa or the lead's needs_scoping. Without
+    it, fall back to the generic in-flight → ready → needs_scoping order."""
+    if statuses:
+        order = ["doing"] + [s for s in statuses if s != "doing"]
+    else:
+        order = _INFLIGHT_ORDER + ["ready", "needs_scoping"]
+    for st in order:
         tasks = project.tasks_by_status.get(st)
         if tasks:
             return tasks[0].id
     return ""
 
 
-def running_threads(snap, now=None):
-    """Every concurrent agent across all projects -> dicts for the RUNNING band."""
+def running_threads(snap, now=None, root=HOME):
+    """Every concurrent agent across all projects -> dicts for the RUNNING band. The task each agent
+    is on is guessed agent-awarely (from the role's handled statuses) so it isn't mislabeled."""
     now = now or utc_now()
     out = []
     for p in snap.projects:
         live_log = (p.recent_runs[0].log_path
                     if p.recent_runs and p.recent_runs[0].status == "running" else None)
         for agent, since in p.running:
+            task = running_task_id(p, _agent_handles(root, p.name, agent))
             out.append(dict(project=p.name, agent=agent, since=since,
                             secs=seconds_between(since, now),
-                            task=running_task_id(p), log_path=live_log))
+                            task=task, log_path=live_log))
     return out
 
 
@@ -993,7 +1011,7 @@ class App:
             return rows
         now = self._now()
         order = QUEUE_ORDER + PARKED_ORDER if self.show_parked else QUEUE_ORDER
-        threads = running_threads(self.snap, now)
+        threads = running_threads(self.snap, now, self.root)
         running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
         if threads:
             rows.append(self._header_row(f"▶ running ({len(threads)})", "ready_to_merge"))
@@ -1169,7 +1187,7 @@ class App:
             badge = "⏸ PAUSED"
         else:
             badge = "○ watch stopped"
-        threads = running_threads(self.snap, now) if self.snap else []
+        threads = running_threads(self.snap, now, self.root) if self.snap else []
         run = f" · ▶ {len(threads)} running" if threads else ""
         running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
         ng = gate_count(self.snap, running_ids) if self.snap else 0

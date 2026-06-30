@@ -1710,6 +1710,24 @@ class TestRunningTaskGuess(unittest.TestCase):
         p = self._proj({"needs_scoping": ["s"]})
         self.assertEqual(d.running_task_id(p), "s")
 
+    def test_agent_aware_engineer_skips_qa_and_scoping(self):
+        # the win-95 bug: engineer running with a needs_qa task present must show its own ready task,
+        # not QA's needs_qa task. With the role's handled statuses, the guess is agent-aware.
+        p = self._proj({"needs_qa": ["win-95"], "ready": ["win-110"], "needs_scoping": ["win-1"]})
+        self.assertEqual(d.running_task_id(p, ["changes_requested", "ready"]), "win-110")  # engineer
+        self.assertEqual(d.running_task_id(p, ["needs_qa"]), "win-95")                      # qa
+        self.assertEqual(d.running_task_id(p, ["needs_scoping"]), "win-1")                  # lead
+
+    def test_agent_handles_reads_roles_file(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-ah-")
+        os.makedirs(os.path.join(root, "projects", "p"))
+        with open(os.path.join(root, "projects", "p", "roles"), "w") as f:
+            f.write("qa review reactive needs_qa 1\nengineer edit reactive changes_requested,ready 2\n")
+        self.assertEqual(d._agent_handles(root, "p", "engineer"), ["changes_requested", "ready"])
+        self.assertEqual(d._agent_handles(root, "p", "qa"), ["needs_qa"])
+        self.assertEqual(d._agent_handles(root, "p", "ghost"), [])      # unknown role → []
+
 
 class TestInspectorLogWrapScroll(unittest.TestCase):
     """The running inspector's live log wraps long lines (no cut-off) and scrolls — detail_scroll is
