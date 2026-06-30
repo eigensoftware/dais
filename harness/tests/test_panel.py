@@ -272,9 +272,15 @@ class TestPanelApp(unittest.TestCase):
         app.handle(ord("\t"), app.left_rows(), 0, None)
         self.assertNotEqual(app.pane_focus, start)
 
-    def test_q_quits(self):
+    def test_q_quits_after_confirm(self):
         app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
+        app._confirm = lambda *a: True            # confirm the quit
         self.assertFalse(app.handle(ord("q"), app.left_rows(), 0, None))
+
+    def test_q_cancelled_stays_alive(self):
+        app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
+        app._confirm = lambda *a: False           # decline the quit
+        self.assertTrue(app.handle(ord("q"), app.left_rows(), 0, None))
 
     def test_b_is_a_no_op_here(self):
         # 'b' is the classic show/hide-parked toggle; the panel has its own backlog +
@@ -619,7 +625,8 @@ class TestBarAndHelp(unittest.TestCase):
         pn.render_bar(scr, pn.Rect(39, 0, 1, 200), papp, focus="work")
         text = scr.calls[-1][2]
         self.assertNotIn(": command", text)        # palette not built → not advertised
-        for k in ("tab", "g expand", "/ filter", "? help", "q quit"):
+        for k in ("tab", "g expand", "/ filter", "? help", "q quit",
+                  "w watch", "R run", "t tick"):    # the loop/run controls are hinted now
             self.assertIn(k, text)
         self.assertNotIn("b parked", text)          # backlog/deferred are first-class now
 
@@ -632,6 +639,8 @@ class TestBarAndHelp(unittest.TestCase):
         text = "\n".join(c[2] for c in papp.scr.calls)
         self.assertIn("KEYS", text)                # the overlay title
         self.assertIn("tab", text)
+        self.assertIn("LOOP / RUN", text)          # the loop/run controls section
+        self.assertIn("start / stop the watch loop", text)
         # any key closes
         papp.handle(ord("x"), papp.left_rows(), 0, None)
         self.assertFalse(papp.show_help)
@@ -1114,6 +1123,7 @@ class TestLogWallMode(unittest.TestCase):
     def test_q_quits_from_wall(self):
         papp = self._papp()
         papp.show_logwall = True
+        papp._confirm = lambda *a: True            # confirm the quit
         self.assertFalse(papp.handle(ord("q"), [], 0, None))
 
     def test_draw_shows_wall_and_hides_panes(self):

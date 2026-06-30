@@ -474,7 +474,7 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    keys = "tab pane · / filter · g expand · L logs · ? help · q quit"
+    keys = "w watch · R run · t tick · tab · / filter · g expand · L logs · ? help · q quit"
     if getattr(app, "filtering", False):
         hint = f" /{app.filter}_  ·  {keys}"
     else:
@@ -496,8 +496,16 @@ _HELP_LINES = [
     "  rail + j/k        pick a project (ALL clears the filter)",
     "  l                 open the log pager for the selection",
     "  L logs            live log wall - all running agents (esc back)",
+    "",
+    "  LOOP / RUN  (act on the selected row's project)",
+    "  w                 start / stop the watch loop (whole workspace)",
+    "  R                 run a role now (menu) — e.g. the lead, on demand",
+    "  t                 tick — run the project's next eligible agent once",
+    "  p                 pause / resume the loop",
+    "  c                 cancel the project's running agent",
+    "",
     "  ? help            this overlay (any key closes)",
-    "  q                 quit",
+    "  q                 quit (asks to confirm)",
 ]
 
 
@@ -639,7 +647,7 @@ class PanelApp(d.App):
             return True
         if self.show_logwall:                   # the wall is a passive full-body view
             if ch == ord("q"):
-                return False
+                return not self._confirm("quit dais top?")
             if ch in (ord("L"), 27):            # L or esc returns to the control panel
                 self.show_logwall = False
             return True
@@ -648,7 +656,7 @@ class PanelApp(d.App):
             return True
         # global panel keys first
         if ch == ord("q"):
-            return False
+            return not self._confirm("quit dais top?")   # confirm before exiting
         if ch in (9,):                          # tab -> next focusable pane
             h, w = self.scr.getmaxyx()
             order = focus_order(layout(w, h))
