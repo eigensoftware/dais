@@ -280,30 +280,70 @@ def _panel_detail_lines(app, sel_row):
     return out
 
 
+def _find_task(snap, tid):
+    """The Task with this id anywhere in the snapshot (running rows carry only a task_id), or None."""
+    if not (snap and tid):
+        return None
+    for p in snap.projects:
+        for ts in p.tasks_by_status.values():
+            for t in ts:
+                if t.id == tid:
+                    return t
+    return None
+
+
+def _note_lines(task, width):
+    """The task's spec/notes as display lines (wrapped to width), sub-heads broken out — so while an
+    agent runs you can see WHAT it's working from, not just the log. Empty when there are no notes."""
+    if not task or not task.notes:
+        return []
+    out = ["notes:"]
+    for ln in task.notes.split("\n"):
+        if not ln.strip():
+            out.append("")
+            continue
+        for piece in _split_subheads(ln):
+            if piece.strip():
+                out.extend(d.wrap_cols("  " + piece.strip(), width, subsequent_indent="    "))
+    return out
+
+
 def render_inspector_live_log(scr, inner, app, sel_row):
-    """Stream a running agent's LIVE LOG in the inspector: a short header (project/agent · elapsed ·
-    task), a dim separator, then the log tail filling the rest — re-read every draw so it updates
-    live, error lines in red (same vocabulary as the log wall). Replaces the old 'press l' hint."""
-    header = app.running_header(sel_row, app._now())
-    for i, ln in enumerate(header[:inner.h]):
+    """The running selection's inspector: a short header, then the task's NOTES/spec (so you can see
+    what it's working from), a dim separator, then the LIVE LOG tail filling the rest — re-read every
+    draw so it streams, errors red (same vocabulary as the log wall). Notes are capped to ~half the
+    space so the log always keeps room; the whole thing replaces the old 'press l' hint."""
+    bottom = inner.y + inner.h
+    y = inner.y
+    for i, ln in enumerate(app.running_header(sel_row, app._now())):
+        if y >= bottom:
+            return
         attr = (app._cp(_STRUCTURE) | curses.A_BOLD) if i == 0 else _inspector_attr(app, ln)
-        _add(scr, inner.y + i, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, attr)
-    used = min(len(header), inner.h)
-    if used < inner.h:
-        _add(scr, inner.y + used, inner.x, clip_cols("─ live log ─", inner.w),
-             inner.x + inner.w, curses.A_DIM)
-        used += 1
-    log_h = inner.h - used
+        _add(scr, y, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, attr)
+        y += 1
+    notes = _note_lines(_find_task(app.snap, sel_row.get("task_id")), inner.w)
+    if notes and bottom - y > 8:                    # only if there's room for notes AND a usable log
+        cap = max(3, (bottom - y - 4) // 2)         # notes take ≤ ~half; the log gets the rest
+        for ln in notes[:cap]:
+            _add(scr, y, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, _inspector_attr(app, ln))
+            y += 1
+        if len(notes) > cap:
+            _add(scr, y, inner.x, clip_cols("  …", inner.w), inner.x + inner.w, curses.A_DIM)
+            y += 1
+    if y < bottom:
+        _add(scr, y, inner.x, clip_cols("─ live log ─", inner.w), inner.x + inner.w, curses.A_DIM)
+        y += 1
+    log_h = bottom - y
     if log_h <= 0:
         return
     tail = d.tail_lines(sel_row.get("log_path"), log_h) if sel_row.get("log_path") else []
     if not tail:
-        _add(scr, inner.y + used, inner.x, clip_cols("  (waiting for output…)", inner.w),
+        _add(scr, y, inner.x, clip_cols("  (waiting for output…)", inner.w),
              inner.x + inner.w, curses.A_DIM)
         return
     for i, ln in enumerate(tail):
         attr = app._log_attr(ln)                    # rich fmt-stream coloring (💬/🔧/✓/↳ · errors red)
-        _add(scr, inner.y + used + i, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, attr)
+        _add(scr, y + i, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, attr)
 
 
 def render_inspector(scr, rect, app, focused):

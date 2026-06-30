@@ -1652,3 +1652,35 @@ class TestLiveLogColoring(unittest.TestCase):
         chat = next(c for c in scr.calls if "💬" in c[2])
         self.assertEqual(tool[3], 4000)                       # 🔧 tool call → yellow (_cp 4)
         self.assertEqual(chat[3], 3000)                       # 💬 narration → cyan (_cp 3)
+
+
+class TestRunningInspectorNotes(unittest.TestCase):
+    """While a task runs, the inspector shows the task's NOTES/spec above the live log — so you can
+    see what the agent is working from, not only the streaming log."""
+
+    def test_running_inspector_shows_notes_and_log(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-rin-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn()
+        conn.execute("INSERT INTO tasks(id,project,title,status,priority,notes) "
+                     "VALUES('w-1','cedar','build the icon','doing','high',"
+                     "'SPEC: add the launcher icon and the splash asset')")
+        conn.commit()
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        logf = os.path.join(tempfile.mkdtemp(prefix="dais-log-"), "a.log")
+        with open(logf, "w") as fh:
+            fh.write("🔧 Edit icon.png\n")
+        thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": logf}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            papp.sel_id = next(r for r in papp.left_rows() if r["kind"] == "running")["id"]
+            scr = FakeScr(40, 200)
+            pn.render_inspector(scr, pn.Rect(1, 0, 38, 120), papp, focused=False)
+            text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("notes:", text)                                  # the spec header
+        self.assertIn("add the launcher icon and the splash asset", text)   # the notes content
+        self.assertIn("🔧", text)                                       # the live log still streams
+        self.assertIn("live log", text)
