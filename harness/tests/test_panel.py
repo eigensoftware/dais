@@ -1684,3 +1684,28 @@ class TestRunningInspectorNotes(unittest.TestCase):
         self.assertIn("add the launcher icon and the splash asset", text)   # the notes content
         self.assertIn("🔧", text)                                       # the live log still streams
         self.assertIn("live log", text)
+
+
+class TestRunningTaskGuess(unittest.TestCase):
+    """running_task_id: an engineer run (doing/ready present) is never mislabeled as the lead's
+    needs_scoping task; the lead's scoping run (only needs_scoping) still shows its task."""
+
+    def _proj(self, by_status):
+        return d.Project(name="p", stage_goal="", running=[("engineer", None)],
+                         tasks_by_status={st: [d.Task(id=i, title=i, status=st, priority="medium")
+                                               for i in ids] for st, ids in by_status.items()})
+
+    def test_doing_wins_over_scoping(self):
+        p = self._proj({"doing": ["a"], "needs_scoping": ["s"]})
+        self.assertEqual(d.running_task_id(p), "a")
+
+    def test_ready_preferred_over_scoping(self):
+        # the screenshot bug: ready work present + a needs_scoping task → show the ready task, NOT
+        # the scoping one (an engineer is the one running, not the lead).
+        p = self._proj({"ready": ["r"], "needs_scoping": ["s"]})
+        self.assertEqual(d.running_task_id(p), "r")
+
+    def test_scoping_shows_when_it_is_the_only_work(self):
+        # by precedence the lead only runs when build/QA queues are empty → needs_scoping is the task.
+        p = self._proj({"needs_scoping": ["s"]})
+        self.assertEqual(d.running_task_id(p), "s")

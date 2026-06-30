@@ -567,10 +567,13 @@ _INFLIGHT_ORDER = ["doing", "needs_qa", "changes_requested", "needs_review"]
 
 
 def running_task_id(project):
-    """Best guess at the task a running agent is working, or '' (the live log is the
-    real signal). One agent per project, so this is project-scoped. needs_scoping is included
-    last so a running LEAD shows the task it's fleshing out (else a scoping run reads as task-less)."""
-    for st in _INFLIGHT_ORDER + ["needs_scoping"]:
+    """Best guess at the task a running agent is working, or '' (the live log is the real signal).
+    One agent per project, so this is project-scoped. Order: in-flight (doing/qa/changes/review) →
+    ready (the builder's pulled task) → needs_scoping LAST. needs_scoping only surfaces when nothing
+    earlier exists — which, by the verify→build→plan precedence, is exactly when the LEAD (not a
+    builder) is the one running. So a running LEAD shows the task it's scoping, while an engineer run
+    is never mislabeled as the lead's needs_scoping task (it shows the builder's doing/ready task)."""
+    for st in _INFLIGHT_ORDER + ["ready", "needs_scoping"]:
         tasks = project.tasks_by_status.get(st)
         if tasks:
             return tasks[0].id
