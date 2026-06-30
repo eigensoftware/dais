@@ -338,10 +338,14 @@ MD
     # Logged as a run (agent='deploy') so it shows in the FEED / runs history + is cancellable; on
     # success it records the deployed origin/main SHA in the summary so the panel can show how many
     # merged commits are still un-deployed.
-    proj="${1:?usage: dais deploy <project>}"; pe="$(sqlesc "$proj")"
+    #   --migrate  →  run the `deploy_migrate:` command instead (a migration-inclusive deploy). This
+    #   is CLI-only + manual on purpose (the panel `D` only ever runs the plain `deploy:`), so a
+    #   point-of-no-return migration release can't be fat-fingered — do the pre-flight first.
+    proj="${1:?usage: dais deploy <project> [--migrate]}"; shift 2>/dev/null || true
+    pe="$(sqlesc "$proj")"; key=deploy; for a in "$@"; do [ "$a" = "--migrate" ] && key=deploy_migrate; done
     [ -d "$DAIS_HOME/projects/$proj" ] || { echo "no such project: $proj"; exit 1; }
-    cmd="$(pcfg "$proj" deploy)"
-    [ -n "$cmd" ] || { echo "deploy: no 'deploy:' command in projects/$proj/project.yaml — nothing to run"; exit 1; }
+    cmd="$(pcfg "$proj" "$key")"
+    [ -n "$cmd" ] || { echo "deploy: no '$key:' command in projects/$proj/project.yaml — nothing to run"; exit 1; }
     PDIR="$DAIS_HOME/projects/$proj"; mkdir -p "$PDIR/logs"
     LOCK="$PDIR/.lock-deploy"
     if [ -e "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
@@ -350,14 +354,15 @@ MD
     LOG="$PDIR/logs/deploy-$(date +%Y%m%d-%H%M%S).log"
     RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$pe','deploy','$LOG'); SELECT last_insert_rowid();")"
     rp="$(repo_path "$proj")"
-    echo "▶ deploying $proj — running its deploy: command…" | tee "$LOG"
+    echo "▶ deploying $proj — running its $key: command…" | tee "$LOG"
     ( cd "$rp" 2>/dev/null; eval "$cmd" ) 2>&1 | tee -a "$LOG"
     rc=${PIPESTATUS[0]}
     if [ "$rc" -eq 0 ]; then
       git -C "$rp" fetch -q origin main 2>/dev/null || true   # record what's now live (remote main)
       sha="$(git -C "$rp" rev-parse --short origin/main 2>/dev/null || git -C "$rp" rev-parse --short HEAD 2>/dev/null || echo '?')"
-      db "UPDATE runs SET ended_at=datetime('now'), status='succeeded', summary='deployed $sha' WHERE id=$RUNID;"
-      echo "✓ deployed $proj ($sha)"
+      mtag=""; [ "$key" = deploy_migrate ] && mtag=" (migrate)"
+      db "UPDATE runs SET ended_at=datetime('now'), status='succeeded', summary='deployed $sha$mtag' WHERE id=$RUNID;"
+      echo "✓ deployed $proj ($sha)$mtag"
     else
       db "UPDATE runs SET ended_at=datetime('now'), status='failed', summary='deploy failed (exit $rc)' WHERE id=$RUNID;"
       echo "✗ deploy failed (exit $rc) — see $LOG"

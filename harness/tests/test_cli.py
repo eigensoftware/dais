@@ -818,3 +818,38 @@ class TestDeploy(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         row = q(self.root, "SELECT status FROM runs WHERE project='app' ORDER BY id DESC LIMIT 1")
         self.assertEqual(row[0], "failed")
+
+
+class TestDeployMigrate(unittest.TestCase):
+    """`dais deploy <p> --migrate` runs the separate `deploy_migrate:` command (CLI-only, manual)."""
+
+    def setUp(self):
+        self.root = make_sandbox()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def _project(self, lines):
+        d = os.path.join(self.root, "projects", "app")
+        os.makedirs(os.path.join(d, "logs"), exist_ok=True)
+        with open(os.path.join(d, "project.yaml"), "w") as f:
+            f.write("project: app\nrepo: %s\nstage_goal: x\n%s\n" % (self.root, lines))
+
+    def test_migrate_uses_the_migrate_command(self):
+        self._project("deploy: echo STANDARD\ndeploy_migrate: echo MIGRATED-OK")
+        r = dais(self.root, "deploy", "app", "--migrate")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("MIGRATED-OK", r.stdout)
+        self.assertNotIn("STANDARD", r.stdout)                 # standard deploy NOT run
+        row = q(self.root, "SELECT summary FROM runs WHERE project='app' ORDER BY id DESC LIMIT 1")
+        self.assertIn("(migrate)", row[0])                     # tagged in history
+
+    def test_plain_deploy_ignores_migrate_command(self):
+        self._project("deploy: echo STANDARD\ndeploy_migrate: echo MIGRATED-OK")
+        r = dais(self.root, "deploy", "app")
+        self.assertIn("STANDARD", r.stdout)
+        self.assertNotIn("MIGRATED-OK", r.stdout)
+
+    def test_migrate_without_command_errors(self):
+        self._project("deploy: echo STANDARD")
+        r = dais(self.root, "deploy", "app", "--migrate")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no 'deploy_migrate:'", r.stdout + r.stderr)
