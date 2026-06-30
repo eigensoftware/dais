@@ -1177,3 +1177,46 @@ class TestFeedTicker(unittest.TestCase):
         for (y, x, s, _a) in scr.calls:
             self.assertEqual(y, 38)
             self.assertLessEqual(pn.disp_width(s), 60 - x)   # nothing escapes the rect
+
+
+class TestRailScroll(unittest.TestCase):
+    """The PROJECTS rail is capped at _PROJ_MAX_H; with more projects than fit it must scroll to
+    keep the cursor reachable and badge the hidden count, instead of silently truncating the tail."""
+
+    def _papp(self, n_projects):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-rail-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn()
+        _seed(conn, [(f"p{i}-1", f"proj{i:02d}", "t", "ready", "med", None)
+                     for i in range(n_projects)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def test_cursor_stays_visible_when_selected_past_the_window(self):
+        papp = self._papp(15)
+        items = pn._rail_items(papp)             # "ALL" + 15 projects = 16 rail items
+        papp._rail_i = len(items) - 1            # select the very last project
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 6, 30), papp, focused=True)   # body_h = 5
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn(items[-1], text)           # the tail project is now on-screen (was truncated)
+        self.assertNotIn("ALL", text)            # the top scrolled off to make room
+        cursor = [c for c in scr.calls if (c[3] & curses.A_REVERSE) and items[-1] in c[2]]
+        self.assertTrue(cursor)                  # the reverse cursor lands on the selected row
+
+    def test_overflow_badge_counts_hidden_projects(self):
+        papp = self._papp(15)                    # 16 items, body_h 5 -> 11 hidden
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 6, 30), papp, focused=True)
+        title = scr.calls[0][2]                  # the pane-title row is the first _add
+        self.assertIn("PROJECTS", title)
+        self.assertIn("+11", title)
+
+    def test_no_badge_and_top_anchored_when_all_fit(self):
+        papp = self._papp(4)                     # 5 items, comfortably inside body_h
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 30), papp, focused=True)
+        self.assertNotIn("+", scr.calls[0][2])   # no overflow badge when nothing is hidden
+        self.assertIn("ALL", "\n".join(c[2] for c in scr.calls))

@@ -307,12 +307,20 @@ def _rail_items(app):
 
 def render_rail(scr, rect, app, focused):
     """Project navigator: ALL + per-project rows in one uniform color; only the live (running)
-    project is green; the active filter is bold with a » mark; the focused cursor is reverse."""
-    inner = render_pane_title(scr, rect, "PROJECTS", focused)
+    project is green; the active filter is bold with a » mark; the focused cursor is reverse.
+    When more projects than fit, the body scrolls to keep the cursor visible (same bottom-anchored
+    idiom as WORK) and the title badges the hidden count ("PROJECTS  +N") so the tail isn't silently
+    truncated."""
     items = _rail_items(app)
     ri = getattr(app, "_rail_i", 0)
+    body_h = max(0, rect.h - 1)                          # rows for items; the title takes the first
+    base = max(0, ri - body_h + 1) if body_h else 0      # scroll so the selected row stays on-screen
+    hidden = max(0, len(items) - body_h)                 # projects off-screen at any scroll position
+    title = "PROJECTS" if not hidden else f"PROJECTS  +{hidden}"
+    inner = render_pane_title(scr, rect, title, focused)
     pf = getattr(app, "project_filter", None)
-    for idx, name in enumerate(items[:inner.h]):
+    for vis_idx, name in enumerate(items[base:base + inner.h]):
+        idx = base + vis_idx                            # index into items (cursor/active test on this)
         active = (name == "ALL" and pf is None) or name == pf
         mark = "\xbb" if active else " "                    # »
         p = (next((x for x in app.snap.projects if x.name == name), None)
@@ -325,15 +333,15 @@ def render_rail(scr, rect, app, focused):
             ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER)
             run = ">" if running else " "
             name_str = f"{mark}{run}{name}"
-            _add(scr, inner.y + idx, inner.x, clip_cols(name_str, inner.w),
+            _add(scr, inner.y + vis_idx, inner.x, clip_cols(name_str, inner.w),
                  inner.x + inner.w, attr)
             if ng:                                          # needs-you count: bold yellow so it pops
                 chip_attr = app._cp(_NEEDS_YOU) | curses.A_BOLD | \
                     (curses.A_REVERSE if (focused and idx == ri) else 0)
-                _add(scr, inner.y + idx, inner.x + disp_width(name_str), f" !{ng}",
+                _add(scr, inner.y + vis_idx, inner.x + disp_width(name_str), f" !{ng}",
                      inner.x + inner.w, chip_attr)
         else:
-            _add(scr, inner.y + idx, inner.x, clip_cols(f"{mark} {name}", inner.w),
+            _add(scr, inner.y + vis_idx, inner.x, clip_cols(f"{mark} {name}", inner.w),
                  inner.x + inner.w, attr)
 
 
