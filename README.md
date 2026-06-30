@@ -17,9 +17,9 @@ or content work just as well as code (see [Playbooks](#playbooks-running-any-cra
   Adding a role is a persona file + one line — or let `dais role new` design it for you.
 - **Playbooks:** working conventions are bound to the role, not baked into the universal prompt,
   so one harness spans many domains. The default is `code`.
-- **Founder-gated:** two gates frame the loop — `proposed` (front door: what gets built) and a
-  back-door deliverable gate: `ready_to_merge` for a QA-approved PR you merge, or `needs_review`
-  for a finished non-code deliverable you review and close.
+- **Founder-gated:** gates frame the loop — `proposed` (front door: what gets built), a back-door
+  deliverable gate (`ready_to_merge` for a QA-approved PR you merge, or `needs_review` for a finished
+  non-code deliverable you close), and — where merge ≠ deploy — a manual **deploy** gate.
 - **Just shell + SQLite + a little Python.** No heavy frameworks.
 
 ## Concepts: the tool vs. your workspace
@@ -38,11 +38,15 @@ tool can drive any number of independent workspaces.
 
 ```sh
 git clone https://github.com/eigensoftware/dais ~/dais
-ln -s ~/dais/dais ~/.local/bin/dais          # put `dais` on your PATH (a pointer, not a copy)
+mkdir -p ~/.local/bin && ln -s ~/dais/dais ~/.local/bin/dais   # put `dais` on your PATH (a pointer, not a copy)
 
 dais init ~/my-workspace                     # bootstrap a workspace — board + dais.yaml + CONTEXT.md + projects/
 mkdir -p ~/.dais && echo "home=$HOME/my-workspace" > ~/.dais/config   # make it your default DAIS_HOME
 ```
+
+`~/.local/bin` must be on your `PATH`. If `dais` isn't found after the symlink, add it (then restart
+the shell): `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`. Or symlink into a dir already on
+your PATH (e.g. `/usr/local/bin`), or just call `~/dais/dais` directly.
 
 `dais init` is the step that creates the workspace — without it you get a board and `projects/` but
 no `dais.yaml` or workspace `CONTEXT.md` (the latter is injected into every agent run). It's idempotent,
@@ -179,14 +183,17 @@ A role's `handles` is reactive ownership: a cadence role (e.g. a `lead` on `ever
 
 | Command | What it does |
 |---|---|
+| `dais init [path]` | bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board); idempotent |
 | `dais status` | the dashboard — running now, merge-ready, blocked-on-you, queues, recent runs |
-| `dais top [secs]` | live master–detail control panel — focal-point vitals, status dots, collapse-when-empty bands, outlined inspector |
+| `dais top [secs]` | the live control panel (see [Driving the control panel](#driving-the-control-panel-dais-top)) |
 | `dais backlog <project>` | stage goal + ranked queue |
+| `dais tasks <project>` | list a project's tasks (filter by `--status` / `--assignee`) |
 | `dais watch [secs] [N]` | run the loop (N = parallel agents, 1–5) |
 | `dais pause` / `dais resume` | park / un-park the loop |
 | `dais tick [project]` | run one scheduling tick (the router picks who runs) |
 | `dais run <project> <agent>` | run a specific agent now |
 | `dais start <id>` | run the role that handles this task's status, right now (bypasses pause) |
+| `dais cancel <project>` | stop the project's in-flight agent (marks the run interrupted) |
 | `dais task add/set …` | manage the board (incl. `--depends-on <id>` to gate on a predecessor) |
 | `dais handoff <id> <role>` | hand a task to a role (sets the status that role handles) |
 | `dais approve <id>` | approve a `proposed` initiative → `ready` |
@@ -198,7 +205,8 @@ A role's `handles` is reactive ownership: a cadence role (e.g. a `lead` on `ever
 | `dais migrate` | apply pending DB migrations (run with the loop paused) |
 | `dais schedule install [secs]` | background ticks (launchd on macOS, cron on Linux) |
 | `dais learn <project> "…"` | append a durable decision/gotcha to the project's CONTEXT.md |
-| `dais logs <project>` | tail the project's run logs |
+| `dais actions <id>` | list the founder actions valid for a task + the exact command for each |
+| `dais logs <project> [N]` | recent runs + their saved log paths (open one from the panel's `r` view) |
 
 ## Layout
 
