@@ -341,9 +341,22 @@ MD
     #   --migrate  →  run the `deploy_migrate:` command instead (a migration-inclusive deploy). This
     #   is CLI-only + manual on purpose (the panel `D` only ever runs the plain `deploy:`), so a
     #   point-of-no-return migration release can't be fat-fingered — do the pre-flight first.
-    proj="${1:?usage: dais deploy <project> [--migrate]}"; shift 2>/dev/null || true
-    pe="$(sqlesc "$proj")"; key=deploy; for a in "$@"; do [ "$a" = "--migrate" ] && key=deploy_migrate; done
+    #   --mark-deployed [SHA]  →  record a deploy WITHOUT running anything: sets the baseline to SHA
+    #   (default current origin/main) so "awaiting deploy" starts tracking. Use it to bootstrap a
+    #   project whose prod is already current, or to log a deploy done out-of-band.
+    proj="${1:?usage: dais deploy <project> [--migrate] [--mark-deployed [SHA]]}"; shift 2>/dev/null || true
+    pe="$(sqlesc "$proj")"; key=deploy; mark=0; marksha=""
+    while [ $# -gt 0 ]; do case "$1" in
+      --migrate)       key=deploy_migrate; shift;;
+      --mark-deployed) mark=1; shift; case "${1:-}" in ""|--*) ;; *) marksha="$1"; shift;; esac;;
+      *) shift;; esac; done
     [ -d "$DAIS_HOME/projects/$proj" ] || { echo "no such project: $proj"; exit 1; }
+    if [ "$mark" = 1 ]; then
+      rp="$(repo_path "$proj")"; git -C "$rp" fetch -q origin main 2>/dev/null || true
+      sha="${marksha:-$(git -C "$rp" rev-parse --short origin/main 2>/dev/null || echo '?')}"
+      db "INSERT INTO runs(project,agent,status,summary,started_at,ended_at) VALUES('$pe','deploy','succeeded','deployed $sha (marked)',datetime('now'),datetime('now'));"
+      echo "✓ marked $proj deployed at $sha — baseline recorded; nothing was run"; exit 0
+    fi
     cmd="$(pcfg "$proj" "$key")"
     [ -n "$cmd" ] || { echo "deploy: no '$key:' command in projects/$proj/project.yaml — nothing to run"; exit 1; }
     PDIR="$DAIS_HOME/projects/$proj"; mkdir -p "$PDIR/logs"
