@@ -57,7 +57,7 @@ dais scaffold myproject     # create a project from the template (edit its proje
 dais lint myproject         # validate the project config
 dais status                 # the dashboard: queues, running agents, recent runs
 dais watch                  # run the loop: one agent per tick, drains the queue
-dais top                    # live mission-control TUI (press `m` for the focal-point skin)
+dais top                    # live mission-control TUI (focal-point vitals, status dots, outlined inspector)
 ```
 
 ## Playbooks: running any craft
@@ -91,7 +91,7 @@ confirm, and `dais lint` guards the one-reactive-role-per-status invariant.
 | Command | What it does |
 |---|---|
 | `dais status` | the dashboard — running now, merge-ready, blocked-on-you, queues, recent runs |
-| `dais top [secs]` | live master–detail TUI; `m` toggles the mission-control skin (focal-point vitals, status dots) |
+| `dais top [secs]` | live master–detail control panel — focal-point vitals, status dots, collapse-when-empty bands, outlined inspector |
 | `dais backlog <project>` | stage goal + ranked queue |
 | `dais watch [secs] [N]` | run the loop (N = parallel agents, 1–5) |
 | `dais pause` / `dais resume` | park / un-park the loop |
@@ -118,7 +118,7 @@ harness/
   run-agent.sh        runs an agent headless (claude -p), streams + logs what it changed
   router.py           decides who runs next from each project's roles file; also `dais lint`
   dashboard.py        the data layer + the classic status/top renderers
-  panel.py            the default `dais top` control panel (responsive; `m` = mission-control skin)
+  panel.py            the default `dais top` control panel (responsive mission-control cockpit)
   playbooks/          craft conventions injected per role (code, legal, content, …)
   lib.sh schema.sql   shared helpers + the board schema
   migrations/         ordered DB migrations (applied by `dais migrate` / first init)

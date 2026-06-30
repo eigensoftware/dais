@@ -214,7 +214,9 @@ class TestChromePanes(unittest.TestCase):
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
         text = scr.calls[0][2]               # full header is first call; ng>0 adds a yellow overlay
         self.assertIn("DAIS", text)
-        self.assertIn("1 need you", text)     # classic strip (default skin): honest gate count
+        self.assertIn("1 NEED YOU", text)     # the gate count — the hero, uppercased when >0
+        self.assertNotIn(">", text)           # no leftover ">0 running" quirk
+        self.assertNotIn("LIVE", text)        # no hardcoded LIVE contradicting the watch badge
         self.assertNotIn("5h", text)          # NO fake budget bar
 
     def test_rail_lists_projects(self):
@@ -370,9 +372,9 @@ class TestPanelWorkRows(unittest.TestCase):
         self.assertTrue(any(r["kind"] == "task" and r["status"] == "ready" for r in rows))
 
     def test_empty_bands_collapse_to_a_single_dim_header(self):
-        # mission-control: a quiet band is ONE dim header (tagged empty), not a header + "(none)" row
+        # a quiet band is ONE dim header (tagged empty), not a header + "(none)" filler row
         snap = self._snap(self._proj("x"))                  # nothing running / gated / in flight
-        rows = pn.panel_work_rows(snap, mc=True)
+        rows = pn.panel_work_rows(snap)
         for name in ("RUNNING", "NEEDS YOU", "IN FLIGHT"):
             band = next(r for r in rows if r["kind"] == "band" and name in r["label"])
             self.assertTrue(band.get("empty"), name)        # flagged so render can dim it
@@ -381,14 +383,6 @@ class TestPanelWorkRows(unittest.TestCase):
                              any(s in r.get("label", "")
                                  for s in ("none running", "nothing needs you", "nothing in flight"))
                              for r in rows))
-
-    def test_classic_keeps_the_empty_band_filler(self):
-        # default skin (mc=False) keeps the "(none …)" rows — the stable baseline is unchanged
-        snap = self._snap(self._proj("x"))
-        rows = pn.panel_work_rows(snap)                      # no mc
-        labels = [r.get("label", "") for r in rows if r["kind"] == "info"]
-        self.assertTrue(any("none running" in l for l in labels))
-        self.assertTrue(any("nothing needs you" in l for l in labels))
 
     def test_populated_band_is_not_flagged_empty(self):
         snap = self._snap(self._proj("x", ready_to_merge=1))   # NEEDS YOU has a gate
@@ -649,10 +643,9 @@ class TestRolePalette(unittest.TestCase):
 
     def test_active_bands_share_one_structure_color(self):
         # consistency: every NON-EMPTY band header is the SAME cyan structure bar (not a per-band
-        # hue); empty bands recede to dim (mission-control: the screen reads calm when nominal)
+        # hue); empty bands recede to dim (the screen reads calm when nominal)
         papp = self._papp([("g-1", "p", "gate", "needs_review", "high", None),   # NEEDS YOU active
                            ("l-1", "p", "loop", "ready", "med", None)])          # IN FLIGHT active
-        papp._mc = True                                              # empty-band dimming is mission-control
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
         cyan = 3000 | curses.A_REVERSE | curses.A_BOLD                # _cp(3) = structure
@@ -701,13 +694,10 @@ class TestRolePalette(unittest.TestCase):
         self.assertEqual(pn._inspector_attr(papp, "runs touching z-1:"), 3000 | curses.A_BOLD)
         self.assertEqual(pn._inspector_attr(papp,
                          "assignee founder · prio high · pr (none)"), 4000)         # yellow
-        # mission-control: known proposal sub-heads pop as structure cyan-bold; unknown "X:" stays plain
-        papp._mc = True
+        # known proposal sub-heads pop as structure cyan-bold; an unknown "X:" stays plain
         self.assertEqual(pn._inspector_attr(papp, "  WHAT: do the thing"), 3000 | curses.A_BOLD)
         self.assertEqual(pn._inspector_attr(papp, "  WHY NOW: it's time"), 3000 | curses.A_BOLD)
         self.assertEqual(pn._inspector_attr(papp, "  LEAD CALL: blocked"), 0)   # not in the set
-        papp._mc = False
-        self.assertEqual(pn._inspector_attr(papp, "  WHAT: do the thing"), 0)   # classic: no sub-head hue
 
     def test_inspector_note_body_and_title_stay_plain(self):
         # free-text must NOT be miscolored by substring matches (the founder's redline)
@@ -733,7 +723,7 @@ class TestRolePalette(unittest.TestCase):
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
         hits = [c for c in scr.calls
-                if "need you" in c[2] and c[3] == (4000 | curses.A_REVERSE | curses.A_BOLD)]
+                if "NEED YOU" in c[2] and c[3] == (4000 | curses.A_REVERSE | curses.A_BOLD)]
         self.assertTrue(hits)
 
     def test_vitals_no_yellow_overlay_when_zero(self):
@@ -799,7 +789,6 @@ class TestInspectorReflow(unittest.TestCase):
         # the proposal template (WHAT · WHY NOW · EXPECTED IMPACT …) is often one run-on line;
         # the inspector must break it into a scannable outline — each sub-head starts a line
         papp = self._papp("WHAT: do the thing. WHY NOW: it's time. EXPECTED IMPACT: big.")
-        papp._mc = True                                      # the outline is a mission-control feature
         lines = pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1])
         starts = [l.strip() for l in lines if l.strip()]
         self.assertTrue(any(s.startswith("WHAT:") for s in starts))
@@ -1282,7 +1271,6 @@ class TestMissionControlDots(unittest.TestCase):
         papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
         papp.snap = d.load_snapshot(conn, root=root)
         papp._cp = lambda n: n * 1000
-        papp._mc = True                          # this class exercises the mission-control skin
         return papp
 
     def test_vitals_running_token_is_green_when_active(self):
@@ -1315,28 +1303,29 @@ class TestMissionControlDots(unittest.TestCase):
         self.assertIn(pn._DOT_RUN, row[2])       # ● marks the live project (replaces the old '>')
 
 
-class TestSkinToggle(unittest.TestCase):
-    """The mission-control skin is OFF by default (the baseline look is unchanged) and flips live on 'm'."""
+class TestVitalsBar(unittest.TestCase):
+    """The top vitals readout has its OWN background colour (_VITALS) so it never reads as a focused
+    pane title (a plain reverse bar) or a band header (cyan). The panel is one default look now —
+    the mission-control skin was promoted to default and the `m` toggle removed."""
 
     def _papp(self, rows):
         import tempfile
-        root = tempfile.mkdtemp(prefix="dais-skin-")
+        root = tempfile.mkdtemp(prefix="dais-vit-")
         os.makedirs(os.path.join(root, "projects"), exist_ok=True)
         conn = _conn(); _seed(conn, rows)
         papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
         papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
         return papp
 
-    def test_default_skin_is_classic(self):
+    def test_vitals_bar_uses_a_distinct_background(self):
         papp = self._papp([("z-1", "zeta", "t", "ready", "med", None)])
-        self.assertFalse(papp._mc)               # off unless DAIS_MC / pressing m
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
-        self.assertIn("LIVE", scr.calls[0][2])   # classic strip is the untouched baseline
+        base = scr.calls[0][3]                                          # the full-width base bar
+        self.assertEqual(base, (pn._VITALS * 1000) | curses.A_REVERSE | curses.A_BOLD)
+        self.assertNotEqual(base, curses.A_REVERSE | curses.A_BOLD)     # ≠ a focused pane title bar
 
-    def test_m_key_toggles_the_skin(self):
+    def test_converged_to_one_default_no_skin_flag(self):
         papp = self._papp([("z-1", "zeta", "t", "ready", "med", None)])
-        self.assertTrue(papp.handle(ord("m"), papp.left_rows(), 0, None))   # alive
-        self.assertTrue(papp._mc)                                           # flipped on
-        papp.handle(ord("m"), papp.left_rows(), 0, None)
-        self.assertFalse(papp._mc)                                          # and back off
+        self.assertFalse(hasattr(papp, "_mc"))     # one default look; the m-toggle is gone

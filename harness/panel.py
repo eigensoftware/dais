@@ -4,14 +4,13 @@
 PanelApp subclasses dashboard.App: it inherits all data/action-engine/log/selection
 logic and overrides only the view (draw/handle) to render panes into a responsive
 layout. This is the default `dais top`; `DAIS_CLASSIC=1 dais top` opts back into the
-classic single-pane UI. The panel carries an optional "mission-control" skin (focal-point
-vitals, status dots, collapsed empty bands, an outlined inspector) toggled live with `m`
-(or started on via DAIS_MC=1); default is off, so the baseline look is unchanged.
+classic single-pane UI. The panel reads as a mission-control cockpit: focal-point vitals
+(a distinct-coloured top readout), status dots, bands that collapse when empty, and an
+outlined inspector.
 """
 from collections import namedtuple
 
 import curses
-import os
 import re
 import textwrap
 
@@ -124,6 +123,8 @@ _STRUCTURE = 3      # cyan   — section/band headers + the inspector's header l
 _LIVE = 1           # green  — running agents, the live project, succeeded/pass
 _NEEDS_YOU = 4      # yellow — founder-gated work: gate rows, counts, chips, "prio high"
 _BAD = 2            # red    — failed/error/blocked lines
+_VITALS = 5         # magenta — the top vitals readout bar; a distinct background so it never reads
+                    #           as a focused pane title (white reverse bar) or a band header (cyan)
 # focus/selection  = curses.A_REVERSE | curses.A_BOLD (a bright bar; no color pair)
 # inactive         = curses.A_DIM (history, parked, placeholders, labels)
 _BAND_DIM = {"ARCHIVE", "DEFERRED"}                          # history/parked headers recede (inactive)
@@ -168,8 +169,8 @@ def render_work(scr, rect, app, focused):
         if r["kind"] == "band":
             name = r["label"].rsplit(" · ", 1)[0]       # "NEEDS YOU · 1" -> "NEEDS YOU"
             bar = pad_cols(f"▌ {r['label']} ", inner.w)
-            if (getattr(app, "_mc", False) and r.get("empty")) or name in _BAND_DIM:
-                battr = curses.A_DIM                          # mc: empty bands recede; ARCHIVE/DEFERRED always
+            if r.get("empty") or name in _BAND_DIM:
+                battr = curses.A_DIM                          # empty / ARCHIVE / DEFERRED recede (nominal)
             else:                                            # every active band: one structure color
                 battr = app._cp(_STRUCTURE) | curses.A_REVERSE | curses.A_BOLD
             _add(scr, y, inner.x, bar, inner.x + inner.w, battr)
@@ -228,8 +229,8 @@ def _inspector_attr(app, line):
         return 0
     if s == "notes:" or s.startswith("runs touching"):      # the only real section headers
         return app._cp(_STRUCTURE) | curses.A_BOLD
-    if getattr(app, "_mc", False) and any(s.startswith(h) for h in _SUBHEADS):
-        return app._cp(_STRUCTURE) | curses.A_BOLD         # mc: a known proposal sub-head pops as structure
+    if any(s.startswith(h) for h in _SUBHEADS):            # a known proposal sub-head pops as structure
+        return app._cp(_STRUCTURE) | curses.A_BOLD
     if s.startswith("assignee ") and " · prio " in low:     # the generated meta line, matched precisely
         return app._cp(_NEEDS_YOU) if ("· prio high" in low or "· prio urgent" in low) else curses.A_DIM
     return 0                                                # title + note body: plain
@@ -254,18 +255,15 @@ def _panel_detail_lines(app, sel_row):
            ""]
     if task.notes:
         out.append("notes:")
-        mc = getattr(app, "_mc", False)
         for ln in task.notes.split("\n"):           # keep the author's structure; blanks stay blank
             if not ln.strip():
                 out.append("")
-            elif mc:
-                # mc: break a run-on line before each known sub-head so WHAT/WHY NOW/IMPACT/… each
-                # start a line and become a scannable outline (no-op when already broken out)
-                for piece in _split_subheads(ln):
-                    if piece.strip():
-                        out.append("  " + piece.strip())
-            else:
-                out.append("  " + ln)               # classic: verbatim, the author's own line breaks
+                continue
+            # break a run-on line before each known sub-head so WHAT/WHY NOW/IMPACT/… each start a
+            # line and become a scannable outline (no-op when the author already broke them out)
+            for piece in _split_subheads(ln):
+                if piece.strip():
+                    out.append("  " + piece.strip())
         out.append("")
     out.append(f"runs touching {task.id}:")
     for r in d.runs_touching(p.recent_runs, task.id):
@@ -308,11 +306,11 @@ def render_inspector(scr, rect, app, focused):
 
 
 def render_vitals(scr, rect, app):
-    """Honest org vitals: identity · watch · running · gates · cooling · clock. NO budget bar.
-    Classic: one strip, the 'N need you' token yellow when N>0. Mission-control (app._mc): a ranked
-    cockpit strip whose two operational numbers are the hero — ● N running goes green when agents are
-    live, ◆ N NEED YOU goes yellow + UPPERCASE when work is gated — so it reads calm when nominal and
-    alarms when there's a gate."""
+    """The top cockpit readout: identity ▸ HERO(running · need you) · context(watch/proj/cooling) ·
+    clock. The two operational numbers are the hero — ● N running goes green when agents are live,
+    ◆ N NEED YOU goes yellow + UPPERCASE when work is gated (◇ when nominal) — so the strip reads calm
+    when nothing needs you and alarms when there's a gate. The base bar is its OWN colour (_VITALS) so
+    it never reads as a focused pane title (white reverse bar) or a band header (cyan). NO budget bar."""
     snap = app.snap
     ws = snap.workspace if snap else None
     now = app._now()
@@ -327,18 +325,6 @@ def render_vitals(scr, rect, app):
     clk = d.to_local_hhmm(snap.ts, with_secs=True) if snap else ""
     pf = getattr(app, "project_filter", None)
     proj_seg = " · all projects" if pf is None else f" · {pf}"
-    if not getattr(app, "_mc", False):                    # ── classic strip (the stable baseline) ──
-        ident = f"DAIS · {ws} · LIVE" if ws else "DAIS · LIVE"
-        left = f" {ident}  {badge} · >{len(threads)} running · {nproj} proj · "
-        mid = f"{ng} need you"
-        right = f"{proj_seg}{cool}  {clk}"
-        _add(scr, rect.y, rect.x, pad_cols(left + mid + right, rect.w),
-             rect.x + rect.w, curses.A_REVERSE | curses.A_BOLD)
-        if ng > 0:
-            _add(scr, rect.y, rect.x + disp_width(left), mid, rect.x + rect.w,
-                 app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
-        return
-    # ── mission-control: ranked cockpit strip with a colored hero ──
     ident = f" DAIS {_BRAND} {ws}" if ws else " DAIS"     # honesty comes from the watch badge, not a literal "LIVE"
     run_dot = _DOT_RUN if threads else _DOT_IDLE
     run_tok = f"{run_dot} {len(threads)} running"
@@ -347,8 +333,8 @@ def render_vitals(scr, rect, app):
     sep = " · "                                            # between the two hero tokens
     ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}  {clk}"
     line = pre + run_tok + sep + gate_tok + ctx
-    _add(scr, rect.y, rect.x, pad_cols(line, rect.w),
-         rect.x + rect.w, curses.A_REVERSE | curses.A_BOLD)
+    bar = app._cp(_VITALS) | curses.A_REVERSE | curses.A_BOLD   # the readout's own background colour
+    _add(scr, rect.y, rect.x, pad_cols(line, rect.w), rect.x + rect.w, bar)
     if threads:                                            # the run token glows green while agents are live
         _add(scr, rect.y, rect.x + disp_width(pre), run_tok, rect.x + rect.w,
              app._cp(_LIVE) | curses.A_REVERSE | curses.A_BOLD)
@@ -388,7 +374,7 @@ def render_rail(scr, rect, app, focused):
             (curses.A_REVERSE if (focused and idx == ri) else 0)
         if p is not None:
             ng = sum(len(p.tasks_by_status.get(st, [])) for st in d.GATE_ORDER)
-            run = (_DOT_RUN if getattr(app, "_mc", False) else ">") if running else " "
+            run = _DOT_RUN if running else " "              # ● marks the live project (shared with vitals)
             name_str = f"{mark}{run}{name}"
             _add(scr, inner.y + vis_idx, inner.x, clip_cols(name_str, inner.w),
                  inner.x + inner.w, attr)
@@ -487,7 +473,7 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    keys = "tab pane · / filter · g expand · m skin · L logs · ? help · q quit"
+    keys = "tab pane · / filter · g expand · L logs · ? help · q quit"
     if getattr(app, "filtering", False):
         hint = f" /{app.filter}_  ·  {keys}"
     else:
@@ -506,7 +492,6 @@ _HELP_LINES = [
     "  enter             action menu for the selection",
     "  / filter          filter; type, enter to keep, esc to clear",
     "  g expand          show the full backlog, deferred + archive (else compact)",
-    "  m skin            toggle the mission-control skin (live A/B)",
     "  rail + j/k        pick a project (ALL clears the filter)",
     "  l                 open the log pager for the selection",
     "  L logs            live log wall - all running agents (esc back)",
@@ -566,11 +551,10 @@ class PanelApp(d.App):
         self.show_logwall = False
         self.show_overlay = False        # an action's captured output, shown in-panel (e.g. ship)
         self._overlay = None
-        self._mc = bool(os.environ.get("DAIS_MC"))   # mission-control skin — off by default, toggled by 'm'
 
     def left_rows(self):
         rows = panel_work_rows(self.snap, project=self.project_filter,
-                               expanded=self._panel_expanded, mc=self._mc)
+                               expanded=self._panel_expanded)
         if self.filter:                          # honest filter: narrow to matching task/running rows
             rows = [r for r in rows if r["kind"] in ("task", "running")]
             rows = d.filter_rows(rows, self.filter, key=_row_search_text)
@@ -684,10 +668,6 @@ class PanelApp(d.App):
             self.project_filter = None if items[self._rail_i] == "ALL" else items[self._rail_i]
             self.sel_id = None                  # reset work selection to the filtered top
             return True
-        if ch == ord("m"):                      # flip the mission-control skin (live A/B)
-            self._mc = not self._mc
-            self.flash = "mission-control ON" if self._mc else "classic panel"
-            return True
         if ch == ord("b"):                      # 'b' (classic show/hide-parked) is dead here —
             return True                         # backlog + deferred are first-class sections now
         # everything else (j/k select, a/x/+/-/n/o/enter, /, ...) reuses App.handle,
@@ -717,12 +697,11 @@ def _task_row(proj, task, tag):
             "status": task.status, "tag": tag, "sel": True}
 
 
-def panel_work_rows(snap, *, project=None, expanded=False, mc=False):
+def panel_work_rows(snap, *, project=None, expanded=False):
     """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · IN FLIGHT ·
     BACKLOG · DEFERRED · ARCHIVE). `project` limits to one project. `expanded` (the g key) shows
-    the full BACKLOG, reveals DEFERRED rows, and uncaps the ARCHIVE. `mc` (mission-control skin)
-    collapses an empty RUNNING/NEEDS YOU/IN FLIGHT band to just its dim header; classic keeps the
-    '(none …)' filler row."""
+    the full BACKLOG, reveals DEFERRED rows, and uncaps the ARCHIVE. An empty RUNNING/NEEDS YOU/
+    IN FLIGHT band collapses to just its dim header (no '(none …)' filler)."""
     rows = []
     if not snap:
         return rows
@@ -743,39 +722,30 @@ def panel_work_rows(snap, *, project=None, expanded=False, mc=False):
             rows.append({"kind": "spacer", "id": f"__sp::{name}", "sel": False, "label": ""})
         rows.append(_band(name, count))
 
-    # RUNNING
+    # RUNNING — an empty band collapses to just its dim header (no "(none …)" filler), so the
+    # screen reads calm when nominal and only the live/gated bands draw the eye.
     now = "9999-12-31 00:00:00"            # elapsed not needed for the model; render computes it
     threads = [t for t in d.running_threads(snap, now)
                if project is None or t["project"] == project]
     running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
-    # mc: an empty band collapses to just its dim header — the screen reads calm when nominal and
-    # only the live/gated bands draw the eye. classic: keep the "(none …)" filler row.
     add_band("RUNNING", len(threads))
     for t in threads:
         rows.append({"kind": "running", "id": f"run::{t['project']}",
                      "project": t["project"], "task_id": t["task"], "task": None,
                      "status": "doing", "sel": True, "agent": t["agent"],
                      "since": t["since"], "log_path": t["log_path"]})
-    if not threads and not mc:
-        rows.append({"kind": "info", "id": "__run_none", "sel": False, "label": "  (none running)"})
 
     # NEEDS YOU (the founder gates)
     gates = tasks_in(d.GATE_ORDER)
     add_band("NEEDS YOU", len(gates))
     for proj, t in gates:
         rows.append(_task_row(proj, t, GATE_TAG.get(t.status, t.status.upper())))
-    if not gates and not mc:
-        rows.append({"kind": "info", "id": "__gate_none", "sel": False,
-                     "label": "  (nothing needs you)"})
 
     # IN FLIGHT — the in-flight work, shown as rows by default (no g needed)
     loop = tasks_in(_LOOP_STATUSES)
     add_band("IN FLIGHT", len(loop))
     for proj, t in loop:
         rows.append(_task_row(proj, t, t.status))
-    if not loop and not mc:
-        rows.append({"kind": "info", "id": "__loop_none", "sel": False,
-                     "label": "  (nothing in flight)"})
 
     # BACKLOG — the queue-able pool, always visible so you can pull from it (a promotes -> ready)
     backlog = tasks_in(_BACKLOG_STATUSES)
