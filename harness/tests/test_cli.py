@@ -421,6 +421,28 @@ class TestRoleNew(CliTest):
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", "agents", "bad.md")))
 
+    def test_preserves_cadence_trigger_with_colon(self):
+        # 'trigger: every:24h' must survive — the value parser splits on the FIRST colon only
+        dais(self.root, "scaffold", "demo")
+        prop = ("name: metrics\naccess: review\ntrigger: every:24h\n"
+                "handles: -\nplaybook: code\nprec: 7\n---\n# Metrics\nbody\n")
+        r = dais(self.root, "role", "new", "demo", "--desc", "x", "--yes",
+                 env={"DAIS_ROLE_GEN": self._gen_stub(prop)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        roles = open(os.path.join(self.root, "projects", "demo", "roles")).read()
+        self.assertRegex(roles, r"metrics\s+review\s+every:24h\s+-\s+7\s+code")
+
+    def test_strips_spaces_in_comma_handles(self):
+        # a model emitting 'needs_x, needs_y' must not mis-column the whitespace-delimited row
+        dais(self.root, "scaffold", "demo")
+        prop = ("name: dualrole\naccess: edit\ntrigger: reactive\n"
+                "handles: needs_x, needs_y\nplaybook: code\nprec: 8\n---\n# X\nbody\n")
+        r = dais(self.root, "role", "new", "demo", "--desc", "x", "--yes",
+                 env={"DAIS_ROLE_GEN": self._gen_stub(prop)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        roles = open(os.path.join(self.root, "projects", "demo", "roles")).read()
+        self.assertRegex(roles, r"dualrole\s+edit\s+reactive\s+needs_x,needs_y\s+8\s+code")
+
     def test_refuses_to_clobber_existing_role(self):
         dais(self.root, "scaffold", "demo")             # ships agents/engineer.md
         dup = self._gen_stub("name: engineer\naccess: edit\ntrigger: reactive\n"

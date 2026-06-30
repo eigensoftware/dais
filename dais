@@ -368,9 +368,16 @@ prec: <int>
         if [ -n "${DAIS_ROLE_GEN:-}" ]; then proposal="$(DAIS_ROLE_DESC="$desc" $DAIS_ROLE_GEN)"
         else proposal="$(claude -p "$genprompt")"; fi
         [ -n "$proposal" ] || { echo "role new: the generator returned nothing"; exit 1; }
-        field(){ printf '%s\n' "$proposal" | awk -F': *' -v k="$1" 'tolower($1)==k{print $2; exit}'; }
+        # split on the FIRST colon only (so a value like 'every:24h' survives), lowercase the key, trim.
+        field(){ printf '%s\n' "$proposal" | awk -v k="$1" '
+          { i=index($0,":"); if(i){ key=tolower(substr($0,1,i-1));
+              if(key==k){ v=substr($0,i+1); sub(/^[ \t]+/,"",v); sub(/[ \t]+$/,"",v); print v; exit } } }'; }
         name="$(field name)"; access="$(field access)"; trig="$(field trigger)"
         handles="$(field handles)"; pbook="$(field playbook)"; prec="$(field prec)"
+        # the roles row is whitespace-delimited — strip any spaces the model put in these
+        # single-token / comma-list values so the appended columns can't shift.
+        access="${access//[[:space:]]/}"; trig="${trig//[[:space:]]/}"
+        handles="${handles//[[:space:]]/}"; prec="${prec//[[:space:]]/}"; pbook="${pbook//[[:space:]]/}"
         persona="$(printf '%s\n' "$proposal" | awk 'f; /^---[[:space:]]*$/{f=1}')"
         [[ "$name" =~ ^[a-z0-9._-]+$ ]] || { echo "role new: generator returned a bad/blank name: '$name'"; exit 1; }
         [ -n "$persona" ] || { echo "role new: proposal had no persona (after the --- line)"; exit 1; }
