@@ -38,6 +38,7 @@ dais — your agent company control panel
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
   dais migrate                        apply pending DB migrations (run with watch paused)
   dais scaffold <project>             create a new project from the template
+  dais role new <project> [--desc "..."] [--yes]  Claude designs a new role (persona + routing); you confirm
 U
 }
 
@@ -321,6 +322,74 @@ MD
       sed "s/__PROJECT__/$name/g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     done
     echo "scaffolded projects/$name — edit project.yaml (repo/github/stage_goal), then: dais lint $name" ;;
+
+  role)
+    # role new <project> — Claude designs a new role (persona + routing row) for the project;
+    # the founder confirms before anything is written; `dais lint` then guards the status invariant.
+    sub="${1:?usage: dais role new <project> [--desc \"...\"] [--yes]}"; shift 2>/dev/null || true
+    case "$sub" in
+      new)
+        proj="${1:?usage: dais role new <project> [--desc \"...\"] [--yes]}"; shift
+        [ -d "$DAIS_HOME/projects/$proj" ] || { echo "role: no such project '$proj'"; exit 1; }
+        desc=""; yes=0
+        while [ $# -gt 0 ]; do case "$1" in
+          --desc) desc="$2"; shift 2;;
+          --yes|-y) yes=1; shift;;
+          *) echo "role new: unknown arg '$1'"; exit 1;;
+        esac; done
+        [ -n "$desc" ] || { printf 'describe the role (what it does): '; read -r desc < /dev/tty 2>/dev/null || true; }
+        [ -n "$desc" ] || { echo "role new: a description is required (--desc \"...\")"; exit 1; }
+        PDIR="$DAIS_HOME/projects/$proj"
+        existing="$(grep -v '^#' "$PDIR/roles" 2>/dev/null | sed '/^[[:space:]]*$/d')"
+        pbs="$( { ls "$DAIS_ROOT/harness/playbooks/"*.md "$PDIR/playbooks/"*.md ; } 2>/dev/null | sed 's#.*/##; s#\.md$##' | sort -u | paste -sd, - )"
+        genprompt="You are configuring ONE new agent role for the dais multi-agent harness (a status-routed board).
+Role to design: $desc
+Project: $proj
+Existing roles (columns: name access trigger handles prec playbook):
+$existing
+Available playbooks: ${pbs:-code}
+Rules:
+- access: edit (may modify the repo/docs) | review | draft (both read-only) | none.
+- trigger: reactive (runs when a status it handles has work) | every:Nh (cadence) | none.
+- handles: comma-separated statuses this role acts on. A REACTIVE role's status must NOT collide with another reactive role's (exactly one reactive role per status). Prefer a NEW custom status like needs_<x>.
+- playbook: pick from the available list the craft that fits (or 'code').
+- prec: integer; reviewers low, builders mid, planners high — fit it among the existing precs.
+- persona: a crisp system prompt — who the agent is, the ONE kind of work it does per run, that it reads its queue via 'dais tasks $proj --assignee <name>' and hands off with 'dais handoff'. Do NOT repeat coordination boilerplate, the playbook, or CONTEXT — the harness injects those.
+Output EXACTLY this and nothing else (header lines, then a line with three dashes, then the persona markdown):
+name: <slug>
+access: <edit|review|draft|none>
+trigger: <reactive|every:Nh|none>
+handles: <status, comma-list, or ->
+playbook: <name>
+prec: <int>
+---
+<persona markdown>"
+        echo "▸ asking Claude to design the role…"
+        if [ -n "${DAIS_ROLE_GEN:-}" ]; then proposal="$(DAIS_ROLE_DESC="$desc" $DAIS_ROLE_GEN)"
+        else proposal="$(claude -p "$genprompt")"; fi
+        [ -n "$proposal" ] || { echo "role new: the generator returned nothing"; exit 1; }
+        field(){ printf '%s\n' "$proposal" | awk -F': *' -v k="$1" 'tolower($1)==k{print $2; exit}'; }
+        name="$(field name)"; access="$(field access)"; trig="$(field trigger)"
+        handles="$(field handles)"; pbook="$(field playbook)"; prec="$(field prec)"
+        persona="$(printf '%s\n' "$proposal" | awk 'f; /^---[[:space:]]*$/{f=1}')"
+        [[ "$name" =~ ^[a-z0-9._-]+$ ]] || { echo "role new: generator returned a bad/blank name: '$name'"; exit 1; }
+        [ -n "$persona" ] || { echo "role new: proposal had no persona (after the --- line)"; exit 1; }
+        [ -e "$PDIR/agents/$name.md" ] && { echo "role new: role '$name' already exists (agents/$name.md)"; exit 1; }
+        echo; echo "Proposed role for $proj:"
+        printf '  %-12s access=%s trigger=%s handles=%s prec=%s playbook=%s\n' \
+          "$name" "$access" "$trig" "$handles" "$prec" "$pbook"
+        echo "  persona → agents/$name.md ($(printf '%s\n' "$persona" | grep -c '') lines)"
+        if [ "$yes" -ne 1 ]; then
+          printf 'create this role? [y/N] '; read -r ans < /dev/tty 2>/dev/null || ans=""
+          case "$ans" in y|Y|yes|YES) ;; *) echo "cancelled — nothing written."; exit 0;; esac
+        fi
+        mkdir -p "$PDIR/agents"
+        printf '%s\n' "$persona" > "$PDIR/agents/$name.md"
+        printf '%s  %s  %s  %s  %s  %s\n' "$name" "$access" "$trig" "$handles" "$prec" "$pbook" >> "$PDIR/roles"
+        echo "✓ wrote agents/$name.md + appended the roles row. linting ${proj}…"
+        "$DAIS_ROOT/dais" lint "$proj" ;;
+      *) echo "usage: dais role new <project> [--desc \"...\"] [--yes]"; exit 1;;
+    esac ;;
 
   learn)
     proj="${1:?usage: dais learn <project> \"durable note\"}"; shift

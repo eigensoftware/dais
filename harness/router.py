@@ -88,6 +88,11 @@ def lint_project(root, project):
         for key in ("project", "repo", "stage_goal"):
             if not re.search(r"(?m)^%s:" % re.escape(key), text):
                 errors.append("project.yaml missing required key '%s:'" % key)
+        m = re.search(r"(?m)^playbook:[ \t]*(\S+)", text)   # the project-wide default playbook
+        if m and not _playbook_file(root, project, m.group(1)):
+            warnings.append("project.yaml playbook '%s' has no file (looked in projects/%s/playbooks/ "
+                            "and harness/playbooks/); roles fall back to no conventions"
+                            % (m.group(1), project))
     if not os.path.exists(os.path.join(root, "projects", project, "CONTEXT.md")):
         warnings.append("no CONTEXT.md (agents read it first for project memory)")
 

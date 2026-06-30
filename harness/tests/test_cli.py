@@ -385,6 +385,51 @@ class TestRolePlaybook(CliTest):
         self.assertIn("ghostbook", r.stdout + r.stderr)
 
 
+class TestRoleNew(CliTest):
+    """`dais role new` has Claude design a role (persona + routing row); the founder confirms, then
+    lint guards. The model call is stubbed via DAIS_ROLE_GEN so the flow is deterministic offline."""
+
+    PROP = ("name: paralegal\naccess: edit\ntrigger: reactive\n"
+            "handles: needs_research\nplaybook: legal\nprec: 4\n---\n"
+            "# Paralegal — demo\nYou pull authorities and draft a research memo, then hand off.\n")
+
+    def _gen_stub(self, body):
+        p = os.path.join(self.root, "gen.sh")
+        with open(p, "w") as fh:
+            fh.write("#!/usr/bin/env bash\ncat <<'PROP'\n" + body + "\nPROP\n")
+        os.chmod(p, 0o755)
+        return p
+
+    def test_writes_persona_and_appends_routing_row(self):
+        dais(self.root, "scaffold", "demo")
+        r = dais(self.root, "role", "new", "demo", "--desc", "a paralegal", "--yes",
+                 env={"DAIS_ROLE_GEN": self._gen_stub(self.PROP)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        persona = os.path.join(self.root, "projects", "demo", "agents", "paralegal.md")
+        self.assertTrue(os.path.exists(persona))
+        body = open(persona).read()
+        self.assertIn("research memo", body)
+        self.assertNotIn("access: edit", body)          # header keys must NOT leak into the persona
+        roles = open(os.path.join(self.root, "projects", "demo", "roles")).read()
+        self.assertRegex(roles, r"paralegal\s+edit\s+reactive\s+needs_research\s+4\s+legal")
+
+    def test_rejects_bad_name_writes_nothing(self):
+        dais(self.root, "scaffold", "demo")
+        bad = self._gen_stub("name: bad name!\naccess: edit\ntrigger: reactive\n"
+                             "handles: needs_x\nplaybook: code\nprec: 5\n---\n# x\nbody\n")
+        r = dais(self.root, "role", "new", "demo", "--desc", "x", "--yes", env={"DAIS_ROLE_GEN": bad})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", "agents", "bad.md")))
+
+    def test_refuses_to_clobber_existing_role(self):
+        dais(self.root, "scaffold", "demo")             # ships agents/engineer.md
+        dup = self._gen_stub("name: engineer\naccess: edit\ntrigger: reactive\n"
+                             "handles: ready\nplaybook: code\nprec: 5\n---\n# eng\nbody\n")
+        r = dais(self.root, "role", "new", "demo", "--desc", "dup", "--yes", env={"DAIS_ROLE_GEN": dup})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already exists", r.stdout + r.stderr)
+
+
 class TestWorkspaceContextBloatLint(CliTest):
     """`dais lint` (no project arg) warns — but does not error — when the workspace
     CONTEXT.md grows too large, since it is injected into every agent run."""
