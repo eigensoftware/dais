@@ -1008,7 +1008,8 @@ class TestFinalReviewFixes(unittest.TestCase):
         loop_ids = [r.get("id") for r in rows if r["kind"] == "task" and r.get("status") == "needs_qa"]
         self.assertEqual(loop_ids, ["w-8"])            # only the non-running loop task is a row
 
-    def test_inspector_running_hint_uses_lowercase_l(self):        # M-1
+    def test_inspector_running_streams_live_log_no_pager_hint(self):   # M-1 (now: live log inline)
+        # a running selection streams its live log in the inspector — no "press l/L" pager hint
         papp = self._papp([("w-1", "cedar", "build", "ready", "high", None)])
         thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
                   "since": "2026-06-29 00:00:00", "secs": 10, "log_path": "/tmp/x.log"}
@@ -1019,9 +1020,26 @@ class TestFinalReviewFixes(unittest.TestCase):
             scr = FakeScr(40, 200)
             pn.render_inspector(scr, pn.Rect(1, 0, 30, 80), papp, focused=False)
             text = "\n".join(c[2] for c in scr.calls)
-        self.assertIn("press l", text)
+        self.assertIn("live log", text)            # the inspector now shows the live log section
+        self.assertNotIn("press l", text)
         self.assertNotIn("press L", text)
-        self.assertNotIn("coming in the log phase", text)
+
+    def test_inspector_running_shows_log_tail(self):
+        import tempfile
+        papp = self._papp([("w-1", "cedar", "build", "ready", "high", None)])
+        logf = os.path.join(tempfile.mkdtemp(prefix="dais-log-"), "agent.log")
+        with open(logf, "w") as fh:
+            fh.write("setting up\nrunning tests\nALL GREEN — committing\n")
+        thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": logf}
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            rows = papp.left_rows()
+            papp.sel_id = next(r for r in rows if r["kind"] == "running")["id"]
+            scr = FakeScr(40, 200)
+            pn.render_inspector(scr, pn.Rect(1, 0, 30, 80), papp, focused=False)
+            text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("ALL GREEN — committing", text)   # the live tail is streamed inline
+        self.assertNotIn("waiting for output", text)
 
 
 class TestPaneFocusIndicator(unittest.TestCase):
@@ -1522,19 +1540,20 @@ class TestRailTable(unittest.TestCase):
                            ("a-2", "alpha", "y", "ready", "med", None),
                            ("b-1", "bravo", "z", "backlog", "low", None)])
         scr = FakeScr(40, 200)
-        pn.render_rail(scr, pn.Rect(1, 0, 20, 50), papp, focused=False)   # 50 cols -> all 4 columns
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 50), papp, focused=False)   # 50 cols -> all columns
         text = "\n".join(c[2] for c in scr.calls)
-        for head in ("run", "you", "que", "bkl"):
+        for head in ("run", "you", "scp", "que", "bkl"):
             self.assertIn(head, text)
 
     def test_all_row_totals_across_projects(self):
-        # alpha: 1 needs_review (you) + 1 ready (que); bravo: 1 backlog (bkl). ALL sums them.
+        # alpha: needs_review (you) + ready (que) + needs_scoping (scp); bravo: backlog (bkl).
         papp = self._papp([("a-1", "alpha", "x", "needs_review", "high", None),
                            ("a-2", "alpha", "y", "ready", "med", None),
+                           ("a-3", "alpha", "w", "needs_scoping", "med", None),
                            ("b-1", "bravo", "z", "backlog", "low", None)])
-        self.assertEqual(pn._rail_counts(papp, "alpha"), (0, 1, 1, 0))
-        self.assertEqual(pn._rail_counts(papp, "bravo"), (0, 0, 0, 1))
-        self.assertEqual(pn._rail_counts(papp, "ALL"), (0, 1, 1, 1))   # totals
+        self.assertEqual(pn._rail_counts(papp, "alpha"), (0, 1, 1, 1, 0))   # run, you, scp, que, bkl
+        self.assertEqual(pn._rail_counts(papp, "bravo"), (0, 0, 0, 0, 1))
+        self.assertEqual(pn._rail_counts(papp, "ALL"), (0, 1, 1, 1, 1))     # totals
 
     def test_narrow_rail_sheds_columns_keeps_name(self):
         papp = self._papp([("c-1", "acme", "x", "ready", "high", None)])

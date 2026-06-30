@@ -545,8 +545,9 @@ _INFLIGHT_ORDER = ["doing", "needs_qa", "changes_requested", "needs_review"]
 
 def running_task_id(project):
     """Best guess at the task a running agent is working, or '' (the live log is the
-    real signal). One agent per project, so this is project-scoped."""
-    for st in _INFLIGHT_ORDER:
+    real signal). One agent per project, so this is project-scoped. needs_scoping is included
+    last so a running LEAD shows the task it's fleshing out (else a scoping run reads as task-less)."""
+    for st in _INFLIGHT_ORDER + ["needs_scoping"]:
         tasks = project.tasks_by_status.get(st)
         if tasks:
             return tasks[0].id

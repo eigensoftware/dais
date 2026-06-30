@@ -273,19 +273,44 @@ def _panel_detail_lines(app, sel_row):
     return out
 
 
+def render_inspector_live_log(scr, inner, app, sel_row):
+    """Stream a running agent's LIVE LOG in the inspector: a short header (project/agent · elapsed ·
+    task), a dim separator, then the log tail filling the rest — re-read every draw so it updates
+    live, error lines in red (same vocabulary as the log wall). Replaces the old 'press l' hint."""
+    header = app.running_header(sel_row, app._now())
+    for i, ln in enumerate(header[:inner.h]):
+        attr = (app._cp(_STRUCTURE) | curses.A_BOLD) if i == 0 else _inspector_attr(app, ln)
+        _add(scr, inner.y + i, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, attr)
+    used = min(len(header), inner.h)
+    if used < inner.h:
+        _add(scr, inner.y + used, inner.x, clip_cols("─ live log ─", inner.w),
+             inner.x + inner.w, curses.A_DIM)
+        used += 1
+    log_h = inner.h - used
+    if log_h <= 0:
+        return
+    tail = d.tail_lines(sel_row.get("log_path"), log_h) if sel_row.get("log_path") else []
+    if not tail:
+        _add(scr, inner.y + used, inner.x, clip_cols("  (waiting for output…)", inner.w),
+             inner.x + inner.w, curses.A_DIM)
+        return
+    for i, ln in enumerate(tail):
+        attr = app._cp(_BAD) if d._LOG_ERR_RE.search(ln) else 0
+        _add(scr, inner.y + used + i, inner.x, clip_cols(ln, inner.w), inner.x + inner.w, attr)
+
+
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
-    Running selections (task=None) show the agent header instead of crashing on task.id."""
+    Running selections stream their live log (render_inspector_live_log) instead of task detail."""
     inner = render_pane_title(scr, rect, "INSPECTOR", focused)
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
-    # A running selection has task=None — detail_lines() does task.id and would CRASH.
-    # Show the running agent's header instead (full live-log streaming is the log phase).
+    # A running selection streams its LIVE LOG right here (no need to pop the `l` pager or `L` wall) —
+    # a short agent header, then the log tail, re-read each draw so it streams as the agent works.
     if sel_row and sel_row.get("kind") == "running":
-        lines = app.running_header(sel_row, app._now()) + \
-            ["", "(press l to open this agent's log)"]
-    else:
-        lines = _panel_detail_lines(app, sel_row)
+        render_inspector_live_log(scr, inner, app, sel_row)
+        return
+    lines = _panel_detail_lines(app, sel_row)
     wrapped = []
     for ln in lines:
         if disp_width(ln) <= inner.w:
@@ -350,21 +375,23 @@ def _rail_items(app):
 
 
 _RAIL_COL_W = 4                                  # width of each numeric column (3-char header + a pad)
-_RAIL_COLS = ("run", "you", "que", "bkl")        # running · needs-you (gate) · queued · backlog
+_RAIL_COLS = ("run", "you", "scp", "que", "bkl")  # running · needs-you (gate) · scoping (lead) · queued · backlog
 _RAIL_MIN_NAME_W = 12                            # below this the table sheds columns (right→left) for the name
 
 
 def _rail_counts(app, name):
-    """(running, needs_you, queued, backlog) for one project — or summed across all for the ALL row.
-    Mirrors the WORK bands: needs_you = the founder-gate statuses, queued = the loop's own statuses."""
+    """(running, needs_you, scoping, queued, backlog) for one project — or summed across all for ALL.
+    Mirrors the WORK bands: needs_you = founder-gate statuses, scoping = needs_scoping (the lead's
+    fill-out queue), queued = the loop's own statuses, backlog = unscheduled."""
     if not app.snap:
-        return (0, 0, 0, 0)
+        return (0, 0, 0, 0, 0)
     projs = (app.snap.projects if name == "ALL"
              else [p for p in app.snap.projects if p.name == name])
     def total(statuses):
         return sum(len(p.tasks_by_status.get(st, [])) for p in projs for st in statuses)
     run = sum(1 for p in projs if p.running)            # one agent per project, so 0/1 each
-    return (run, total(d.GATE_ORDER), total(_LOOP_STATUSES), total(_BACKLOG_STATUSES))
+    return (run, total(d.GATE_ORDER), total(_SCOPING_STATUSES),
+            total(_LOOP_STATUSES), total(_BACKLOG_STATUSES))
 
 
 def render_rail(scr, rect, app, focused):
@@ -382,14 +409,14 @@ def render_rail(scr, rect, app, focused):
     title = "PROJECTS" if not hidden else f"PROJECTS  +{hidden}"
     inner = render_pane_title(scr, rect, title, focused)
     # shed columns (right→left) on a narrow rail so the project name always stays readable; real
-    # two-column layouts give the rail ≥40 cols, where all four columns fit.
-    # -3 = the 2-col name indent + a 1-col right margin (so the rightmost cell isn't clipped by _add,
-    # which never writes a row's final column).
-    n_cols = max(0, min(len(_RAIL_COLS), (inner.w - 3 - _RAIL_MIN_NAME_W) // _RAIL_COL_W))
+    # two-column layouts give the rail ≥40 cols, where all columns fit.
+    # -4 = a 3-col name indent (mark + dot + a breathing space) + a 1-col right margin (so the
+    # rightmost cell isn't clipped by _add, which never writes a row's final column).
+    n_cols = max(0, min(len(_RAIL_COLS), (inner.w - 4 - _RAIL_MIN_NAME_W) // _RAIL_COL_W))
     cols = _RAIL_COLS[:n_cols]
-    name_w = max(6, inner.w - 3 - n_cols * _RAIL_COL_W)
-    cols_x = inner.x + 2 + name_w
-    hdr = " " * (2 + name_w) + "".join(f"{c:>{_RAIL_COL_W}}" for c in cols)
+    name_w = max(6, inner.w - 4 - n_cols * _RAIL_COL_W)
+    cols_x = inner.x + 3 + name_w
+    hdr = " " * (3 + name_w) + "".join(f"{c:>{_RAIL_COL_W}}" for c in cols)
     _add(scr, inner.y, inner.x, clip_cols(hdr, inner.w), inner.x + inner.w, curses.A_DIM)
     pf = getattr(app, "project_filter", None)
     for vis_idx, name in enumerate(items[base:base + max(0, inner.h - 1)]):
@@ -397,19 +424,21 @@ def render_rail(scr, rect, app, focused):
         y = inner.y + 1 + vis_idx                       # +1: the column header occupies inner row 0
         active = (name == "ALL" and pf is None) or name == pf
         rev = curses.A_REVERSE if (focused and idx == ri) else 0
-        run, you, que, bkl = _rail_counts(app, name)
+        run, you, scp, que, bkl = _rail_counts(app, name)
         live = run > 0 and name != "ALL"                # ALL is an aggregate, never "the live one"
         rowattr = (app._cp(_LIVE) if live else 0) \
             | (curses.A_BOLD if (active and name != "ALL") else 0) | rev
         mark = "\xbb" if active else " "                    # »
         dot = _DOT_RUN if live else " "                 # ● marks the live project (shared with vitals)
-        label = f"{mark}{dot}{name}"
-        _add(scr, y, inner.x, pad_cols(clip_cols(label, name_w + 2), inner.w),
+        label = f"{mark}{dot} {name}"                    # mark · dot · a space so the ● isn't jammed to the name
+        _add(scr, y, inner.x, pad_cols(clip_cols(label, name_w + 3), inner.w),
              inner.x + inner.w, rowattr)                # paint the row full-width so the cursor spans it
-        for ci, v in enumerate((run, you, que, bkl)[:n_cols]):
+        for ci, v in enumerate((run, you, scp, que, bkl)[:n_cols]):
             cell = f"{v:>{_RAIL_COL_W}}" if v else f"{'·':>{_RAIL_COL_W}}"
-            if v and ci == 1:                           # the needs-you (gate) count pops bold yellow
+            if v and ci == 1:                           # needs-you (founder gate) pops bold yellow
                 cattr = app._cp(_NEEDS_YOU) | curses.A_BOLD | rev
+            elif v and ci == 2:                         # scoping (lead's queue) pops cyan, like the SCOPING band
+                cattr = app._cp(_STRUCTURE) | curses.A_BOLD | rev
             elif v:
                 cattr = rowattr if live else rev
             else:
