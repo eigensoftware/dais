@@ -178,6 +178,50 @@ def running_agents(project_dir, is_alive=_pid_alive):
     return sorted(out)
 
 
+def active_loops(root, is_alive=_pid_alive):
+    """Live `dais loop` runs, read from projects/<proj>/.loop-<task> state files (written by `dais
+    loop` at the start of each attempt, removed on exit). Skips entries whose pid is dead (stale
+    after a crash). Returns dicts: project, task, attempt, max, until, pid — sorted by project/task.
+    `until` is parsed as the rest of its line, so a verifier command may itself contain '='."""
+    out = []
+    pdir = os.path.join(root, "projects")
+    try:
+        projects = os.listdir(pdir)
+    except OSError:
+        return out
+    for proj in projects:
+        d = os.path.join(pdir, proj)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            if not n.startswith(".loop-"):
+                continue
+            kv = {}
+            try:
+                with open(os.path.join(d, n)) as fh:
+                    for line in fh:
+                        if "=" in line:
+                            k, v = line.rstrip("\n").split("=", 1)
+                            kv[k] = v
+            except OSError:
+                continue
+            try:
+                pid = int(kv.get("pid", ""))
+            except ValueError:
+                continue
+            if not is_alive(pid):
+                continue                                # stale: the loop died without cleanup
+            out.append({"project": kv.get("project", proj),
+                        "task": kv.get("task", n[len(".loop-"):]),
+                        "attempt": kv.get("attempt", "?"),
+                        "max": kv.get("max", "?"),
+                        "until": kv.get("until", ""),
+                        "pid": pid})
+    return sorted(out, key=lambda x: (x["project"], x["task"]))
+
+
 def stage_goal(root, name):
     path = os.path.join(root, "projects", name, "project.yaml")
     try:

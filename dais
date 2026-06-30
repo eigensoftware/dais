@@ -330,6 +330,13 @@ MD
     [ -d "$repo" ] || { echo "loop: repo not found: $repo"; exit 1; }
     builder="${DAIS_LOOP_BUILDER:-$DAIS_ROOT/harness/run-agent.sh}"
     MARK="=== ↻ loop feedback ==="
+    # Live state file so `dais top` can show this loop (mirrors .lock-*/.watch.pid). Removed on ANY exit.
+    LOOPF="$DAIS_HOME/projects/$proj/.loop-$tid"
+    # EXIT owns cleanup; INT/TERM must actually terminate (their `exit` re-fires the EXIT trap),
+    # else Ctrl-C/kill would just clean the file and let the loop resume — an unstoppable loop.
+    trap 'rm -f "$LOOPF"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     base_notes="$(db "SELECT COALESCE(notes,'') FROM tasks WHERE id='$(sqlesc "$tid")';")"
     base_notes="${base_notes%%"$MARK"*}"                 # drop any stale feedback block from a prior loop
     attempt=0
@@ -338,6 +345,8 @@ MD
       capped="$(db "SELECT COUNT(*) FROM runs WHERE status='capped' AND started_at > datetime('now','-90 minutes');")"
       [ "${capped:-0}" -gt 0 ] && { echo "loop: subscription cap hit in the last 90 min — cooling down, retry later."; exit 1; }
       attempt=$((attempt+1))
+      printf 'pid=%s\nproject=%s\ntask=%s\nattempt=%s\nmax=%s\nstatus=running\nuntil=%s\n' \
+        "$$" "$proj" "$tid" "$attempt" "$max" "$until_cmd" > "$LOOPF"
       echo "↻ loop $tid — attempt $attempt/$max (verifier: $until_cmd)"
       DAIS_TASK="$tid" "$builder" "$proj" "$role"
       out="$(cd "$repo" && eval "$until_cmd" 2>&1)"; rc=$?

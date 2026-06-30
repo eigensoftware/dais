@@ -723,6 +723,55 @@ class TestLoopCommand(CliTest):
         self.assertIn("NEEDLE_OUT", blocks[1])       # attempt 2 saw the fed-back failure
         self.assertIn("loop feedback", blocks[1])
 
+    def test_loop_writes_then_clears_its_state_file(self):
+        base = self._setup()
+        seen = os.path.join(self.root, "loopfile_seen.log")
+        loopf = os.path.join(self.root, "projects", "demo", ".loop-d-1")
+        # the builder dumps the live .loop file each call -> proves dais loop wrote it mid-attempt
+        body = 'cat "%s" >> "%s" 2>/dev/null; printf "@@@" >> "%s"' % (loopf, seen, seen)
+        r = self._loop(base, self._builder(body), "--until", "true")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(seen) as fh:
+            content = fh.read()
+        self.assertIn("attempt=1", content)
+        self.assertIn("max=4", content)
+        self.assertIn("until=true", content)
+        self.assertFalse(os.path.exists(loopf))     # removed on exit (the EXIT trap)
+
+    def test_loop_stops_on_sigint(self):
+        # regression: Ctrl-C / signal must terminate the loop, not just clean the state file and
+        # resume the next attempt (an unstoppable loop burns the shared window)
+        import signal as _sig, time as _time
+        base = self._setup()
+        b = self._builder('sleep 30')           # builder hangs, so we signal mid-attempt
+        loopf = os.path.join(self.root, "projects", "demo", ".loop-d-1")
+        env = dict(os.environ)
+        env.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                    "DAIS_AGENT_REPOS": base, "DAIS_LOOP_BUILDER": b})
+        p = subprocess.Popen([os.path.join(self.root, "dais"), "loop", "demo", "d-1",
+                              "--until", "false", "--max", "100"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             env=env, cwd=self.root, start_new_session=True)
+        try:
+            for _ in range(50):                 # wait until it's mid-attempt (state file written)
+                if os.path.exists(loopf):
+                    break
+                _time.sleep(0.1)
+            self.assertTrue(os.path.exists(loopf), "loop never started")
+            os.killpg(os.getpgid(p.pid), _sig.SIGINT)   # like a terminal Ctrl-C to the group
+            try:
+                p.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.fail("dais loop did not exit on SIGINT (unstoppable loop)")
+        finally:
+            if p.poll() is None:
+                try:
+                    os.killpg(os.getpgid(p.pid), _sig.SIGKILL)
+                except OSError:
+                    pass
+                p.wait(timeout=5)
+        self.assertFalse(os.path.exists(loopf))         # EXIT trap still cleaned up
+
     def test_hit_after_a_miss_strips_the_feedback_block(self):
         base = self._setup()
         passfile = os.path.join(self.root, "PASS")
