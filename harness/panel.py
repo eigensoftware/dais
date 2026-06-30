@@ -696,6 +696,7 @@ class PanelApp(d.App):
 GATE_TAG = {"ready_to_merge": "MERGE", "needs_review": "REVIEW",
             "proposed": "PROPOSE", "blocked": "BLOCKED"}
 _LOOP_STATUSES = d.LOOP_SUMMARY_ORDER          # ["ready","needs_qa","changes_requested"]
+_SCOPING_STATUSES = ["needs_scoping"]          # handed to the lead to flesh out before it's ready
 _ARCHIVE_STATUSES = ["done", "cancelled"]
 _BACKLOG_STATUSES = ["backlog"]
 _DEFERRED_STATUSES = ["deferred"]
@@ -756,6 +757,13 @@ def panel_work_rows(snap, *, project=None, expanded=False):
     add_band("NEEDS YOU", len(gates))
     for proj, t in gates:
         rows.append(_task_row(proj, t, GATE_TAG.get(t.status, t.status.upper())))
+
+    # SCOPING — sparse tasks handed to the lead to flesh out (founder → `dais handoff <id> lead`);
+    # the lead writes a real spec, then promotes to ready (or proposes new direction).
+    scoping = tasks_in(_SCOPING_STATUSES)
+    add_band("SCOPING", len(scoping))
+    for proj, t in scoping:
+        rows.append(_task_row(proj, t, "SCOPE"))
 
     # QUEUED — work cycling through the build/QA loop (ready/needs_qa/changes_requested), waiting for
     # its next turn; shown as rows by default (no g needed). RUNNING above = an agent live right now.

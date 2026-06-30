@@ -41,6 +41,7 @@ _MENU = {
     "cancel": ("cancel", True, ""),
     "to_ready": ("→ ready", False, ""),
     "open_pr": ("open PR", False, "o"),
+    "scope": ("send to lead → scope", False, ""),
 }
 
 
@@ -92,7 +93,7 @@ def task_actions(status, kind="task", has_pr=False):
     if status == "backlog":
         return [_adv("promote", "promote → ready"),
                 _rev("cancel", "cancel", True),
-                _m("start"), _m("set_priority"), _m("defer"), _m("edit_title")]
+                _m("scope"), _m("start"), _m("set_priority"), _m("defer"), _m("edit_title")]
 
     if status == "deferred":
         return [_adv("undefer", "un-defer → backlog"),
@@ -153,6 +154,8 @@ def action_command(action_id, task):
         return ["task", "set", tid, "--status", "deferred"]
     if action_id == "undefer":
         return ["task", "set", tid, "--status", "backlog"]
+    if action_id == "scope":
+        return ["handoff", tid, "lead"]      # hand to the lead → its first handled status (needs_scoping)
     if action_id == "cancel_run":
         return ["cancel", task.get("project")]
     # set_priority, handoff, edit_title, new, open_pr, unknown → interactive/None

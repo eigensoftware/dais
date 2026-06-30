@@ -200,7 +200,7 @@ class TestBacklog(unittest.TestCase):
     def test_order(self):
         self.assertEqual(
             ids(self.acts),
-            ["promote", "cancel", "start", "set_priority", "defer", "edit_title"])
+            ["promote", "cancel", "scope", "start", "set_priority", "defer", "edit_title"])
 
     def test_flags(self):
         adv = by_id(self.acts, "promote")
@@ -316,6 +316,13 @@ class TestActionCommand(unittest.TestCase):
 
     def test_start(self):
         self.assertEqual(a.action_command("start", SAMPLE), ["start", "cou-9"])
+
+    def test_scope_hands_to_lead(self):
+        self.assertEqual(a.action_command("scope", SAMPLE), ["handoff", "cou-9", "lead"])
+
+    def test_backlog_offers_scope(self):
+        ids = [act.id for act in a.task_actions("backlog")]
+        self.assertIn("scope", ids)
 
     def test_promote_to_ready_unblock(self):
         for aid in ("promote", "to_ready", "unblock"):

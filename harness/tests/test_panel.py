@@ -425,6 +425,17 @@ class TestPanelWorkRows(unittest.TestCase):
         gate = next(r for r in rows if r["kind"] == "band" and "NEEDS YOU" in r["label"])
         self.assertFalse(gate.get("empty"))
 
+    def test_scoping_band_shows_needs_scoping_tasks(self):
+        # a task handed to the lead (needs_scoping) appears in its own SCOPING band, tagged SCOPE
+        snap = self._snap(self._proj("x", needs_scoping=2))
+        rows = pn.panel_work_rows(snap)
+        band = next(r for r in rows if r["kind"] == "band" and "SCOPING" in r["label"])
+        self.assertIn("SCOPING · 2", band["label"])
+        self.assertEqual(sum(1 for r in rows if r["kind"] == "task" and r["tag"] == "SCOPE"), 2)
+        # and they are NOT mixed into QUEUED or BACKLOG
+        self.assertFalse(any(r["kind"] == "task" and r["status"] == "needs_scoping"
+                             and r["tag"] != "SCOPE" for r in rows))
+
     def test_g_uncaps_the_archive(self):
         # project picked, not expanded: archive capped + "+N older"; expanded (g): ALL archive rows
         snap = self._snap(self._proj("z", done=pn._ARCHIVE_CAP + 5))
