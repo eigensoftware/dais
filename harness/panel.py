@@ -875,6 +875,16 @@ class PanelApp(d.App):
 # WORK row model — bands of selectable rows; status → terminal-safe tag (no emoji)
 GATE_TAG = {"ready_to_merge": "MERGE", "needs_review": "REVIEW",
             "proposed": "PROPOSE", "blocked": "BLOCKED"}
+# Every status → a ≤7-col uppercase tag so the WORK list's tag column ALWAYS aligns. Raw statuses
+# (needs_qa=8, changes_requested=18) overflow the {tag:<7} field and shove the id/project/title right.
+_STATUS_TAG = {**GATE_TAG, "needs_scoping": "SCOPE", "ready": "READY", "needs_qa": "QA",
+               "changes_requested": "CHANGES", "doing": "RUN", "backlog": "BACK",
+               "deferred": "DEFER", "done": "DONE", "cancelled": "CANC"}
+
+
+def _short_tag(status):
+    """A ≤7-col tag for any status (unknown/custom ones are abbreviated) so the tag column aligns."""
+    return _STATUS_TAG.get(status) or (status or "").upper().replace("_", "")[:7]
 _LOOP_STATUSES = d.LOOP_SUMMARY_ORDER          # ["ready","needs_qa","changes_requested"]
 _SCOPING_STATUSES = ["needs_scoping"]          # handed to the lead to flesh out before it's ready
 _ARCHIVE_STATUSES = ["done", "cancelled"]
@@ -936,7 +946,7 @@ def panel_work_rows(snap, *, project=None, expanded=False):
     gates = tasks_in(d.GATE_ORDER)
     add_band("NEEDS YOU", len(gates))
     for proj, t in gates:
-        rows.append(_task_row(proj, t, GATE_TAG.get(t.status, t.status.upper())))
+        rows.append(_task_row(proj, t, _short_tag(t.status)))
 
     # SCOPING — sparse tasks handed to the lead to flesh out (founder → `dais handoff <id> lead`);
     # the lead writes a real spec, then promotes to ready (or proposes new direction).
@@ -950,7 +960,7 @@ def panel_work_rows(snap, *, project=None, expanded=False):
     loop = tasks_in(_LOOP_STATUSES)
     add_band("QUEUED", len(loop))
     for proj, t in loop:
-        rows.append(_task_row(proj, t, t.status))
+        rows.append(_task_row(proj, t, _short_tag(t.status)))
 
     # OTHER STAGES — any custom status not covered by a band above (e.g. a project that adds a
     # `needs_design` stage) is auto-surfaced as its own band, so adding a status needs no panel change.
@@ -963,7 +973,7 @@ def panel_work_rows(snap, *, project=None, expanded=False):
             continue
         add_band(st.upper().replace("_", " "), len(extra))
         for proj, t in extra:
-            rows.append(_task_row(proj, t, t.status))
+            rows.append(_task_row(proj, t, _short_tag(t.status)))
 
     # BACKLOG — the queue-able pool, always visible so you can pull from it (a promotes -> ready)
     backlog = tasks_in(_BACKLOG_STATUSES)

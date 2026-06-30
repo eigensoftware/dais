@@ -1774,3 +1774,50 @@ class TestInspectorLogWrapScroll(unittest.TestCase):
             self.assertEqual(papp.detail_scroll, 1)
             papp.handle(ord("j"), papp.left_rows(), 0, run_row)   # down → back toward the tail
             self.assertEqual(papp.detail_scroll, 0)
+
+
+class TestTagAlignment(unittest.TestCase):
+    """Every WORK-row tag fits the {tag:<7} column, so longer statuses (needs_qa, changes_requested)
+    don't shove the id/project/title columns out of alignment."""
+
+    def _snap(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-tag-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        return d.load_snapshot(conn, root=root)
+
+    def test_loop_statuses_get_short_tags(self):
+        self.assertEqual(pn._short_tag("needs_qa"), "QA")
+        self.assertEqual(pn._short_tag("changes_requested"), "CHANGES")
+        self.assertEqual(pn._short_tag("ready"), "READY")
+        self.assertEqual(pn._short_tag("ready_to_merge"), "MERGE")
+
+    def test_custom_status_abbreviated_to_fit(self):
+        self.assertLessEqual(len(pn._short_tag("needs_design_review")), 7)
+
+    def test_all_task_row_tags_fit_the_column(self):
+        snap = self._snap([("w-1", "cedar", "a", "needs_qa", "high", None),
+                           ("w-2", "cedar", "b", "changes_requested", "high", None),
+                           ("w-3", "cedar", "c", "ready", "medium", None),
+                           ("w-4", "cedar", "d", "ready_to_merge", "high", "https://x/pull/1"),
+                           ("w-5", "cedar", "e", "backlog", "low", None)])
+        rows = pn.panel_work_rows(snap, expanded=True)
+        for r in rows:
+            if r["kind"] == "task":
+                self.assertLessEqual(len(r["tag"]), 7, (r["id"], r["tag"]))
+
+    def test_render_columns_align_across_mixed_tags(self):
+        # the id token must start at the same x for a 'QA' row and a 'READY' row (no shove)
+        snap = self._snap([("w-1", "cedar", "alpha", "needs_qa", "high", None),
+                           ("w-2", "cedar", "beta", "ready", "high", None)])
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-tag2-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
+        papp.snap = snap
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 200), papp, focused=False)
+        lines = [c[2] for c in scr.calls if "cedar" in c[2]]
+        self.assertGreaterEqual(len(lines), 2)
+        cols = {ln.index("cedar") for ln in lines}
+        self.assertEqual(len(cols), 1)                  # the project column lines up across both tags
