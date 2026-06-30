@@ -214,7 +214,7 @@ class TestChromePanes(unittest.TestCase):
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
         text = scr.calls[0][2]               # full header is first call; ng>0 adds a yellow overlay
         self.assertIn("DAIS", text)
-        self.assertIn("1 need you", text)     # honest gate count
+        self.assertIn("1 need you", text)     # classic strip (default skin): honest gate count
         self.assertNotIn("5h", text)          # NO fake budget bar
 
     def test_rail_lists_projects(self):
@@ -368,6 +368,33 @@ class TestPanelWorkRows(unittest.TestCase):
         self.assertIn("REVIEW", tags)
         # the loop is shown by default: loop tasks ARE their own rows (no g needed)
         self.assertTrue(any(r["kind"] == "task" and r["status"] == "ready" for r in rows))
+
+    def test_empty_bands_collapse_to_a_single_dim_header(self):
+        # mission-control: a quiet band is ONE dim header (tagged empty), not a header + "(none)" row
+        snap = self._snap(self._proj("x"))                  # nothing running / gated / in flight
+        rows = pn.panel_work_rows(snap, mc=True)
+        for name in ("RUNNING", "NEEDS YOU", "THE LOOP"):
+            band = next(r for r in rows if r["kind"] == "band" and name in r["label"])
+            self.assertTrue(band.get("empty"), name)        # flagged so render can dim it
+        # the old two-row filler is gone
+        self.assertFalse(any(r["kind"] == "info" and
+                             any(s in r.get("label", "")
+                                 for s in ("none running", "nothing needs you", "nothing in flight"))
+                             for r in rows))
+
+    def test_classic_keeps_the_empty_band_filler(self):
+        # default skin (mc=False) keeps the "(none …)" rows — the stable baseline is unchanged
+        snap = self._snap(self._proj("x"))
+        rows = pn.panel_work_rows(snap)                      # no mc
+        labels = [r.get("label", "") for r in rows if r["kind"] == "info"]
+        self.assertTrue(any("none running" in l for l in labels))
+        self.assertTrue(any("nothing needs you" in l for l in labels))
+
+    def test_populated_band_is_not_flagged_empty(self):
+        snap = self._snap(self._proj("x", ready_to_merge=1))   # NEEDS YOU has a gate
+        rows = pn.panel_work_rows(snap)
+        gate = next(r for r in rows if r["kind"] == "band" and "NEEDS YOU" in r["label"])
+        self.assertFalse(gate.get("empty"))
 
     def test_g_uncaps_the_archive(self):
         # project picked, not expanded: archive capped + "+N older"; expanded (g): ALL archive rows
@@ -621,15 +648,17 @@ class TestRolePalette(unittest.TestCase):
                           project="acme")
 
     def test_active_bands_share_one_structure_color(self):
-        # consistency: every active band header is the SAME cyan structure bar (not a per-band hue)
-        papp = self._board()
+        # consistency: every NON-EMPTY band header is the SAME cyan structure bar (not a per-band
+        # hue); empty bands recede to dim (mission-control: the screen reads calm when nominal)
+        papp = self._papp([("g-1", "p", "gate", "needs_review", "high", None),   # NEEDS YOU active
+                           ("l-1", "p", "loop", "ready", "med", None)])          # THE LOOP active
+        papp._mc = True                                              # empty-band dimming is mission-control
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
         cyan = 3000 | curses.A_REVERSE | curses.A_BOLD                # _cp(3) = structure
-        self.assertEqual(self._band_attr(scr, "NEEDS YOU"), cyan)
-        self.assertEqual(self._band_attr(scr, "RUNNING"), cyan)
+        self.assertEqual(self._band_attr(scr, "NEEDS YOU"), cyan)     # two active bands, one color
         self.assertEqual(self._band_attr(scr, "THE LOOP"), cyan)
-        self.assertEqual(self._band_attr(scr, "ARCHIVE"), curses.A_DIM)  # history recedes (inactive)
+        self.assertEqual(self._band_attr(scr, "RUNNING"), curses.A_DIM)  # empty -> recedes (nominal)
 
     def test_archive_rows_are_dim(self):
         papp = self._board()
@@ -672,6 +701,13 @@ class TestRolePalette(unittest.TestCase):
         self.assertEqual(pn._inspector_attr(papp, "runs touching z-1:"), 3000 | curses.A_BOLD)
         self.assertEqual(pn._inspector_attr(papp,
                          "assignee founder · prio high · pr (none)"), 4000)         # yellow
+        # mission-control: known proposal sub-heads pop as structure cyan-bold; unknown "X:" stays plain
+        papp._mc = True
+        self.assertEqual(pn._inspector_attr(papp, "  WHAT: do the thing"), 3000 | curses.A_BOLD)
+        self.assertEqual(pn._inspector_attr(papp, "  WHY NOW: it's time"), 3000 | curses.A_BOLD)
+        self.assertEqual(pn._inspector_attr(papp, "  LEAD CALL: blocked"), 0)   # not in the set
+        papp._mc = False
+        self.assertEqual(pn._inspector_attr(papp, "  WHAT: do the thing"), 0)   # classic: no sub-head hue
 
     def test_inspector_note_body_and_title_stay_plain(self):
         # free-text must NOT be miscolored by substring matches (the founder's redline)
@@ -758,6 +794,19 @@ class TestInspectorReflow(unittest.TestCase):
         # each bullet is its own logical line (not collapsed into one paragraph)
         self.assertTrue(any(l.strip() == "- first bullet" for l in lines))
         self.assertTrue(any(l.strip() == "- second bullet" for l in lines))
+
+    def test_notes_break_before_known_subheads(self):
+        # the proposal template (WHAT · WHY NOW · EXPECTED IMPACT …) is often one run-on line;
+        # the inspector must break it into a scannable outline — each sub-head starts a line
+        papp = self._papp("WHAT: do the thing. WHY NOW: it's time. EXPECTED IMPACT: big.")
+        papp._mc = True                                      # the outline is a mission-control feature
+        lines = pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1])
+        starts = [l.strip() for l in lines if l.strip()]
+        self.assertTrue(any(s.startswith("WHAT:") for s in starts))
+        self.assertTrue(any(s.startswith("WHY NOW:") for s in starts))
+        self.assertTrue(any(s.startswith("EXPECTED IMPACT:") for s in starts))
+        # they are SEPARATE lines, not one paragraph
+        self.assertFalse(any("WHAT:" in s and "WHY NOW:" in s for s in starts))
 
     def test_notes_are_not_prewrapped_at_56(self):
         # a single long logical note line must come back un-wrapped (one line), so render can wrap
@@ -1220,3 +1269,74 @@ class TestRailScroll(unittest.TestCase):
         pn.render_rail(scr, pn.Rect(1, 0, 20, 30), papp, focused=True)
         self.assertNotIn("+", scr.calls[0][2])   # no overflow badge when nothing is hidden
         self.assertIn("ALL", "\n".join(c[2] for c in scr.calls))
+
+
+class TestMissionControlDots(unittest.TestCase):
+    """The status-dot vocabulary: ● running (green), ◆ needs-you (yellow), shared by vitals + rail."""
+
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-mc-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        papp._mc = True                          # this class exercises the mission-control skin
+        return papp
+
+    def test_vitals_running_token_is_green_when_active(self):
+        papp = self._papp([("z-1", "zeta", "t", "ready", "med", None)])
+        threads = [{"project": "zeta", "agent": "eng", "task": "z-1",
+                    "since": "2026-06-29 00:00:00", "log_path": None}]
+        with mock.patch.object(d, "running_threads", return_value=threads):
+            scr = FakeScr(40, 200)
+            pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        hits = [c for c in scr.calls
+                if "running" in c[2] and c[3] == (1000 | curses.A_REVERSE | curses.A_BOLD)]
+        self.assertTrue(hits)                    # the run token is overlaid green (live) when n>0
+        self.assertIn(pn._DOT_RUN, hits[0][2])   # …and carries the ● dot
+
+    def test_vitals_calm_when_idle(self):
+        papp = self._papp([("z-1", "zeta", "t", "ready", "med", None)])   # 0 running, 0 gated
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        # no green run overlay and no yellow gate overlay — the strip reads nominal
+        self.assertFalse([c for c in scr.calls
+                          if c[3] in (1000 | curses.A_REVERSE | curses.A_BOLD,
+                                      4000 | curses.A_REVERSE | curses.A_BOLD)])
+
+    def test_rail_running_project_shows_the_run_dot(self):
+        papp = self._papp([("a-1", "alpha", "x", "ready", "med", None)])
+        papp.snap.projects[0].running = True
+        scr = FakeScr(40, 200)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 30), papp, focused=False)
+        row = next(c for c in scr.calls if "alpha" in c[2])
+        self.assertIn(pn._DOT_RUN, row[2])       # ● marks the live project (replaces the old '>')
+
+
+class TestSkinToggle(unittest.TestCase):
+    """The mission-control skin is OFF by default (the baseline look is unchanged) and flips live on 'm'."""
+
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-skin-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def test_default_skin_is_classic(self):
+        papp = self._papp([("z-1", "zeta", "t", "ready", "med", None)])
+        self.assertFalse(papp._mc)               # off unless DAIS_MC / pressing m
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
+        self.assertIn("LIVE", scr.calls[0][2])   # classic strip is the untouched baseline
+
+    def test_m_key_toggles_the_skin(self):
+        papp = self._papp([("z-1", "zeta", "t", "ready", "med", None)])
+        self.assertTrue(papp.handle(ord("m"), papp.left_rows(), 0, None))   # alive
+        self.assertTrue(papp._mc)                                           # flipped on
+        papp.handle(ord("m"), papp.left_rows(), 0, None)
+        self.assertFalse(papp._mc)                                          # and back off
