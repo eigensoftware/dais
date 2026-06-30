@@ -55,10 +55,68 @@ and Linux.
 ```sh
 dais scaffold myproject     # create a project from the template (edit its project.yaml + roles)
 dais lint myproject         # validate the project config
-dais status                 # the dashboard: queues, running agents, recent runs
-dais watch                  # run the loop: one agent per tick, drains the queue
-dais top                    # live mission-control TUI (focal-point vitals, status dots, outlined inspector)
+dais top                    # live control panel — the primary way to operate the workspace
+dais watch                  # run the loop: agents drain the queue, gating outward actions for you
 ```
+
+## Driving the control panel (`dais top`)
+
+`dais top` is the primary interface — a live, master–detail TUI you watch and act from. It refreshes
+on an interval; nothing it does is destructive without a confirm.
+
+**The panes:**
+
+- **Vitals** (top bar) — `● running · ◆ NEED YOU · watch state · projects · clock`. Calm when nothing
+  needs you; the **NEED YOU** token turns yellow when work is waiting on a founder gate.
+- **PROJECTS** (rail) — a per-project table: `run · you · scp · que · bkl` (running · needs-you ·
+  scoping · queued · backlog), plus an **ALL** row that totals across projects. The live project is
+  green. Select a project to filter the WORK list to it; **ALL** clears the filter.
+- **WORK** — the task list in bands: **RUNNING · NEEDS YOU · SCOPING · QUEUED · BACKLOG · DEFERRED ·
+  ARCHIVE** (empty bands collapse to a dim header). A task blocked on an unfinished dependency shows
+  `⛓` and dims. Any custom status auto-surfaces as its own band.
+- **INSPECTOR** — detail of the selection: title, notes/spec, recent runs. Select a **running** agent
+  and it streams that agent's **live log** here (wraps long lines; `j`/`k` scroll up into history).
+- **FEED** — a one-line ticker of the most recent runs.
+
+**Keys** — the bottom bar always shows the actions valid for the current selection, each with its
+key; `?` opens the full map. Case is literal: a **capital** letter means Shift (e.g. `R`/`L`, because
+`r`/`l` are already the runs view / log pager).
+
+- **Navigate:** `tab` switch pane · `j`/`k` move selection or scroll · `g` expand backlog+archive ·
+  `/` filter · `rail + j/k` pick a project.
+- **Act on the selected task** (only the valid ones show): `a` advance (promote / start / approve /
+  ship …) · `x` reverse (defer / cancel / reject …) · `s` scope · `h` handoff · `e` edit title ·
+  `+`/`-` priority · `o` open PR · `n` new task · `↵` action menu (the same keys, listed).
+- **Loop / run** (act on the selected row's project): `w` start/stop watch · `R` run a role now ·
+  `t` tick once · `p` pause/resume · `c` cancel the running agent.
+- **Views:** `r` runs history (every completed run, incl. task-less) · `l` log pager · `L` live log
+  wall (all running agents) · `q` quit (confirms).
+
+**Manual vs. the loop.** `dais watch` is the continuous auto-dispatcher (it's what `PAUSED` refers
+to). `a start`, `R`, and `t` are **on-demand** runs that fire one agent now and **bypass pause** — so
+you can kick off work while the loop is parked. `start` runs the *role* that handles the task's
+status, which then pulls the **highest-priority** task of that status (not necessarily the one you
+clicked). To make work flow automatically, **resume** (`p`) or start the loop (`w`).
+
+## How work flows
+
+Statuses are the spine — a task's status *is* whose turn it is, and the router runs the role that
+owns it (verify → build → plan by precedence). A typical code task:
+
+```
+backlog ──▶ ready ──▶ needs_qa ──▶ ready_to_merge ──▶ done
+  (you)    (engineer)   (qa)        (you merge)
+              ▲            └─ bounce ──▶ changes_requested ──▶ (engineer)
+
+a sparse task you add ──▶ needs_scoping ──▶ (lead specs it) ──▶ ready
+                                                              └─▶ proposed  (you approve new direction)
+```
+
+Two founder gates frame it: **`proposed`** (front door — a Lead initiative you approve before it's
+built) and the back-door deliverable gate — **`ready_to_merge`** (a QA-approved PR you merge) or
+**`needs_review`** (a finished non-code deliverable you review and close). **Dependencies:**
+`dais task set <id> --depends-on <other>` keeps a task out of the queue until its predecessor is
+done — the scheduler skips it and the panel marks it `⛓`.
 
 ## Playbooks: running any craft
 
@@ -84,7 +142,9 @@ The full prompt an agent sees, in escalating specificity:
 
 **Let Claude design a role:** `dais role new <project> --desc "what it does"` proposes a persona +
 routing row (access / trigger / handles / playbook / prec) from your project's existing roles; you
-confirm, and `dais lint` guards the one-reactive-role-per-status invariant.
+confirm, and `dais lint` guards the invariant that each status has exactly **one** schedulable owner.
+A role's `handles` is reactive ownership: a cadence role (e.g. a `lead` on `every:5h`) that also
+`handles needs_scoping` reacts to scoping work on the next tick **and** keeps its periodic run.
 
 ## The CLI
 
@@ -97,7 +157,8 @@ confirm, and `dais lint` guards the one-reactive-role-per-status invariant.
 | `dais pause` / `dais resume` | park / un-park the loop |
 | `dais tick [project]` | run one scheduling tick (the router picks who runs) |
 | `dais run <project> <agent>` | run a specific agent now |
-| `dais task add/set …` | manage the board |
+| `dais start <id>` | run the role that handles this task's status, right now (bypasses pause) |
+| `dais task add/set …` | manage the board (incl. `--depends-on <id>` to gate on a predecessor) |
 | `dais handoff <id> <role>` | hand a task to a role (sets the status that role handles) |
 | `dais approve <id>` | approve a `proposed` initiative → `ready` |
 | `dais ship <project> <pr#>` | QA-gated, migration-aware squash-merge (founder gate) |
