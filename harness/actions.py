@@ -33,15 +33,15 @@ def _rev(action_id, label, confirm=False):
 # Canonical (label, confirm, key) for menu-slot actions, so an id renders
 # identically wherever it appears in the catalog.
 _MENU = {
-    "set_priority": ("set priority", False, ""),
-    "handoff": ("handoff", False, ""),
-    "edit_title": ("edit title", False, ""),
+    "set_priority": ("set priority", False, ""),   # priority is on the bar as +/- ; this is exact-pick
+    "handoff": ("handoff", False, "h"),
+    "edit_title": ("edit title", False, "e"),
     "start": ("start now", False, ""),
     "defer": ("defer → deferred", False, ""),
     "cancel": ("cancel", True, ""),
     "to_ready": ("→ ready", False, ""),
     "open_pr": ("open PR", False, "o"),
-    "scope": ("scope (→ needs_scoping)", False, ""),
+    "scope": ("scope (→ needs_scoping)", False, "s"),
 }
 
 
@@ -112,8 +112,9 @@ def task_actions(status, kind="task", has_pr=False):
     if status in ("done", "cancelled"):
         return [_m("set_priority"), _m("edit_title")]
 
-    # unknown status → safe minimum
-    return [_m("set_priority"), _m("edit_title")]
+    # unknown / custom status (e.g. a project-defined needs_design) → no inherent advance/reverse
+    # semantics, but keep it ROUTABLE: `handoff` (h) sends it to whatever role should take it next.
+    return [_m("handoff"), _m("set_priority"), _m("edit_title")]
 
 
 # --- argv mapping -----------------------------------------------------------

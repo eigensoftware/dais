@@ -59,10 +59,8 @@ class TestKindGating(unittest.TestCase):
         self.assertTrue(cr.confirm)
         # no advance for a running row
         self.assertEqual(by_slot(acts, "advance"), [])
-        for mid in ("set_priority", "handoff"):
-            m = by_id(acts, mid)
-            self.assertEqual(m.slot, "menu")
-            self.assertEqual(m.key, "")
+        self.assertEqual(by_id(acts, "set_priority").key, "")   # priority is +/- on the bar
+        self.assertEqual(by_id(acts, "handoff").key, "h")       # handoff has its own key now
 
 
 class TestSlotKeyInvariants(unittest.TestCase):
@@ -87,11 +85,12 @@ class TestSlotKeyInvariants(unittest.TestCase):
                     self.assertEqual(adv.key, "a", (s, adv.id))
                 for rev in revs:
                     self.assertEqual(rev.key, "x", (s, rev.id))
+                # menu actions now carry their own letter key (the bar mirrors them); each must be a
+                # single char and must not collide with the advance/reverse slot keys.
+                _MENU_KEYS = {"open_pr": "o", "handoff": "h", "edit_title": "e", "scope": "s"}
                 for m in by_slot(acts, "menu"):
-                    if m.id == "open_pr":
-                        self.assertEqual(m.key, "o", s)
-                    else:
-                        self.assertEqual(m.key, "", (s, m.id))
+                    self.assertEqual(m.key, _MENU_KEYS.get(m.id, ""), (s, m.id))
+                    self.assertNotIn(m.key, ("a", "x"), (s, m.id))   # never shadow advance/reverse
 
 
 class TestProposed(unittest.TestCase):
@@ -275,8 +274,9 @@ class TestTerminal(unittest.TestCase):
 
 class TestUnknownStatus(unittest.TestCase):
     def test_unknown(self):
+        # a custom/unknown status stays routable via handoff (h) — no advance/reverse semantics
         acts = a.task_actions("zzz-not-a-status")
-        self.assertEqual(ids(acts), ["set_priority", "edit_title"])
+        self.assertEqual(ids(acts), ["handoff", "set_priority", "edit_title"])
         for m in acts:
             self.assertEqual(m.slot, "menu")
 

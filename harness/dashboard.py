@@ -1259,15 +1259,19 @@ class App:
         self.scr.timeout(250)
         return ch in (ord("y"), ord("Y"))
 
-    def _menu(self, title, options):
-        """Tiny modal picker: numbered options, returns the chosen index (1-9) or None."""
+    def _menu(self, title, options, keys=None):
+        """Tiny modal picker: returns the chosen index or None. If `keys` is given (one per option,
+        '' = none), each option shows its KEY and pressing that key selects it — so the action menu
+        mirrors the bar's letters instead of a separate 1-9 scheme. 1-9 still works as a fallback."""
         if not options:
             return None
         h, w = self.scr.getmaxyx()
-        # consistent padding: blank row top + bottom, a 2-space left margin on every line
-        # (the title included), +2 right margin — matches the panel's ? help overlay.
-        lines = ["", "  " + title] + [f"  {i + 1}. {o}" for i, o in enumerate(options[:9])]
-        lines += ["  (1-9 pick · esc cancel)", ""]
+        def _label(i, o):
+            k = keys[i] if keys and i < len(keys) else ""
+            return f"  {k} · {o}" if k else f"  {i + 1}. {o}"
+        # consistent padding: blank row top + bottom, a 2-space left margin on every line.
+        lines = ["", "  " + title] + [_label(i, o) for i, o in enumerate(options[:9])]
+        lines += ["  (press the key, or 1-9 · esc cancel)", ""]
         bw = max(disp_width(s) for s in lines) + 2
         y0, x0 = max(0, h // 2 - len(lines) // 2), max(0, (w - bw) // 2)
         self.scr.timeout(-1)
@@ -1277,6 +1281,10 @@ class App:
         self.scr.refresh()
         ch = self.scr.getch()
         self.scr.timeout(250)
+        if keys:                                  # a pressed action-key selects its option
+            for i, k in enumerate(keys[:9]):
+                if k and ch == ord(k):
+                    return i
         if ord("1") <= ch <= ord("9"):
             idx = ch - ord("1")
             return idx if idx < len(options[:9]) else None
@@ -1520,13 +1528,14 @@ class App:
             self.flash = f"no handler for {action_id}"
 
     def _action_menu(self, row):
-        """Open the numbered Enter menu and dispatch the chosen action."""
+        """Open the Enter menu and dispatch the chosen action. Shows each action's KEY (mirroring the
+        bar) so it's the same letters, not a separate scheme; pressing the key or 1-9 both select."""
         acts = self._row_actions(row)
         if not acts:
             self.flash = "no actions for this row"
             return
         idx = self._menu(f"actions · {(self._task_of(row) or {}).get('id') or ''}".rstrip(),
-                         [a.label for a in acts])
+                         [a.label for a in acts], keys=[a.key for a in acts])
         if idx is not None:
             self.do_action(acts[idx].id, row)
 
@@ -1688,8 +1697,6 @@ class App:
             self._reset_log_scroll()
         elif ch == ord("l"):
             self.launch_logs(sel_row)
-        elif ch == ord("o"):
-            self.launch_pr(sel_row)
         elif ch == ord("w"):
             self.start_or_stop_watch()
         elif ch == ord("p"):
@@ -1700,18 +1707,9 @@ class App:
             self.run_role(sel_row["project"] if sel_row else None)
         elif ch == ord("c"):
             self.cancel_run(sel_row["project"] if sel_row else None)
-        elif ch == ord("a"):                 # contextual ADVANCE (approve/ship/start/…)
-            act = self._slot_action(sel_row, "advance")
-            if act:
-                self.do_action(act.id, sel_row)
-            elif self._row_kind(sel_row) != "project":
-                self.flash = "nothing to advance here"
-        elif ch == ord("x"):                 # contextual REVERSE (reject/defer/cancel-run/…)
-            act = self._slot_action(sel_row, "reverse")
-            if act:
-                self.do_action(act.id, sel_row)
-            elif self._row_kind(sel_row) != "project":
-                self.flash = "nothing to reverse here"
+        elif 32 <= ch < 127 and (act := next(
+                (a for a in self._row_actions(sel_row) if a.key == chr(ch)), None)):
+            self.do_action(act.id, sel_row)  # any contextual action by its key (a/x/o/s/h/e …)
         elif ch in (ord("+"), ord("=")):     # raise priority ('=' is the unshifted '+')
             self._bump_priority(sel_row, +1)
         elif ch == ord("-"):                 # lower priority
