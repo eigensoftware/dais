@@ -152,20 +152,31 @@ MD
         fi
         valid_status "$proj" "$st" || { echo "task add: invalid status '$st'. valid: $(status_help "$proj")"; exit 1; }
         pe="$(sqlesc "$proj")"
-        if [ -z "$id" ]; then                       # auto-id: <abbrev>-<n>
-          abbr="$(printf '%s' "$proj" | cut -c1-3)"
+        auto=0
+        next_auto_id(){                             # auto-id: <abbrev>-<n>, first free slot
+          local abbr n; abbr="$(printf '%s' "$proj" | cut -c1-3)"
           n="$(db "SELECT COUNT(*)+1 FROM tasks WHERE project='$pe';")"
           id="${abbr}-${n}"
           while [ -n "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$id")';")" ]; do n=$((n+1)); id="${abbr}-${n}"; done
-        fi
+        }
+        [ -z "$id" ] && { auto=1; next_auto_id; }
         if [ -n "$dep" ]; then
           has_blocked_on || { echo "task add: dependencies need a schema upgrade — run 'dais migrate' first"; exit 1; }
           [ -z "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$dep")';")" ] && { echo "task add: no such predecessor task: $dep"; exit 1; }
         fi
-        cols="id,project,title,priority,status,assignee,notes"; vals="'$(sqlesc "$id")','$pe','$(sqlesc "$title")','$(sqlesc "$pri")','$(sqlesc "$st")',$([ -n "$asg" ] && echo "'$(sqlesc "$asg")'" || echo NULL),$([ -n "$notes" ] && echo "'$(sqlesc "$notes")'" || echo NULL)"
-        [ -n "$dep" ] && { cols="$cols,blocked_on"; vals="$vals,'$(sqlesc "$dep")'"; }
-        db "INSERT INTO tasks($cols) VALUES($vals);" \
-          && { link_run_task "$id" create; echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]"; } ;;
+        # retry an AUTO id on collision — two concurrent creators (parallel agents) compute the
+        # same next id; the loser re-derives instead of dying on the UNIQUE constraint. An
+        # EXPLICIT --id collision is a real error and still fails.
+        ok=0
+        for _try in 1 2 3 4 5; do
+          cols="id,project,title,priority,status,assignee,notes"; vals="'$(sqlesc "$id")','$pe','$(sqlesc "$title")','$(sqlesc "$pri")','$(sqlesc "$st")',$([ -n "$asg" ] && echo "'$(sqlesc "$asg")'" || echo NULL),$([ -n "$notes" ] && echo "'$(sqlesc "$notes")'" || echo NULL)"
+          [ -n "$dep" ] && { cols="$cols,blocked_on"; vals="$vals,'$(sqlesc "$dep")'"; }
+          if db "INSERT INTO tasks($cols) VALUES($vals);" 2>/dev/null; then ok=1; break; fi
+          [ "$auto" = 1 ] || break
+          next_auto_id
+        done
+        [ "$ok" = 1 ] || { echo "task add: could not insert $id (id already exists?)"; exit 1; }
+        link_run_task "$id" create; echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]" ;;
       set)
         id="$1"; shift
         sets=""; newst=""; dep=""; depset=0

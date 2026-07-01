@@ -349,6 +349,24 @@ class TestSystemSweeps(unittest.TestCase):
         self.assertEqual(_status(self.conn, other), "doing")   # other project untouched
         self.assertEqual(_status(self.conn, parked), "ready")  # not mid-flight — untouched
 
+    def test_task_id_collision_retries_instead_of_dying(self):
+        # simulate the creator race: _new_id hands out an id that gets taken before the
+        # INSERT lands — _insert_task must re-derive, not die on the UNIQUE constraint.
+        conn = _db(); m = M.load(CODING)
+        conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('alp-1','alpha','x','ready')")
+        real = M._new_id
+        calls = {"n": 0}
+        def racy(c, project):
+            calls["n"] += 1
+            return "alp-1" if calls["n"] == 1 else real(c, project)   # first pick collides
+        M._new_id = racy
+        try:
+            tid = M.create_task(conn, m, "alpha", "y")
+        finally:
+            M._new_id = real
+        self.assertNotEqual(tid, "alp-1")
+        self.assertEqual(_status(conn, tid), "proposed")
+
     def test_advance_skips_tasks_with_open_blockers(self):
         parent = M.create_task(self.conn, self.m, "alpha", "p", state="blocked")
         child = M.create_task(self.conn, self.m, "alpha", "fix", state="ready")

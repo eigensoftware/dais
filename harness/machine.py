@@ -325,6 +325,21 @@ def _new_id(conn, project):
     return tid
 
 
+def _insert_task(conn, project, title, status, assignee):
+    """INSERT with a fresh auto-id, retrying on an id collision — two concurrent creators
+    (parallel agents adding tasks, racing spawn effects) compute the same next id; the loser
+    re-derives instead of dying on the UNIQUE constraint. Returns the id used."""
+    for _ in range(20):
+        tid = _new_id(conn, project)
+        try:
+            conn.execute("INSERT INTO tasks(id,project,title,status,assignee) VALUES(?,?,?,?,?)",
+                         (tid, project, title, status, assignee))
+            return tid
+        except sqlite3.IntegrityError:
+            continue
+    raise RuntimeError(f"could not allocate a task id for project {project!r}")
+
+
 def _blockers_open(conn, tid):
     rows = conn.execute("SELECT child_id FROM task_links WHERE parent_id=? AND rel='blocks_parent'",
                         (tid,)).fetchall()
@@ -442,10 +457,8 @@ def _apply_effect(conn, m, task, edge, result, ctx):
     eff = edge.get("effect", {})
     if "spawn" in eff:
         sp = eff["spawn"]
-        cid = _new_id(conn, task["project"])
         title = f"[{sp.get('template','task')}] {task['title']}"
-        conn.execute("INSERT INTO tasks(id,project,title,status,assignee) VALUES(?,?,?,?,?)",
-                     (cid, task["project"], title, sp["initial"], sp.get("by")))
+        cid = _insert_task(conn, task["project"], title, sp["initial"], sp.get("by"))
         rel = {"from_proposal": "spawned_from", "blocks_parent": "blocks_parent",
                "part_of": "part_of"}.get(sp.get("rel"), "spawned_from")
         conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,?)",
@@ -533,9 +546,7 @@ def recover_interrupted(conn, m, project):
 def create_task(conn, m, project, title, state=None, assignee=None):
     initials = [s for s, meta in m["states"].items() if meta.get("initial")]
     st = state or m.get("entry") or (initials[0] if initials else "backlog")
-    tid = _new_id(conn, project)
-    conn.execute("INSERT INTO tasks(id,project,title,status,assignee) VALUES(?,?,?,?,?)",
-                 (tid, project, title, st, assignee or dispatch_role(m, st)))
+    tid = _insert_task(conn, project, title, st, assignee or dispatch_role(m, st))
     conn.commit()
     return tid
 

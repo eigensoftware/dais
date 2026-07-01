@@ -151,6 +151,8 @@ class Snapshot:
     cap_state: bool
     ts: str
     workspace: str = None          # workspace identity (dais.yaml `workspace:`), or None
+    links: list = field(default_factory=list)   # composition graph: (parent_id, child_id, rel)
+                                                # rows from task_links; [] pre-migration
 
 
 def connect(db=DB):
@@ -342,8 +344,14 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
     capped = conn.execute(
         "SELECT COUNT(*) c FROM runs WHERE status='capped' "
         "AND started_at > datetime(?, '-90 minutes')", (now,)).fetchone()["c"]
+    try:                        # composition graph (task_links, migration 0003); [] pre-migration
+        links = [(r["parent_id"], r["child_id"], r["rel"]) for r in
+                 conn.execute("SELECT parent_id, child_id, rel FROM task_links ORDER BY id")]
+    except sqlite3.Error:
+        links = []
     return Snapshot(projects=projects, recent_runs=recent_runs,
-                    cap_state=capped > 0, ts=now, workspace=workspace_name(root))
+                    cap_state=capped > 0, ts=now, workspace=workspace_name(root),
+                    links=links)
 
 
 def load_runs(conn, limit=200):
@@ -1249,8 +1257,9 @@ class App:
 
     def _act_machine(self, m, verb, row, t):
         """Execute a machine action: launch the dispatch agent (__start), a metadata op, or fire the
-        edge via `dais fire`. Strong-human-guard edges (typed_confirm/attest) stay human-in-the-loop —
-        we surface the exact shell command instead of auto-confirming them."""
+        edge via `dais fire`. Strong-human guards (typed_confirm/attest) prompt IN the panel for the
+        same explicit input the CLI flags require; an unverifiable verify guard surfaces the shell
+        command instead — the panel never self-asserts that a check ran."""
         if verb == "set_priority":
             return self._priority_menu(row)
         if verb == "edit_title":
@@ -1267,24 +1276,39 @@ class App:
             self.flash = f"no '{verb}' edge from {t['status']}"
             return
         guards = edge.get("guards", [])
-        # human-gated guards are NEVER auto-satisfied from the panel: typed_confirm/attest need
-        # explicit input, and a verify:<check> with no declared checker (machine `checks`) can
-        # only pass as a --verify self-assertion — surface the exact command instead of stamping it.
+        # a verify:<check> with no declared checker (machine `checks`) means "a check must have
+        # RUN" — the panel can't assert that, so it surfaces the exact command instead of
+        # stamping it. (Checkers that ARE declared run inside the engine on fire.)
         checks = (m or {}).get("checks", {})
-        strong = [g for g in guards if g == "typed_confirm" or g.startswith("attest:")
-                  or (g.startswith("verify:") and g.split(":", 1)[1] not in checks)]
-        if strong:
-            flags = " ".join(("--typed " + t["id"]) if g == "typed_confirm"
-                             else ("--attest " + g.split(":", 1)[1].split(" ")[0]) if g.startswith("attest:")
-                             else ("--verify " + g.split(":", 1)[1]) for g in strong)
-            self.flash = f"{verb} is human-gated — run:  dais fire {t['id']} {verb} {flags}"
+        unchecked = [g for g in guards
+                     if g.startswith("verify:") and g.split(":", 1)[1] not in checks]
+        if unchecked:
+            flags = " ".join("--verify " + g.split(":", 1)[1] for g in unchecked)
+            self.flash = f"{verb} needs a verified check — run:  dais fire {t['id']} {verb} {flags}"
             return
-        if "confirm" in guards and not self._confirm(f"{verb} {t['id']}?"):
-            return
+        # strong-human guards prompt IN the panel — same strength as the CLI flags (you type
+        # the task id / the fact name), without dropping to a shell to greenlight a release.
         cmd = ["fire", t["id"], verb, "--by", "founder"]
+        prompted = False
+        for g in guards:
+            if g == "typed_confirm":
+                typed = self._prompt(f"{verb} {t['id']} — type the task id to confirm")
+                if typed != t["id"]:
+                    self.flash = f"{verb} cancelled (typed confirmation mismatch)"
+                    return
+                cmd += ["--typed", t["id"]]; prompted = True
+            elif g.startswith("attest:"):
+                fact = g.split(":", 1)[1].split(" ")[0]
+                typed = self._prompt(f"attest '{fact}' — type the fact name to assert it")
+                if typed != fact:
+                    self.flash = f"{verb} cancelled (attestation not given)"
+                    return
+                cmd += ["--attest", fact]; prompted = True
         if "confirm" in guards:
+            # the typed prompt IS the confirmation when one just happened — don't double-ask
+            if not prompted and not self._confirm(f"{verb} {t['id']}?"):
+                return
             cmd.append("--confirm")
-        # verify guards with a DECLARED checker run inside the engine on fire — nothing to pass.
         rc = self._dispatch(cmd)
         self.refresh()
         self.flash = f"{verb} {t['id']}" if rc == 0 else f"{verb} failed (exit {rc})"

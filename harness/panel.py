@@ -233,13 +233,81 @@ def _inspector_attr(app, line):
         if "fail" in low or "error" in low or "blocked" in low:
             return app._cp(_BAD)
         return 0
-    if s == "notes:" or s.startswith("runs touching"):      # the only real section headers
+    if s in ("notes:", "next:", "links:") or s.startswith("runs touching"):   # section headers
         return app._cp(_STRUCTURE) | curses.A_BOLD
+    if s.startswith("◆"):                                   # a founder edge — yours to fire
+        return app._cp(_NEEDS_YOU)
+    if s.startswith("⛔"):                                   # an open blocker
+        return app._cp(_BAD)
     if any(s.startswith(h) for h in _SUBHEADS):            # a known proposal sub-head pops as structure
         return app._cp(_STRUCTURE) | curses.A_BOLD
     if s.startswith("assignee ") and " · prio " in low:     # the generated meta line, matched precisely
         return app._cp(_NEEDS_YOU) if ("· prio high" in low or "· prio critical" in low) else curses.A_DIM
     return 0                                                # title + note body: plain
+
+
+def _next_lines(app, task, proj_name):
+    """The machine's view of what can happen to this task NEXT — its outgoing edges with owner
+    and guards, so the founder reads the board without running `dais edges` in another terminal.
+    ◆ marks a founder edge (yours to fire), ⚙ a system edge; a system `unblocked` edge names the
+    open blockers it's waiting on, so a WAITING task explains itself."""
+    m = next((p.machine for p in (app.snap.projects if app.snap else [])
+              if p.name == proj_name), None)
+    meta = (m or {}).get("states", {}).get(task.status, {})
+    if meta.get("terminal"):
+        return []                                       # archived — nothing fires from here
+    edges = MC.edges_from(m, task.status)
+    if not edges:
+        return ["next:", "  (no edges from this state — not part of this machine's flow)"]
+    out = ["next:"]
+    for e in edges:
+        by = e.get("by")
+        mark = "◆ " if by == "founder" else ("⚙ " if by == "system" else "")
+        owner = "you" if by == "founder" else by
+        gtxt = (" · " + ", ".join(e.get("guards", []))) if e.get("guards") else ""
+        out.append(f"  {mark}{e['verb']} → {e['to']}   ({owner}{gtxt})")
+        if by == "system" and "unblocked" in e.get("guards", []):
+            open_b = [c for (par, c, rel) in app.snap.links
+                      if par == task.id and rel == "blocks_parent"
+                      and (lambda t: t and MC.band_of(m, t.status) != "ARCHIVE")(_find_task(app.snap, c))]
+            if open_b:
+                out.append(f"      waiting on {d.collapse_ids(open_b, 6)}")
+    return out
+
+
+# how a link reads from the CHILD's side, per rel
+_REL_AS_CHILD = {"spawned_from": "spawned from", "blocks_parent": "fix for",
+                 "part_of": "part of", "encompasses": "in release"}
+
+
+def _link_lines(app, task):
+    """The composition graph around this task (task_links): where it came from, what blocks it,
+    what it spawned, and — for a release — exactly what it encompasses (what a greenlight ships)."""
+    links = app.snap.links if app.snap else []
+    if not links:
+        return []
+    out = []
+    for (par, child, rel) in links:                      # this task as the CHILD
+        if child == task.id:
+            out.append(f"  ↑ {_REL_AS_CHILD.get(rel, rel)} {par}")
+    blockers, spawned, enc = [], [], []
+    for (par, child, rel) in links:                      # this task as the PARENT
+        if par != task.id:
+            continue
+        if rel == "blocks_parent":
+            t = _find_task(app.snap, child)
+            blockers.append(f"{child} ({t.status})" if t else child)
+        elif rel == "encompasses":
+            enc.append(child)
+        else:
+            spawned.append(child)
+    for b in blockers:
+        out.append(f"  ⛔ blocked by {b}")
+    if spawned:
+        out.append(f"  ↳ spawned {d.collapse_ids(spawned, 6)}")
+    if enc:
+        out.append(f"  ⊞ encompasses {d.collapse_ids(enc, 8)}")
+    return (["links:"] + out) if out else []
 
 
 def _panel_detail_lines(app, sel_row):
@@ -261,6 +329,12 @@ def _panel_detail_lines(app, sel_row):
     if getattr(task, "blocked", False):                 # waiting on an unfinished predecessor
         out.append(f"⛓ blocked on {task.blocked_on} — won't run until it's done")
     out.append("")
+    nxt = _next_lines(app, task, p.name)
+    if nxt:
+        out += nxt + [""]
+    lnk = _link_lines(app, task)
+    if lnk:
+        out += lnk + [""]
     if task.notes:
         out.append("notes:")
         for ln in task.notes.split("\n"):           # keep the author's structure; blanks stay blank
@@ -653,7 +727,7 @@ _HELP_LINES = [
     "  n                 new task",
     "  enter             action menu for the selection",
     "  / filter          filter; type, enter to keep, esc to clear",
-    "  g expand          show the full backlog, deferred + archive (else compact)",
+    "  g expand          show every phase (incl. empty) + the full archive (else compact)",
     "  rail + j/k        pick a project (ALL clears the filter)",
     "  l                 open the log pager for the selection",
     "  L logs            live log wall - all running agents (esc back)",
@@ -938,6 +1012,7 @@ def _task_row(proj, task, tag):
 
 
 _PRIO_TAG = {"critical": "CRIT", "high": "HIGH", "medium": "MED", "low": "LOW"}
+_PRIO_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
 def _machine_work_rows(snap, projects, project, expanded, root):
@@ -973,6 +1048,9 @@ def _machine_work_rows(snap, projects, project, expanded, root):
             for t in ts if (p.name, t.id) not in running_ids]
 
     def emit(label, items, cap=None):
+        # priority-ordered WITHIN the band — matters for ALL, where per-project lists would
+        # otherwise just concatenate (project A's lows above project B's criticals)
+        items = sorted(items, key=lambda pt: (_PRIO_RANK.get(pt[1].priority, 2), pt[1].id))
         add_band(label, len(items))
         for proj, t in (items if (cap is None or expanded) else items[:cap]):
             rows.append(_task_row(proj, t, _PRIO_TAG.get(t.priority, "MED")))
@@ -980,6 +1058,7 @@ def _machine_work_rows(snap, projects, project, expanded, root):
     machines = [p.machine for p in projects if p.machine]
     same = bool(machines) and all(m.get("name") == machines[0].get("name") for m in machines)
 
+    hidden = 0
     if same:                                          # per-PHASE view (states correspond)
         m = machines[0]
         by_state = {}
@@ -988,14 +1067,20 @@ def _machine_work_rows(snap, projects, project, expanded, root):
         gate = {s for s, meta in m["states"].items()
                 if not meta.get("terminal") and MC.band_of(m, s) == "NEEDS YOU"}
         for st, meta in m["states"].items():
-            if not meta.get("terminal"):
-                emit(st.replace("_", " ").upper() + ("  ◆ you" if st in gate else ""),
-                     by_state.get(st, []))
+            if meta.get("terminal"):
+                continue
+            items = by_state.get(st, [])
+            if not items and not expanded:            # a 14-state machine mustn't cost 14 bars
+                hidden += 1
+                continue
+            emit(st.replace("_", " ").upper() + ("  ◆ you" if st in gate else ""), items)
         for st in by_state:                           # populated states the machine doesn't declare
             if st not in m["states"]:
                 emit(st.replace("_", " ").upper(), by_state[st])
-        emit("ARCHIVE", [(p.name, t) for p, st, t in live
-                         if m["states"].get(st, {}).get("terminal")], cap=_ARCHIVE_CAP)
+        archived = [(p.name, t) for p, st, t in live
+                    if m["states"].get(st, {}).get("terminal")]
+        if archived or expanded:
+            emit("ARCHIVE", archived, cap=_ARCHIVE_CAP)
     else:                                             # heterogeneous ALL -> machine-independent bands
         by_band = {}
         for p, st, t in live:
@@ -1005,6 +1090,10 @@ def _machine_work_rows(snap, projects, project, expanded, root):
         for band in sorted(b for b in by_band if b not in ("NEEDS YOU", "QUEUED", "WAITING", "ARCHIVE")):
             emit(band, by_band[band])
         emit("ARCHIVE", by_band.get("ARCHIVE", []), cap=_ARCHIVE_CAP)
+    if hidden:
+        rows.append({"kind": "spacer", "id": "__sp::hidden", "sel": False, "label": ""})
+        rows.append({"kind": "info", "id": "__hidden_phases", "sel": False,
+                     "label": f"· {hidden} empty phase{'s' if hidden != 1 else ''} hidden — g shows the full flow"})
     return rows
 
 

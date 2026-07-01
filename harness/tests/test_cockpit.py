@@ -23,6 +23,8 @@ CREATE TABLE tasks(id TEXT, project TEXT, title TEXT, status TEXT, assignee TEXT
   priority TEXT, pr_url TEXT, notes TEXT, updated_at TEXT, blocked_on TEXT);
 CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,
   status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT);
+CREATE TABLE task_links(id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id TEXT,
+  child_id TEXT, rel TEXT, at TEXT);
 """
 
 
@@ -158,6 +160,36 @@ class TestDoAction(unittest.TestCase):
         self.app.do_action("defer", task_row(status="ready"))
         self.sub.call.assert_called_once_with(
             ["dais", "fire", "cou-1", "defer", "--by", "founder"])
+
+    def test_strong_guards_prompt_in_panel_and_fire(self):
+        # greenlight (typed_confirm + attest): the panel prompts for the SAME explicit input
+        # the CLI flags require — type the task id, then the fact name — and fires with them.
+        answers = iter(["cou-1", "migrations_applied"])
+        self.app._prompt = lambda *a, **k: next(answers)
+        self.app.do_action("greenlight", task_row(status="release_review"))
+        self.sub.call.assert_called_once_with(
+            ["dais", "fire", "cou-1", "greenlight", "--by", "founder",
+             "--typed", "cou-1", "--attest", "migrations_applied"])
+
+    def test_typed_mismatch_cancels_without_firing(self):
+        self.app._prompt = lambda *a, **k: "wrong-id"
+        self.app.do_action("greenlight", task_row(status="release_review"))
+        self.sub.call.assert_not_called()
+        self.assertIn("cancelled", self.app.flash)
+
+    def test_attest_not_given_cancels_without_firing(self):
+        answers = iter(["cou-1", "nope"])          # typed ok, attestation refused
+        self.app._prompt = lambda *a, **k: next(answers)
+        self.app.do_action("greenlight", task_row(status="release_review"))
+        self.sub.call.assert_not_called()
+        self.assertIn("cancelled", self.app.flash)
+
+    def test_unchecked_verify_surfaces_the_command(self):
+        # qa `pass` carries verify:tests_pass with no declared checker — the panel must NOT
+        # self-assert it; it surfaces the exact fire command instead.
+        self.app.do_action("pass", task_row(status="qa_review"))
+        self.sub.call.assert_not_called()
+        self.assertIn("--verify tests_pass", self.app.flash)
 
     def test_confirm_no_blocks_reject_and_cancel(self):
         self.app._confirm = lambda *a: False

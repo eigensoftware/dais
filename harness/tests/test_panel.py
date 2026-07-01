@@ -1735,3 +1735,117 @@ class TestPanelHonesty(unittest.TestCase):
         before = papp.detail_scroll
         papp.handle(ord("k"), rows, i, sel)
         self.assertEqual(papp.detail_scroll, before - 1)    # k responds immediately
+
+
+class TestInspectorMachineSections(unittest.TestCase):
+    """The inspector explains the machine: `next:` lists the task's outgoing edges with owner +
+    guards (◆ = yours), a WAITING task names its open blockers, and `links:` shows the
+    composition graph (spawned_from / blocks_parent / encompasses)."""
+
+    def _papp(self, rows, links=()):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-insp-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        conn.executemany("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,?)", links)
+        conn.commit()
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.refresh()
+        return papp
+
+    def _detail(self, papp, tid):
+        papp.sel_id = tid
+        rows = papp.left_rows()
+        _, sel = papp._selected(rows)
+        return pn._panel_detail_lines(papp, sel)
+
+    def test_next_lists_edges_with_owner_and_guards(self):
+        papp = self._papp([("a-1", "alpha", "t", "proposal_review", "medium", None)])
+        lines = self._detail(papp, "a-1")
+        self.assertIn("next:", lines)
+        joined = "\n".join(lines)
+        self.assertIn("◆ approve → done   (you · confirm)", joined)      # founder edge, guard shown
+        self.assertIn("◆ request_changes → proposed   (you)", joined)
+
+    def test_agent_edge_names_the_role(self):
+        papp = self._papp([("a-1", "alpha", "t", "ready", "medium", None)])
+        joined = "\n".join(self._detail(papp, "a-1"))
+        self.assertIn("claim → doing   (engineer)", joined)
+
+    def test_waiting_task_names_its_open_blockers(self):
+        papp = self._papp([("a-1", "alpha", "t", "blocked", "medium", None),
+                           ("a-2", "alpha", "fix", "ready", "medium", None)],
+                          links=[("a-1", "a-2", "blocks_parent")])
+        joined = "\n".join(self._detail(papp, "a-1"))
+        self.assertIn("⚙ unblocked → qa_review   (system · unblocked)", joined)
+        self.assertIn("waiting on a-2", joined)
+
+    def test_terminal_task_has_no_next_section(self):
+        papp = self._papp([("a-1", "alpha", "t", "done", "medium", None)])
+        # done tasks live in ARCHIVE (capped list) — build detail directly
+        t = pn._find_task(papp.snap, "a-1")
+        row = {"kind": "task", "id": "a-1", "project": "alpha", "task": t,
+               "status": "done", "sel": True}
+        self.assertNotIn("next:", pn._panel_detail_lines(papp, row))
+
+    def test_links_show_composition_both_ways(self):
+        papp = self._papp([("a-1", "alpha", "parent", "blocked", "medium", None),
+                           ("a-2", "alpha", "fix", "ready", "medium", None),
+                           ("a-3", "alpha", "rel", "release_review", "medium", None),
+                           ("a-4", "alpha", "feat", "approved", "medium", None)],
+                          links=[("a-1", "a-2", "blocks_parent"),
+                                 ("a-3", "a-4", "encompasses")])
+        parent = "\n".join(self._detail(papp, "a-1"))
+        self.assertIn("links:", parent)
+        self.assertIn("⛔ blocked by a-2 (ready)", parent)     # child + its live status
+        fix = "\n".join(self._detail(papp, "a-2"))
+        self.assertIn("↑ fix for a-1", fix)                    # the child sees its parent
+        release = "\n".join(self._detail(papp, "a-3"))
+        self.assertIn("⊞ encompasses a-4", release)            # what a greenlight ships
+
+    def test_no_links_section_when_task_is_unlinked(self):
+        papp = self._papp([("a-1", "alpha", "t", "ready", "medium", None)])
+        self.assertNotIn("links:", self._detail(papp, "a-1"))
+
+
+class TestEmptyPhaseCollapse(unittest.TestCase):
+    """A 14-state machine must not cost 14 band bars: empty phases collapse to one dim info
+    line by default; `g` (expanded) shows the full flow."""
+
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-clps-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.refresh()
+        return papp
+
+    def test_empty_phases_hidden_by_default(self):
+        papp = self._papp([("a-1", "alpha", "t", "ready", "medium", None)])
+        rows = papp.left_rows()
+        bands = [r["label"] for r in rows if r["kind"] == "band"]
+        self.assertIn("READY · 1", bands)
+        self.assertNotIn("PROPOSAL REVIEW  ◆ you · 0", bands)   # empty gate hidden too
+        info = [r["label"] for r in rows if r["kind"] == "info"]
+        self.assertTrue(any("empty phase" in ln and "g shows" in ln for ln in info))
+
+    def test_expanded_shows_the_full_flow(self):
+        papp = self._papp([("a-1", "alpha", "t", "ready", "medium", None)])
+        papp._panel_expanded = True
+        bands = [r["label"] for r in papp.left_rows() if r["kind"] == "band"]
+        self.assertIn("PROPOSAL REVIEW  ◆ you · 0", bands)      # every phase, incl. empty gates
+        self.assertIn("ARCHIVE · 0", bands)
+
+    def test_running_band_always_present(self):
+        papp = self._papp([("a-1", "alpha", "t", "ready", "medium", None)])
+        bands = [r["label"] for r in papp.left_rows() if r["kind"] == "band"]
+        self.assertIn("RUNNING · 0", bands)
+
+    def test_bands_sort_by_priority_across_projects(self):
+        # ALL view: bravo's critical must outrank alpha's low INSIDE the shared band
+        papp = self._papp([("a-1", "alpha", "t", "ready", "low", None),
+                           ("b-1", "bravo", "t", "ready", "critical", None)])
+        rows = papp.left_rows()
+        ids = [r["id"] for r in rows if r["kind"] == "task"]
+        self.assertLess(ids.index("b-1"), ids.index("a-1"))
