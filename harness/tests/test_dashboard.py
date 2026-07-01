@@ -359,15 +359,6 @@ class TestRenderPlain(unittest.TestCase):
 
 
 class TestTuiSupport(unittest.TestCase):
-    def test_action_queue_orders_by_urgency(self):
-        conn = _seed()
-        snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
-        q = d.action_queue(snap)
-        statuses = [s for (_p, _t, s) in q]
-        # ready_to_merge before ready; done excluded entirely
-        self.assertEqual(statuses, ["ready_to_merge", "ready_to_merge", "ready"])
-        self.assertNotIn("done", statuses)
-
     def test_needs_review_renders_as_founder_gate(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -381,20 +372,6 @@ class TestTuiSupport(unittest.TestCase):
         self.assertIn("proposal review", text)          # a founder-gate phase
         self.assertIn("◆", text)                        # flagged as needs-you
         self.assertIn("lyr-19", text)
-
-    def test_needs_review_in_action_queue_after_merge(self):
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.executescript(SCHEMA)
-        conn.executemany(
-            "INSERT INTO tasks(id,project,title,status,priority) VALUES(?,?,?,?,?)",
-            [("a", "p", "m", "ready_to_merge", "high"),
-             ("b", "p", "r", "needs_review", "high"),
-             ("c", "p", "g", "ready", "high")])
-        conn.commit()
-        snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
-        statuses = [s for (_p, _t, s) in d.action_queue(snap)]
-        self.assertEqual(statuses, ["ready_to_merge", "needs_review", "ready"])
 
     def test_runs_touching_matches_summary(self):
         runs = [d.Run("2026-06-26 20:38:00", "qa", "succeeded",

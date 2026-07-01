@@ -571,7 +571,7 @@ class TestRolePalette(unittest.TestCase):
         self.assertEqual(self._row_attr(scr, "cou-1"), curses.A_DIM)
 
     def test_gate_row_is_needs_you_yellow(self):
-        # a founder-gate row (needs_review ∈ GATE_ORDER) carries the needs-you role, not a status hue
+        # a founder-gate row (a NEEDS YOU band state) carries the needs-you role, not a status hue
         papp = self._board()
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 48, 100), papp, focused=False)  # no selection highlight

@@ -351,27 +351,6 @@ class TestCockpitHelpers(unittest.TestCase):
         running = frozenset({("a", "a-proposal_review-0")})   # one gate task is mid-run
         self.assertEqual(d.gate_count(snap, running), d.gate_count(snap) - 1)
 
-    def test_loop_summary_text_omits_zero_segments(self):
-        snap = _snap(_proj("a", ready=3, needs_qa=1), _proj("b", ready=0))
-        # changes_requested=0 omitted; order is ready, needs_qa, changes_requested
-        self.assertEqual(d.loop_summary(snap),
-                         "⚙ the loop: 3 ready · 1 needs_qa — g for full board")
-
-    def test_loop_summary_none_when_empty(self):
-        self.assertIsNone(d.loop_summary(_snap(_proj("a", proposed=2, done=4))))
-
-    def test_loop_summary_excludes_running_task(self):
-        snap = _snap(_proj("a", needs_qa=2))
-        running = frozenset({("a", "a-needs_qa-0")})   # one is mid-run → not counted
-        self.assertEqual(d.loop_summary(snap, running),
-                         "⚙ the loop: 1 needs_qa — g for full board")
-
-    def test_allclear_line_running_vs_idle(self):
-        self.assertEqual(d.allclear_line(2),
-                         "✓ nothing needs you — the loop is running (2 in flight)")
-        self.assertEqual(d.allclear_line(0), "✓ nothing needs you — loop idle")
-
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -119,7 +119,6 @@ def render_pane_title(scr, rect, title, focused):
 
 
 # ── panel color palette: ONE color per ROLE, applied consistently across every pane ──
-# (does NOT touch dashboard.STATUS_PAIR, which the classic UI shares)
 _STRUCTURE = 3      # cyan   — section/band headers + the inspector's header lines
 _LIVE = 1           # green  — running agents, the live project, succeeded/pass
 _NEEDS_YOU = 4      # yellow — founder-gated work: gate rows, counts, chips, "prio high"

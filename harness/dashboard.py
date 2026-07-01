@@ -364,9 +364,6 @@ def load_runs(conn, limit=200):
 # --------------------------------------------------------------------------- #
 # plain renderer (the cleaned-up one-shot `dais status`)
 # --------------------------------------------------------------------------- #
-_CANON_NAMED = {"needs_qa", "ready", "changes_requested", "ready_to_merge",
-                "needs_review", "proposed", "blocked", "done", "deferred", "backlog",
-                "cancelled", "doing"}
 
 
 def color_enabled():
@@ -474,11 +471,6 @@ def render_plain(snap, color=None):
 # --------------------------------------------------------------------------- #
 # TUI-support pure functions
 # --------------------------------------------------------------------------- #
-QUEUE_ORDER = ["ready_to_merge", "needs_review", "proposed", "blocked", "needs_qa",
-               "changes_requested", "ready"]
-# founder-parked statuses, revealed in the cockpit only when `b` is toggled on
-PARKED_ORDER = ["backlog", "deferred"]
-
 # task priorities low→critical (the `+`/`-` cycle + the set-priority picker)
 PRIORITIES = ("low", "medium", "high", "critical")
 
@@ -497,32 +489,8 @@ def bar_label(act):
     """The action's short bar token text (engine label as a fallback)."""
     return BAR_LABEL.get(act.id, act.label)
 
-# status -> curses color-pair id (pairs defined in App._init_colors). Mirrors the
-# plain renderer's palette: merge=green, blocked=red, qa=cyan, engineer=yellow,
-# deferred=magenta, review=white (a founder-gate, like merge, but for non-PR work).
-STATUS_PAIR = {"ready_to_merge": 1, "needs_review": 6, "proposed": 5, "blocked": 2,
-               "needs_qa": 3, "changes_requested": 4, "ready": 4, "deferred": 5}
-
 # a live-log line worth flagging red (a failed command, a raised error, a non-zero exit)
 _LOG_ERR_RE = re.compile(r"exit code [1-9]|\bfatal\b|traceback|exception|\berror\b", re.I)
-
-
-def action_queue(snap, order=QUEUE_ORDER):
-    rows = []
-    for st in order:
-        for p in snap.projects:
-            for t in p.tasks_by_status.get(st, []):
-                rows.append((p.name, t, st))
-    return rows
-
-
-# --- the cockpit: founder gates vs the loop's own work -------------------- #
-# The four founder-gate statuses, in ⚡ NEEDS YOU display order, with icons.
-GATE_ORDER = ["ready_to_merge", "needs_review", "proposed", "blocked"]
-GATE_ICON = {"ready_to_merge": "⏳", "needs_review": "📋",
-             "proposed": "🧭", "blocked": "⛔"}
-# The loop's own in-progress statuses — collapsed to one summary line, never listed.
-LOOP_SUMMARY_ORDER = ["ready", "needs_qa", "changes_requested"]
 
 
 def gate_count(snap, running_ids=frozenset()):
@@ -535,30 +503,6 @@ def gate_count(snap, running_ids=frozenset()):
             if p.machine and MC.band_of(p.machine, st) == "NEEDS YOU":
                 n += sum(1 for t in tasks if (p.name, t.id) not in running_ids)
     return n
-
-
-def loop_summary(snap, running_ids=frozenset()):
-    """One-line summary of the loop's own queued work — the statuses the founder does
-    NOT action — e.g. '⚙ the loop: 3 ready · 1 needs_qa — g for full board', or None
-    when there is none. Zero-count statuses are omitted. Tasks currently being run
-    (`running_ids`: a set of (project, task_id)) are excluded; they show in the
-    running band instead, so the summary doesn't double-count them."""
-    segs = []
-    for st in LOOP_SUMMARY_ORDER:
-        n = sum(1 for p in snap.projects for t in p.tasks_by_status.get(st, [])
-                if (p.name, t.id) not in running_ids)
-        if n:
-            segs.append(f"{n} {st}")
-    if not segs:
-        return None
-    return "⚙ the loop: " + " · ".join(segs) + " — g for full board"
-
-
-def allclear_line(running_count):
-    """The calm replacement for the ⚡ NEEDS YOU band when no gate items remain."""
-    if running_count > 0:
-        return f"✓ nothing needs you — the loop is running ({running_count} in flight)"
-    return "✓ nothing needs you — loop idle"
 
 
 def watch_args(interval, par):
@@ -1025,30 +969,6 @@ class App:
         # UTC to match DB stamps; recomputed each frame so running clocks tick live.
         return utc_now()
 
-    def _row_attr(self, r):
-        if r["kind"] == "header":
-            lab = r.get("label", "").lstrip()
-            if lab.startswith("⚡"):                 # the NEEDS YOU banner — make it pop
-                return curses.A_BOLD | self._cp(7)
-            if lab.startswith(("⚙", "✓")):           # loop summary / all-clear — calm
-                return curses.A_DIM | self._cp(6)
-            return curses.A_DIM | self._cp(STATUS_PAIR.get(r["status"], 6))
-        if r["kind"] == "project":
-            return curses.A_BOLD | (self._cp(1) if r.get("running") else self._cp(6))
-        return self._cp(STATUS_PAIR.get(r["status"], 6))
-
-    def _line_attr(self, ln):
-        s = ln.strip()
-        if s.startswith("▶"):
-            return self._cp(1)
-        head = s.split(":", 1)[0]
-        if head in STATUS_PAIR:
-            return self._cp(STATUS_PAIR[head])
-        words = s.split()
-        if len(words) >= 2 and words[1] in STATUS_PAIR:
-            return self._cp(STATUS_PAIR[words[1]])
-        return 0
-
     def _log_attr(self, line):
         """Colour a live-log line by its fmt-stream marker so the stream is
         scannable: 💬 assistant narration (cyan), 🔧 tool call (yellow),
@@ -1116,10 +1036,15 @@ class App:
             else:
                 out.append("idle")
             out.append("")
-            for st in QUEUE_ORDER + ["done", "deferred", "backlog", "cancelled"]:
+            # task buckets in the machine's declared (flow) order, then any populated
+            # state the machine doesn't declare — derived, not a fixed legacy status
+            # list, so it stays correct for whatever machine this project runs.
+            states = (p.machine or {}).get("states", {})
+            for st in list(states) + [s for s in sorted(p.tasks_by_status)
+                                      if s not in states]:
                 ids = [t.id for t in p.tasks_by_status.get(st, [])]
                 if ids:
-                    out.append(f"{st}: {collapse_ids(ids, 10)}")
+                    out.append(f"{st.replace('_', ' ')}: {collapse_ids(ids, 10)}")
             out += ["", "recent runs:"]
             for r in p.recent_runs:
                 dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
