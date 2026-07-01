@@ -141,13 +141,6 @@ class Project:
     running: list = field(default_factory=list)
     tasks_by_status: dict = field(default_factory=dict)
     recent_runs: list = field(default_factory=list)
-    deploy_configured: bool = False   # project.yaml has a deploy: command
-    deploy_needs: bool = None         # prod != main → needs deploy; False = up to date; None = unchecked
-    deploy_checked_at: str = None     # when prod's live SHA was last fetched (.deploy-rev cache)
-    deploy_migration: bool = False    # an un-deployed commit touches a migration → flag it loudly
-    deploy_commits: list = field(default_factory=list)   # (sha7, subject) of what's awaiting deploy
-    deploy_failed: bool = False       # the most recent deploy ATTEMPT failed (not yet superseded)
-    deploy_failed_at: str = None      # when it failed
     machine: dict = None              # the project's authored state machine (or None = legacy status routing)
 
 
@@ -324,19 +317,9 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 "AND status='running' ORDER BY id DESC LIMIT 1",
                 (name, agent)).fetchone()
             running.append((agent, since["started_at"] if since else None))
-        dcfg, dneeds, dchecked, dmig, dcommits = deploy_state(root, name)
-        dfail, dfail_at = False, None
-        if dcfg:                                          # last deploy ATTEMPT failed (any status)?
-            frow = conn.execute("SELECT status, ended_at FROM runs WHERE project=? AND agent='deploy' "
-                                "ORDER BY id DESC LIMIT 1", (name,)).fetchone()
-            if frow and frow["status"] == "failed":
-                dfail, dfail_at = True, frow["ended_at"]
         projects.append(Project(name=name, stage_goal=stage_goal(root, name),
                                 running=running, tasks_by_status=by_status,
-                                recent_runs=proj_runs, deploy_configured=dcfg,
-                                deploy_needs=dneeds, deploy_checked_at=dchecked,
-                                deploy_migration=dmig, deploy_commits=dcommits,
-                                deploy_failed=dfail, deploy_failed_at=dfail_at,
+                                recent_runs=proj_runs,
                                 machine=_load_machine(root, name)))
     # resolve dependencies once across ALL projects (a predecessor may live in another project):
     # a task is blocked when its predecessor exists and isn't done/cancelled. A dangling ref
@@ -363,77 +346,6 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
         "AND started_at > datetime(?, '-90 minutes')", (now,)).fetchone()["c"]
     return Snapshot(projects=projects, recent_runs=recent_runs,
                     cap_state=capped > 0, ts=now, workspace=workspace_name(root))
-
-
-def read_deploy_rev(root, project):
-    """(prod_sha, checked_at) from the project's .deploy-rev cache — what `dais deploy <p> --check`
-    last learned the SERVER is running (and a real deploy updates to the just-shipped SHA). The panel
-    reads this (never SSHes itself); ('', None) when never checked."""
-    path = os.path.join(root, "projects", project, ".deploy-rev")
-    try:
-        with open(path) as f:
-            lines = [ln.strip() for ln in f.read().splitlines()]
-        return (lines[0] if lines and lines[0] else "",
-                lines[1] if len(lines) > 1 and lines[1] else None)
-    except OSError:
-        return ("", None)
-
-
-def _deploy_has_migration(root, project, repo, sha):
-    """True if any un-deployed commit (sha..origin/main) touches a migration file, per the project's
-    migrations_glob (default */migrations/*.sql) — so a deploy that includes a migration can be
-    flagged loudly. Local git only."""
-    if not (repo and sha and sha != "?"):
-        return False
-    glob = project_field(root, project, "migrations_glob") or "*/migrations/*.sql"
-    rx = re.compile(re.escape(glob).replace(r"\*", ".*") + "$")   # glob → regex (mirrors lib.sh migrations_re)
-    try:
-        out = subprocess.run(
-            ["git", "-C", os.path.expanduser(repo), "diff", "--name-only", "%s..origin/main" % sha],
-            capture_output=True, text=True, timeout=5)
-        if out.returncode == 0:
-            return any(rx.search(p) for p in out.stdout.splitlines())
-    except Exception:
-        pass
-    return False
-
-
-def _deploy_commits(repo, sha, limit=25):
-    """The un-deployed commits (sha..origin/main), newest first, as (sha7, subject) — exactly what a
-    `dais deploy` would ship, so the panel can show what's pending instead of just a count. Local git."""
-    if not (repo and sha and sha != "?"):
-        return []
-    try:
-        out = subprocess.run(
-            ["git", "-C", os.path.expanduser(repo), "log", "--pretty=format:%h\x1f%s",
-             "-n", str(limit), "%s..origin/main" % sha],
-            capture_output=True, text=True, timeout=5)
-        if out.returncode == 0:
-            return [tuple(ln.split("\x1f", 1)) for ln in out.stdout.splitlines() if "\x1f" in ln]
-    except Exception:
-        pass
-    return []
-
-
-def deploy_state(root, project):
-    """(configured, needs, checked_at, has_migration, commits) — the deploy signal as YES/NO, derived
-    from what the SERVER is running (the .deploy-rev cache), NOT a guessed baseline:
-      configured  – the project declares a deploy: command
-      needs       – True if prod's SHA differs from origin/main (commits to ship), False if up to
-                    date, None if never checked (unknown — a --check resolves it)
-      checked_at  – when prod's SHA was last fetched
-      has_migration / commits – the migration flag + commit list (prod..origin/main) of what'd ship
-    Local git only; the SSH to learn prod's SHA happens in `dais deploy --check`, not here."""
-    if not project_field(root, project, "deploy"):
-        return (False, None, None, False, [])
-    prod_sha, checked_at = read_deploy_rev(root, project)
-    if not prod_sha:
-        return (True, None, checked_at, False, [])        # configured but never checked → unknown
-    repo = project_field(root, project, "repo")
-    commits = _deploy_commits(repo, prod_sha)
-    needs = len(commits) > 0
-    has_mig = _deploy_has_migration(root, project, repo, prod_sha) if needs else False
-    return (True, needs, checked_at, has_mig, commits)
 
 
 def load_runs(conn, limit=200):
@@ -1645,54 +1557,6 @@ class App:
         subprocess.call([self._dais(), "cancel", proj])
         self.flash = f"cancelled {proj}"
 
-    def deploy_project(self, proj):
-        """Founder-gate (always manual): run the project's `deploy:` command. Outward → confirm first,
-        then launch detached so it streams to the run log + shows in RUNNING. If the un-deployed
-        commits include a MIGRATION, say so loudly and run the `deploy_migrate:` path (the migration
-        was already founder-merged + pre-flighted by now); if there's no deploy_migrate: for it, stop
-        and point at the runbook rather than deploy code ahead of an un-run migration."""
-        if not proj:
-            self.flash = "select a project to deploy"
-            return
-        if not project_field(self.root, proj, "deploy"):
-            self.flash = f"{proj} has no deploy: command (set one in project.yaml)"
-            return
-        p = next((x for x in (self.snap.projects if self.snap else []) if x.name == proj), None)
-        mig = bool(p and getattr(p, "deploy_migration", False))
-        if mig and not project_field(self.root, proj, "deploy_migrate"):
-            self.flash = f"{proj}: pending deploy includes a MIGRATION but no deploy_migrate: set — deploy via the runbook"
-            return
-        msg = (f"deploy {proj} — ⚠ includes a DB MIGRATION (pre-flight done?)" if mig
-               else f"deploy {proj}? (this goes LIVE)")
-        if not self._confirm(msg):
-            return
-        cmd = ["deploy", proj, "--migrate"] if mig else ["deploy", proj]
-        if self._spawn_agent(cmd):
-            self.flash = (f"deploying {proj} (migration) …" if mig else f"deploying {proj} …")
-
-    def file_deploy_fix(self, proj):
-        """File a task to fix the project's last FAILED deploy (its error + log path). Deliberate, not
-        automatic — deploy failures are often transient/ops, so this is founder-initiated. Lands in
-        backlog (high) for you to triage: promote if it's a build break, cancel if it was a blip."""
-        if not proj:
-            self.flash = "select a project"
-            return
-        row = self.conn.execute(
-            "SELECT summary, log_path FROM runs WHERE project=? AND agent='deploy' "
-            "AND status='failed' ORDER BY id DESC LIMIT 1", (proj,)).fetchone()
-        if not row:
-            self.flash = f"no failed deploy for {proj}"
-            return
-        if not self._confirm(f"file a fix task for {proj}'s failed deploy?"):
-            return
-        notes = (f"Last deploy FAILED: {row['summary'] or '(no summary)'}. "
-                 f"Log: {row['log_path'] or '(none)'}. Triage: ops/transient (retry with D?) vs a real "
-                 f"build break (then fix). Filed by founder from the panel.")
-        rc = self._dispatch(["task", "add", proj, f"deploy failed: {proj} — investigate",
-                             "--priority", "high", "--status", "backlog", "--notes", notes])
-        self.refresh()
-        self.flash = (f"filed deploy-fix task in {proj}" if rc == 0 else f"add failed (exit {rc})")
-
     # ---- the action engine (contextual bar + shared dispatcher) ----
     def _row_kind(self, row):
         """The engine's kind for a left row: 'project' | 'running' | 'task' (None for
@@ -2087,10 +1951,6 @@ class App:
             self.run_role(sel_row["project"] if sel_row else None)
         elif ch == ord("c"):
             self.cancel_run(sel_row["project"] if sel_row else None)
-        elif ch == ord("D"):                 # deploy the selected row's project (founder gate)
-            self.deploy_project(sel_row["project"] if sel_row else None)
-        elif ch == ord("F"):                 # file a fix task for the project's last FAILED deploy
-            self.file_deploy_fix(sel_row["project"] if sel_row else None)
         elif 32 <= ch < 127 and (act := next(
                 (a for a in self._row_actions(sel_row) if a.key == chr(ch)), None)):
             self.do_action(act.id, sel_row)  # any contextual action by its key (a/x/o/s/h/e …)

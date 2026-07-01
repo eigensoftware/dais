@@ -182,11 +182,6 @@ def render_work(scr, rect, app, focused):
                  curses.A_DIM)
             continue
         selected = (base + idx) == sel_i and focused
-        if r["kind"] == "deploy":                            # an awaiting-deploy commit — selectable
-            attr = (curses.A_REVERSE | curses.A_BOLD) if selected else app._cp(_NEEDS_YOU)
-            _add(scr, y, inner.x, pad_cols(clip_cols(r["label"], inner.w), inner.w),
-                 inner.x + inner.w, attr)
-            continue
         # task / running row: TAG  id  project  title
         if r["kind"] == "running":
             tag, tid, proj = "RUN", (r.get("task_id") or "—"), r["project"]
@@ -361,27 +356,6 @@ def render_inspector_live_log(scr, inner, app, sel_row):
         _add(scr, y + i, inner.x, clip_cols(txt, inner.w), inner.x + inner.w, a)
 
 
-def _deploy_detail_lines(app, sel_row):
-    """Inspector detail for a selected AWAITING-DEPLOY commit: header (sha · project), subject, then
-    the commit's author/date/message + changed-file stat from `git show` — so you can inspect exactly
-    what each pending commit does before shipping."""
-    proj, sha = sel_row.get("project"), sel_row.get("sha")
-    out = [f"{sha}  {proj}", f'"{sel_row.get("subject", "")}"', "",
-           f"⬆ awaiting deploy — press D to ship {proj}", ""]
-    repo = d.project_field(app.root, proj, "repo")
-    if repo and sha:
-        try:
-            r = d.subprocess.run(
-                ["git", "-C", d.os.path.expanduser(repo), "show", "--stat",
-                 "--format=%an · %ad%n%n%B", "--date=short", sha],
-                capture_output=True, text=True, timeout=5)
-            if r.returncode == 0:
-                out += r.stdout.splitlines()[:60]
-        except Exception:
-            pass
-    return out
-
-
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
     Running selections stream their live log (render_inspector_live_log) instead of task detail."""
@@ -393,10 +367,7 @@ def render_inspector(scr, rect, app, focused):
     if sel_row and sel_row.get("kind") == "running":
         render_inspector_live_log(scr, inner, app, sel_row)
         return
-    if sel_row and sel_row.get("kind") == "deploy":
-        lines = _deploy_detail_lines(app, sel_row)
-    else:
-        lines = _panel_detail_lines(app, sel_row)
+    lines = _panel_detail_lines(app, sel_row)
     wrapped = []
     for ln in lines:
         if disp_width(ln) <= inner.w:
@@ -438,17 +409,13 @@ def render_vitals(scr, rect, app):
     pf = getattr(app, "project_filter", None)
     proj_seg = " · all projects" if pf is None else f" · {pf}"
     ident = f" DAIS {_BRAND} {ws}" if ws else " DAIS"     # honesty comes from the watch badge, not a literal "LIVE"
-    pend = [p for p in (snap.projects if snap else []) if p.deploy_needs]
-    mig_pending = any(getattr(p, "deploy_migration", False) for p in pend)
     run_dot = _DOT_RUN if threads else _DOT_IDLE
     run_tok = f"{run_dot} {len(threads)} running"
     gate_tok = f"{_DOT_GATE} {ng} NEED YOU" if ng > 0 else f"{_DOT_IDLE} {ng} need you"
-    deploy_tok = (f" · ⬆ DEPLOY{' ⚠MIGRATION' if mig_pending else ''}"
-                  if pend else "")            # yes/no: prod is behind main (a founder gate); ⚠ if a migration
     pre = ident + "   "
     sep = " · "                                            # between the two hero tokens
     ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}  {clk}"
-    line = pre + run_tok + sep + gate_tok + deploy_tok + ctx
+    line = pre + run_tok + sep + gate_tok + ctx
     bar = app._cp(_VITALS) | curses.A_BOLD                 # the readout's own bar (bold white on blue)
     _add(scr, rect.y, rect.x, pad_cols(line, rect.w), rect.x + rect.w, bar)
     if threads:                                            # the run token glows green while agents are live
@@ -456,9 +423,6 @@ def render_vitals(scr, rect, app):
              app._cp(_LIVE) | curses.A_REVERSE | curses.A_BOLD)
     if ng > 0:                                             # the gate token is the alarm: yellow hero
         _add(scr, rect.y, rect.x + disp_width(pre + run_tok + sep), gate_tok,
-             rect.x + rect.w, app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
-    if pend:                                               # prod behind main also pulls the eye yellow
-        _add(scr, rect.y, rect.x + disp_width(pre + run_tok + sep + gate_tok), deploy_tok,
              rect.x + rect.w, app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
 
 
@@ -676,7 +640,7 @@ def render_bar(scr, rect, app, focus):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
-    keys = ("w watch · R run · t tick · D deploy · tab · / filter · g expand · L logs · r runs · "
+    keys = ("w watch · R run · t tick · tab · / filter · g expand · L logs · r runs · "
             "? help · q quit")
     if getattr(app, "filtering", False):
         hint = f" /{app.filter}_  ·  {keys}"
@@ -707,9 +671,6 @@ _HELP_LINES = [
     "  t                 tick — run the project's next eligible agent once",
     "  p                 pause / resume the loop",
     "  c                 cancel the project's running agent",
-    "  D deploy          run the project's deploy: command (confirms; flags + uses --migrate when a",
-    "                    pending migration is involved). Always manual — there is no auto-deploy.",
-    "  F                 file a fix task for the project's last FAILED deploy (founder-initiated)",
     "",
     "",
     "  CONSISTENT KEYS",
@@ -778,9 +739,8 @@ class PanelApp(d.App):
         self.runs_scroll = 0
         self.runs_sel = 0                # selected run in that view (l/↵ opens its log)
         self._runs = []
-        self.show_overlay = False        # an action's captured output, shown in-panel (e.g. ship)
+        self.show_overlay = False        # an action's captured output, shown in-panel
         self._overlay = None
-        self._deploy_check_at = {}       # project → last time we spawned a background prod --check
 
     def refresh(self):
         super().refresh()
@@ -789,21 +749,6 @@ class PanelApp(d.App):
                 self._runs = d.load_runs(self.conn)
             except d.sqlite3.Error:
                 pass                      # keep the last list; the next tick retries
-        self._auto_deploy_check()
-
-    def _auto_deploy_check(self):
-        """Keep "needs deploy?" current: for deploy-configured projects with a deployed_rev: command,
-        spawn `dais deploy <p> --check` (detached — never blocks the UI) when the cached prod SHA is
-        stale (>5 min) and we haven't spawned one recently. The result lands in .deploy-rev and shows
-        on a later refresh. So the panel learns prod's state without ever SSHing inline."""
-        nowm = d.time.monotonic()
-        for p in (self.snap.projects if self.snap else []):
-            if not p.deploy_configured or not d.project_field(self.root, p.name, "deployed_rev"):
-                continue
-            age = d.seconds_between(p.deploy_checked_at, d.utc_now()) if p.deploy_checked_at else 1e9
-            if age > 300 and (nowm - self._deploy_check_at.get(p.name, 0)) > 120:
-                self._deploy_check_at[p.name] = nowm
-                self._spawn_agent(["deploy", p.name, "--check"])
 
     def _open_run_log(self):
         """Page the selected RUNS-view run's saved log — so you can see exactly what happened in any
@@ -1133,30 +1078,6 @@ def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
     add_band("NEEDS YOU", len(gates))
     for proj, t in gates:
         rows.append(_task_row(proj, t, _short_tag(t.status)))
-
-    # AWAITING DEPLOY — prod is behind main (deploy-configured projects, learned by `--check`). A
-    # founder action: lists EXACTLY which commits `D` will ship, so you never deploy blind. ⚠ if any
-    # carries a migration. Only appears when prod is actually behind (no empty header).
-    dep_projs = [p for p in projects if p.deploy_needs]
-    if dep_projs:
-        total = sum(len(p.deploy_commits) for p in dep_projs)
-        mig = any(p.deploy_migration for p in dep_projs)
-        add_band("AWAITING DEPLOY" + ("  ⚠ migration" if mig else ""), total)
-        for p in dep_projs:
-            for sha7, subj in (p.deploy_commits or []):
-                rows.append({"kind": "deploy", "id": f"__deploy::{p.name}::{sha7}", "sel": True,
-                             "project": p.name, "sha": sha7, "subject": subj,
-                             "label": f"  SHIP    {sha7:<8} {p.name[:11]:<11} {subj}"})
-        failed = [p for p in dep_projs if p.deploy_failed]
-        if failed:                                       # the last deploy ATTEMPT errored — say so loudly
-            when = d.to_local_hhmm(max(p.deploy_failed_at for p in failed if p.deploy_failed_at)) \
-                if any(p.deploy_failed_at for p in failed) else "?"
-            rows.append({"kind": "info", "id": "__deploy_failed", "sel": False,
-                         "label": f"  ⚠ last deploy FAILED {when} · r→l to see the log · F to file a fix task"})
-        checks = [p.deploy_checked_at for p in dep_projs if p.deploy_checked_at]
-        if checks:
-            rows.append({"kind": "info", "id": "__deploy_meta", "sel": False,
-                         "label": f"  (prod checked {d.to_local_hhmm(max(checks))} · press D to deploy)"})
 
     # SCOPING — sparse tasks handed to the lead to flesh out (founder → `dais handoff <id> lead`);
     # the lead writes a real spec, then promotes to ready (or proposes new direction).

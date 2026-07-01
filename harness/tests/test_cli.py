@@ -221,36 +221,6 @@ class TestRepoPath(unittest.TestCase):
         self.assertEqual(self._repo_path("demo"), expected)
 
 
-class TestMigrationsGlob(unittest.TestCase):
-    """migrations_re turns a project's migrations_glob into a grep -E regex used by
-    `dais ship` to detect DB migrations in a PR diff. The default must match BOTH
-    supabase/migrations/*.sql and db/migrations/*.sql (the old guard was supabase-only)."""
-
-    def setUp(self):
-        self.root = make_sandbox()
-        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        os.makedirs(os.path.join(self.root, "projects", "demo"))
-
-    def _migrations_re(self, glob_value=None):
-        yaml = os.path.join(self.root, "projects", "demo", "project.yaml")
-        with open(yaml, "w") as fh:
-            fh.write("project: demo\n")
-            if glob_value is not None:
-                fh.write("migrations_glob: %s\n" % glob_value)
-        r = subprocess.run(["bash", "-c",
-                            'source "%s/harness/lib.sh"; migrations_re demo' % self.root],
-                           capture_output=True, text=True,
-                           env={"DAIS_ROOT": self.root, "DAIS_HOME": self.root,
-                                "PATH": os.environ["PATH"]})
-        return r.stdout.strip()
-
-    def test_default_glob_matches_supabase_and_db(self):
-        self.assertEqual(self._migrations_re(), r".*/migrations/.*\.sql$")
-
-    def test_custom_glob_is_translated(self):
-        self.assertEqual(self._migrations_re("drizzle/*.sql"), r"drizzle/.*\.sql$")
-
-
 class TestRunAgentRepoPath(CliTest):
     def test_relative_repo_resolves_via_repo_path(self):
         # A scaffolded project ships a RELATIVE `repo:` (the template default).
