@@ -141,8 +141,8 @@ class TestActionBar(unittest.TestCase):
 
     def test_terminal_status_minimal_set(self):
         bar = self.app.action_bar(task_row(status="done"))
-        self.assertIn("+/- priority", bar)
-        self.assertIn("↵ actions", bar)
+        self.assertNotIn("+/- priority", bar)   # priority is a no-op on a terminal task
+        self.assertIn("e edit", bar)            # only edit-title remains
         self.assertIn("n new", bar)
         self.assertNotIn("a ", bar)
 

@@ -261,13 +261,12 @@ class TestDoingNeedsQaAsTask(unittest.TestCase):
 
 
 class TestTerminal(unittest.TestCase):
+    # terminal tasks: priority is a no-op (it only orders schedulable work), so only edit_title
     def test_done(self):
-        self.assertEqual(ids(a.task_actions("done")),
-                         ["set_priority", "edit_title"])
+        self.assertEqual(ids(a.task_actions("done")), ["edit_title"])
 
     def test_cancelled(self):
-        self.assertEqual(ids(a.task_actions("cancelled")),
-                         ["set_priority", "edit_title"])
+        self.assertEqual(ids(a.task_actions("cancelled")), ["edit_title"])
 
 
 class TestUnknownStatus(unittest.TestCase):
