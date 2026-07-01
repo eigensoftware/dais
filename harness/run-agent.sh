@@ -45,6 +45,9 @@ RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$PROJECT','$AGENT'
 # recorded against THIS run in run_tasks (see link_run_task). Scoped to this process; child `dais`
 # invocations inherit it, the founder's own shell never sees it.
 export DAIS_RUN_ID="$RUNID"
+# Actor identity for machine transitions: `dais fire` attributes an edge to $DAIS_ACTOR (this agent's
+# role) unless --by overrides. So an engineer run firing `complete` is recorded as the engineer.
+export DAIS_ACTOR="$AGENT"
 START_TS="$(db "SELECT datetime('now');")"   # used to summarize what this run changed
 
 # Clean up on ANY exit — including Ctrl-C / watch-stop / sleep-kill. An interrupted run
@@ -78,13 +81,26 @@ PLAYBOOK=""
 Working conventions ($PB) — how this kind of work is done here:
 $(cat "$PB_FILE")"
 
+# Machine coordination: if the project runs an authored state machine, the agent advances a task by
+# FIRING an edge (dais fire), never by inventing a status. Empty for legacy status-routed projects.
+MACHINE_COORD=""
+MREF="$(pcfg "$PROJECT" machine)"
+if [ -n "$MREF" ]; then
+  MACHINE_COORD="This project runs an authored state machine ('$MREF'). Advance a task by FIRING an edge — never invent a status:
+  - See a task's fireable edges:  $DAIS_ROOT/dais edges <task-id>
+  - Fire one (you act as '$AGENT'):  $DAIS_ROOT/dais fire <task-id> <verb>   (guards, when the edge needs them: --confirm | --typed <id> | --attest <fact> | --verify <check>)
+  Do the work your role owns for the task's current state, then fire the edge that hands it to the next role. Effects (spawning follow-up tasks, batching a release) happen automatically when you fire the edge that declares them.
+
+"
+fi
+
 STANDING="You are running headless as the **$AGENT** for the '$PROJECT' project.
 
 Stage goal: $STAGE_GOAL
 
 ${WS_CONTEXT}Project context + memory: FIRST read $PDIR/CONTEXT.md — the goal, targets/metrics, founder decisions (honor them), and hard-won gotchas. If you discover something durable this run (a decision, a gotcha, a recurring fix), record it with: $DAIS_ROOT/dais learn $PROJECT \"one concise line\".
 
-Coordination runs through the dais CLI (at $DAIS_ROOT/dais) backed by a shared SQLite db — that is the single source of truth for what to work on and how to hand off:
+${MACHINE_COORD}Coordination runs through the dais CLI (at $DAIS_ROOT/dais) backed by a shared SQLite db — that is the single source of truth for what to work on and how to hand off:
   - Your queue:      $DAIS_ROOT/dais tasks $PROJECT --assignee $AGENT
   - The backlog:     $DAIS_ROOT/dais backlog $PROJECT
   - Update a task:   $DAIS_ROOT/dais task set <id> --status <s> [--pr <url>] [--notes \"...\"]

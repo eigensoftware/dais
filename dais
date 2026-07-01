@@ -49,11 +49,21 @@ STATUSES_OPEN="('backlog','ready','doing','needs_qa','changes_requested','ready_
 # has no PR to ship) — the agent parks finished work there and the founder reviews + closes it,
 # the read-only twin of ready_to_merge (which is reserved for QA-approved PRs the founder merges).
 STATUSES_CANON="backlog ready doing needs_qa changes_requested ready_to_merge needs_review proposed done blocked cancelled deferred"
-# valid_status <project> <status> -> exit 0 if allowed (canonical, or declared in the project's roles)
+# valid_status <project> <status> -> exit 0 if allowed (canonical, a project machine state, or a
+# status declared in the project's roles)
 valid_status(){
   case " $STATUSES_CANON " in *" $2 "*) return 0;; esac
+  local mach; mach="$(pcfg "$1" machine 2>/dev/null)"
+  if [ -n "$mach" ]; then
+    python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;m=M.load(M.default_machine_path('$DAIS_ROOT','$mach'));sys.exit(0 if '$2' in m.get('states',{}) else 1)" 2>/dev/null && return 0
+  fi
   local f="$DAIS_HOME/projects/$1/roles"
   [ -f "$f" ] && awk -v s="$2" '!/^#/ && $4!="-"{n=split($4,h,",");for(i=1;i<=n;i++)if(h[i]==s)k=1}END{exit !k}' "$f"
+}
+# machine_path <project> -> the resolved machine file, or empty if the project has none
+machine_path(){
+  local mach; mach="$(pcfg "$1" machine 2>/dev/null)"; [ -n "$mach" ] || return 0
+  python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(M.default_machine_path('$DAIS_ROOT','$mach'))" 2>/dev/null
 }
 # status_help <project> -> canonical statuses + the project's custom ones, for error messages
 status_help(){
@@ -162,6 +172,11 @@ MD
           *) [ -z "$title" ] && title="$1"; shift;;
         esac; done
         [ -n "$title" ] || { echo "need a title"; exit 1; }
+        # machine projects: a bare create enters at the machine's entry state, not the legacy backlog
+        if [ "$st" = "backlog" ]; then
+          _mp="$(machine_path "$proj")"
+          [ -n "$_mp" ] && st="$(python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;m=M.load('$_mp');print(m.get('entry') or next((s for s,v in m['states'].items() if v.get('initial')),'backlog'))" 2>/dev/null)"
+        fi
         valid_status "$proj" "$st" || { echo "task add: invalid status '$st'. valid: $(status_help "$proj")"; exit 1; }
         pe="$(sqlesc "$proj")"
         if [ -z "$id" ]; then                       # auto-id: <abbrev>-<n>
@@ -489,7 +504,40 @@ prec: <int>
 
   lint)
     # validate the roles config(s): one reactive role per status, valid fields, personas exist
-    exec python3 "$DAIS_ROOT/harness/router.py" --lint "$DAIS_HOME" "${1:-}" ;;
+    python3 "$DAIS_ROOT/harness/router.py" --lint "$DAIS_HOME" "${1:-}"; rc=$?
+    # + coherence-lint any project machine(s) (design/machine-model.md)
+    if [ -n "${1:-}" ]; then _projs=("$1"); else _projs=(); for p in "$DAIS_HOME"/projects/*/; do [ -d "$p" ] && _projs+=("$(basename "$p")"); done; fi
+    for pn in "${_projs[@]+"${_projs[@]}"}"; do
+      _mp="$(machine_path "$pn")"; [ -n "$_mp" ] || continue
+      echo "machine[$pn]: $(basename "$_mp")"
+      python3 "$DAIS_ROOT/harness/machine.py" lint "$_mp" || rc=1
+    done
+    exit $rc ;;
+
+  fire)
+    # machine-driven transition: fire the (state,verb) edge for a task. Actor defaults to the founder
+    # (your shell) or $DAIS_ACTOR (an agent run); --by overrides. Guards: --confirm --typed X
+    # --attest fact --verify check. See design/machine-model.md.
+    id="${1:?usage: dais fire <task-id> <verb> [--by role] [--confirm] [--typed X] [--attest fact] [--verify check]}"
+    verb="${2:?usage: dais fire <task-id> <verb> [...]}"; shift 2 2>/dev/null || true
+    proj="$(db "SELECT project FROM tasks WHERE id='$(sqlesc "$id")';")"
+    [ -n "$proj" ] || { echo "no task: $id"; exit 1; }
+    MP="$(machine_path "$proj")"
+    [ -n "$MP" ] || { echo "fire: project '$proj' has no machine (set 'machine:' in project.yaml); use 'dais task set'"; exit 1; }
+    actor="${DAIS_ACTOR:-founder}"
+    args=(); while [ $# -gt 0 ]; do case "$1" in --by) actor="$2"; shift 2;; *) args+=("$1"); shift;; esac; done
+    exec python3 "$DAIS_ROOT/harness/machine.py" fire "$DB" "$MP" "$id" "$verb" "$actor" "${args[@]+"${args[@]}"}" ;;
+
+  edges)
+    # discovery: the fireable edges from a task's current state (for agents + the founder)
+    id="${1:?usage: dais edges <task-id>}"
+    row="$(db -separator '|' "SELECT project,status FROM tasks WHERE id='$(sqlesc "$id")';")"
+    [ -n "$row" ] || { echo "no task: $id"; exit 1; }
+    eproj="${row%%|*}"; estate="${row#*|}"
+    MP="$(machine_path "$eproj")"
+    [ -n "$MP" ] || { echo "edges: project '$eproj' has no machine"; exit 1; }
+    echo "$id  [$estate]:"
+    exec python3 "$DAIS_ROOT/harness/machine.py" edges "$MP" "$estate" ;;
 
   tick)
     exec "$DAIS_ROOT/harness/dispatch.sh" "$@" ;;

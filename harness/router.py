@@ -52,24 +52,46 @@ _UNBLOCKED = ("AND NOT (t.blocked_on IS NOT NULL AND t.blocked_on<>'' AND EXISTS
               "AND p.status NOT IN ('done','cancelled')))")
 
 
+def _machine_for(root, project):
+    """The machine file for a project if project.yaml declares `machine:`, else None (legacy status
+    routing). Machine mode is opt-in per project — existing projects are unaffected."""
+    projyaml = os.path.join(root, "projects", project, "project.yaml")
+    if not os.path.exists(projyaml):
+        return None
+    with open(projyaml) as fh:
+        mm = re.search(r"(?m)^machine:[ \t]*(\S+)", fh.read())
+    if not mm:
+        return None
+    import machine as MC
+    return MC.default_machine_path(root, mm.group(1))
+
+
 def decide(root, project):
     """Which role should run next for this project (or None = idle)."""
     roles, _ = parse_roles(os.path.join(root, "projects", project, "roles"))
     if not roles:
         return None
     db = sqlite3.connect(os.path.join(root, "dais.db"))
+    db.row_factory = sqlite3.Row
     dep = _UNBLOCKED if _has_blocked_on(db) else ""
 
-    # 1) reactive: lowest precedence with an actionable, NON-blocked task wins (verify before build).
-    #    ANY schedulable role with `handles` reactively owns those statuses — incl. a cadence role
-    #    like the lead (needs_scoping), which also runs periodically below for its own discovery.
-    for r in sorted([r for r in roles if r["trigger"] != "none" and r["handles"]],
-                    key=lambda r: r["prec"]):
-        ph = ",".join("?" * len(r["handles"]))
-        n = db.execute("SELECT COUNT(*) FROM tasks t WHERE t.project=? AND t.status IN (%s) %s"
-                       % (ph, dep), [project] + r["handles"]).fetchone()[0]
-        if n > 0:
-            return r["name"]
+    # 1) reactive dispatch. Machine mode: the dispatch role of the top pending task (the machine's
+    #    edges own state->role, replacing the roles-file `handles`). Legacy: lowest-precedence role
+    #    with an actionable, NON-blocked task (verify before build). Cadence (2) is shared by both.
+    mp = _machine_for(root, project)
+    if mp:
+        import machine as MC
+        role = MC.next_role(db, MC.load(mp), project)
+        if role:
+            return role
+    else:
+        for r in sorted([r for r in roles if r["trigger"] != "none" and r["handles"]],
+                        key=lambda r: r["prec"]):
+            ph = ",".join("?" * len(r["handles"]))
+            n = db.execute("SELECT COUNT(*) FROM tasks t WHERE t.project=? AND t.status IN (%s) %s"
+                           % (ph, dep), [project] + r["handles"]).fetchone()[0]
+            if n > 0:
+                return r["name"]
 
     # 2) cadence: a role whose interval has elapsed (only when no reactive work)
     for r in sorted([r for r in roles if r["trigger"].startswith("every:")],
