@@ -467,26 +467,42 @@ def _rail_items(app):
     return ["ALL"] + names
 
 
-_RAIL_COL_W = 4                                  # width of each numeric column (3-char header + a pad)
-_RAIL_COLS = ("run", "you", "scp", "que", "bkl", "dep")  # running · needs-you · scoping · queued · backlog · awaiting-deploy
+_RAIL_COL_W = 5                                  # width of each numeric column (≤4-char header + a pad)
+_RAIL_COLS = ("run", "you", "que", "wait", "done")  # running · needs-you · queued · waiting · archived
 _RAIL_MIN_NAME_W = 12                            # below this the table sheds columns (right→left) for the name
 
 
+def _legacy_band(st):
+    """Compact band for a task in a project with no machine (legacy status routing) — used only by
+    the rail's roll-up so mixed workspaces still tally sensibly."""
+    if st in d.GATE_ORDER:
+        return "NEEDS YOU"
+    if st in ("done", "cancelled"):
+        return "ARCHIVE"
+    if st in ("backlog", "deferred"):
+        return "WAITING"
+    return "QUEUED"
+
+
 def _rail_counts(app, name):
-    """(running, needs_you, scoping, queued, backlog, deploy) for one project — or summed for ALL.
-    Mirrors the WORK bands: needs_you = founder-gate statuses, scoping = needs_scoping (the lead's
-    fill-out queue), queued = the loop's own statuses, backlog = unscheduled, deploy = merged commits
-    awaiting deploy."""
+    """(running, needs_you, queued, waiting, done) for one project — or summed for ALL. A compact
+    aggregate of the machine bands (band_of): the WORK list shows every phase, the rail rolls them
+    up. A project with no machine falls back to a legacy status→band mapping."""
     if not app.snap:
-        return (0, 0, 0, 0, 0, 0)
+        return (0, 0, 0, 0, 0)
     projs = (app.snap.projects if name == "ALL"
              else [p for p in app.snap.projects if p.name == name])
-    def total(statuses):
-        return sum(len(p.tasks_by_status.get(st, [])) for p in projs for st in statuses)
     run = sum(1 for p in projs if p.running)            # one agent per project, so 0/1 each
-    dep = sum(1 for p in projs if p.deploy_needs)        # projects whose prod is behind main (0/1 each)
-    return (run, total(d.GATE_ORDER), total(_SCOPING_STATUSES),
-            total(_LOOP_STATUSES), total(_BACKLOG_STATUSES), dep)
+    you = que = wait = done = 0
+    for p in projs:
+        for st, ts in p.tasks_by_status.items():
+            band = MC.band_of(p.machine, st) if p.machine else _legacy_band(st)
+            n = len(ts)
+            if band == "NEEDS YOU":  you += n
+            elif band == "QUEUED":   que += n
+            elif band == "WAITING":  wait += n
+            elif band == "ARCHIVE":  done += n
+    return (run, you, que, wait, done)
 
 
 def render_rail(scr, rect, app, focused):
@@ -519,7 +535,7 @@ def render_rail(scr, rect, app, focused):
         y = inner.y + 1 + vis_idx                       # +1: the column header occupies inner row 0
         active = (name == "ALL" and pf is None) or name == pf
         rev = curses.A_REVERSE if (focused and idx == ri) else 0
-        run, you, scp, que, bkl, dep = _rail_counts(app, name)
+        run, you, que, wait, done = _rail_counts(app, name)
         live = run > 0 and name != "ALL"                # ALL is an aggregate, never "the live one"
         rowattr = (app._cp(_LIVE) if live else 0) \
             | (curses.A_BOLD if (active and name != "ALL") else 0) | rev
@@ -528,12 +544,10 @@ def render_rail(scr, rect, app, focused):
         label = f"{mark}{dot} {name}"                    # mark · dot · a space so the ● isn't jammed to the name
         _add(scr, y, inner.x, pad_cols(clip_cols(label, name_w + 3), inner.w),
              inner.x + inner.w, rowattr)                # paint the row full-width so the cursor spans it
-        for ci, v in enumerate((run, you, scp, que, bkl, dep)[:n_cols]):
+        for ci, v in enumerate((run, you, que, wait, done)[:n_cols]):
             cell = f"{v:>{_RAIL_COL_W}}" if v else f"{'·':>{_RAIL_COL_W}}"
-            if v and ci in (1, 5):                      # needs-you + awaiting-deploy (founder gates) pop bold yellow
+            if v and ci == 1:                           # needs-you (founder gate) pops bold yellow
                 cattr = app._cp(_NEEDS_YOU) | curses.A_BOLD | rev
-            elif v and ci == 2:                         # scoping (lead's queue) pops cyan, like the SCOPING band
-                cattr = app._cp(_STRUCTURE) | curses.A_BOLD | rev
             elif v:
                 cattr = rowattr if live else rev
             else:
@@ -1006,15 +1020,18 @@ _PRIO_TAG = {"critical": "CRIT", "high": "HIGH", "medium": "MED", "low": "LOW"}
 
 
 def _machine_work_rows(snap, projects, project, expanded, root):
-    """WORK list for a machine-driven board: one band PER machine state, in the machine's declared
-    (flow) order — so the board mirrors the AUTHORED workflow, not fixed buckets. RUNNING is the
-    live-run overlay; terminal states collapse into ARCHIVE; a founder-gate phase is flagged ◆.
-    Empty phases show as compact dim headers (no spacer), so the whole workflow skeleton is visible
-    without noise. Row tags are priority (the phase is already the band)."""
+    """WORK list for a machine-driven board.
+
+    When all in-scope projects share ONE machine (a single project, or an all-same-workflow ALL), show
+    a band PER machine state in the machine's declared (flow) order — the board mirrors that workflow.
+    When the machines DIFFER (a heterogeneous ALL), states don't correspond across projects, so roll
+    up to the machine-INDEPENDENT bands (NEEDS YOU/QUEUED/WAITING/ARCHIVE) via band_of, which every
+    machine's states map into. RUNNING is always the live overlay; terminals group into ARCHIVE; a
+    founder-gate phase is flagged ◆; row tags are priority. Uniform spacing — one line per phase."""
     rows = []
 
-    def add_band(name, count):
-        if rows and count > 0:            # spacer only above a populated band — empties stay compact
+    def add_band(name, count):                # a spacer before every band (except the first) — uniform
+        if rows:
             rows.append({"kind": "spacer", "id": f"__sp::{name}", "sel": False, "label": ""})
         rows.append(_band(name, count))
 
@@ -1029,37 +1046,43 @@ def _machine_work_rows(snap, projects, project, expanded, root):
                      "status": "doing", "sel": True, "agent": t["agent"],
                      "since": t["since"], "log_path": t["log_path"]})
 
-    by_state = {}
-    for p in projects:
-        for st, ts in p.tasks_by_status.items():
-            for t in ts:
-                if (p.name, t.id) not in running_ids:
-                    by_state.setdefault(st, []).append((p.name, t))
-
-    # bands = the machine's states in declared (flow) order; terminals -> ARCHIVE; NEEDS-YOU flagged.
-    order, seen, terminal, gate = [], set(), set(), set()
-    for p in projects:
-        m = p.machine or {}
-        for st, meta in m.get("states", {}).items():
-            if meta.get("terminal"):
-                terminal.add(st)
-            elif st not in seen:
-                order.append(st); seen.add(st)
-                if MC.band_of(m, st) == "NEEDS YOU":
-                    gate.add(st)
-    for st in by_state:                       # populated states no in-scope machine declares (stale)
-        if st not in seen and st not in terminal:
-            order.append(st); seen.add(st)
+    live = [(p, st, t) for p in projects for st, ts in p.tasks_by_status.items()
+            for t in ts if (p.name, t.id) not in running_ids]
 
     def emit(label, items, cap=None):
         add_band(label, len(items))
         for proj, t in (items if (cap is None or expanded) else items[:cap]):
             rows.append(_task_row(proj, t, _PRIO_TAG.get(t.priority, "MED")))
 
-    for st in order:
-        emit(st.replace("_", " ").upper() + ("  ◆ you" if st in gate else ""), by_state.get(st, []))
-    emit("ARCHIVE", [it for st, items in by_state.items() if st in terminal for it in items],
-         cap=_ARCHIVE_CAP)
+    machines = [p.machine for p in projects if p.machine]
+    same = bool(machines) and all(m.get("name") == machines[0].get("name") for m in machines)
+
+    if same:                                          # per-PHASE view (states correspond)
+        m = machines[0]
+        by_state = {}
+        for p, st, t in live:
+            by_state.setdefault(st, []).append((p.name, t))
+        gate = {s for s, meta in m["states"].items()
+                if not meta.get("terminal") and MC.band_of(m, s) == "NEEDS YOU"}
+        for st, meta in m["states"].items():
+            if not meta.get("terminal"):
+                emit(st.replace("_", " ").upper() + ("  ◆ you" if st in gate else ""),
+                     by_state.get(st, []))
+        for st in by_state:                           # populated states the machine doesn't declare
+            if st not in m["states"]:
+                emit(st.replace("_", " ").upper(), by_state[st])
+        emit("ARCHIVE", [(p.name, t) for p, st, t in live
+                         if m["states"].get(st, {}).get("terminal")], cap=_ARCHIVE_CAP)
+    else:                                             # heterogeneous ALL -> machine-independent bands
+        by_band = {}
+        for p, st, t in live:
+            band = MC.band_of(p.machine, st) if p.machine else _legacy_band(st)
+            by_band.setdefault(band, []).append((p.name, t))
+        for band in ("NEEDS YOU", "QUEUED", "WAITING"):
+            emit(band, by_band.get(band, []))
+        for band in sorted(b for b in by_band if b not in ("NEEDS YOU", "QUEUED", "WAITING", "ARCHIVE")):
+            emit(band, by_band[band])
+        emit("ARCHIVE", by_band.get("ARCHIVE", []), cap=_ARCHIVE_CAP)
     return rows
 
 

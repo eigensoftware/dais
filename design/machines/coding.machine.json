@@ -14,12 +14,12 @@
     "doing":            {},
     "qa_review":        {},
     "blocked":          {},
-    "deferred":         {},
     "awaiting_release": {},
     "release_ready":    {"initial": true},
     "release_review":   {},
     "releasing":        {},
     "release_failed":   {},
+    "deferred":         {"band": "WAITING"},
     "done":             {"terminal": true},
     "cancelled":        {"terminal": true}
   },

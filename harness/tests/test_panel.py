@@ -1251,7 +1251,7 @@ class TestRailNeedsYouChip(unittest.TestCase):
     def test_needs_you_count_is_bold_yellow_and_separate(self):
         papp = self._papp()
         scr = FakeScr(40, 80)
-        pn.render_rail(scr, pn.Rect(1, 0, 20, 24), papp, focused=False)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 30), papp, focused=False)   # ≥2 cols so `you` shows
         # the table's `you` column shows the gate count (alpha has one needs_review task)
         cells = [c for c in scr.calls if c[2].strip() == "1"]
         self.assertTrue(cells)                                  # the gate count renders
@@ -1560,18 +1560,19 @@ class TestRailTable(unittest.TestCase):
         scr = FakeScr(40, 200)
         pn.render_rail(scr, pn.Rect(1, 0, 20, 50), papp, focused=False)   # 50 cols -> all columns
         text = "\n".join(c[2] for c in scr.calls)
-        for head in ("run", "you", "scp", "que", "bkl"):
+        for head in ("run", "you", "que", "wait", "done"):
             self.assertIn(head, text)
 
     def test_all_row_totals_across_projects(self):
-        # alpha: needs_review (you) + ready (que) + needs_scoping (scp); bravo: backlog (bkl).
+        # legacy-status projects roll up via _legacy_band: needs_review→you, ready+needs_scoping→que,
+        # backlog→wait. Columns: run you que wait done.
         papp = self._papp([("a-1", "alpha", "x", "needs_review", "high", None),
                            ("a-2", "alpha", "y", "ready", "med", None),
                            ("a-3", "alpha", "w", "needs_scoping", "med", None),
                            ("b-1", "bravo", "z", "backlog", "low", None)])
-        self.assertEqual(pn._rail_counts(papp, "alpha"), (0, 1, 1, 1, 0, 0))   # run, you, scp, que, bkl, dep
-        self.assertEqual(pn._rail_counts(papp, "bravo"), (0, 0, 0, 0, 1, 0))
-        self.assertEqual(pn._rail_counts(papp, "ALL"), (0, 1, 1, 1, 1, 0))     # totals
+        self.assertEqual(pn._rail_counts(papp, "alpha"), (0, 1, 2, 0, 0))   # run, you, que, wait, done
+        self.assertEqual(pn._rail_counts(papp, "bravo"), (0, 0, 0, 1, 0))
+        self.assertEqual(pn._rail_counts(papp, "ALL"),   (0, 1, 2, 1, 0))   # totals add up
 
     def test_narrow_rail_sheds_columns_keeps_name(self):
         papp = self._papp([("c-1", "acme", "x", "ready", "high", None)])
@@ -1996,20 +1997,6 @@ class TestAwaitingDeploy(unittest.TestCase):
         text = "\n".join(r.get("label", "") for r in pn.panel_work_rows(snap, expanded=True))
         self.assertNotIn("AWAITING DEPLOY", text)
 
-    def test_rail_dep_marks_a_project_behind(self):
-        import tempfile
-        root = tempfile.mkdtemp(prefix="dais-rdep-")
-        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
-        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=_conn())
-        papp.snap = self._snap(deploy_needs=True, deploy_commits=[("a", "x")])
-        papp._cp = lambda n: n * 1000
-        self.assertEqual(pn._rail_counts(papp, "cedar")[5], 1)   # the dep column: 1 = behind
-        scr = FakeScr(40, 200)
-        pn.render_rail(scr, pn.Rect(1, 0, 20, 60), papp, focused=False)   # wide: all columns incl dep
-        text = "\n".join(c[2] for c in scr.calls)
-        self.assertIn("dep", text)                          # the column header
-        cell = next(c for c in scr.calls if c[2].strip() == "1")
-        self.assertEqual(cell[3], 4000 | curses.A_BOLD)     # bold yellow like the needs-you gate
 
 
 class TestAutoDeployCheck(unittest.TestCase):
