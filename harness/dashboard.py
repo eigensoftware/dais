@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 # the action engine lives beside this file in harness/; `dais top` runs this module
 # as a script (so harness/ is sys.path[0]) and the tests insert harness/ on the path,
 # so a bare `from actions import …` resolves in both.
-from actions import task_actions, action_command, priority_cycle, Action  # noqa: F401
+from actions import priority_cycle, Action  # noqa: F401
 import router  # parse_roles — so the running-task guess can be agent-aware (which statuses a role owns)
 import machine as MC  # machine-driven projects: derive the action bar from edges (not the actions.py catalog)
 
@@ -215,18 +215,10 @@ def stage_goal(root, name):
 
 
 def _load_machine(root, name):
-    """The project's authored state machine (dict), or None (legacy). Primary signal is the project's
-    own machine.json (seeded from a workflow template); a `machine:` selector still works. Lets the
-    TUI derive its bands/actions from the machine instead of hardcoded statuses.
-
-    NOTE: still gated (returns None for a machine-less project) so the legacy TUI path + its ~15 tests
-    stay valid. Making this unconditional is the final legacy pass (#4/#5): it turns the legacy
-    panel_work_rows branch, the actions.py catalog, and the classic renderer into dead code to delete,
-    and requires rewriting those TUI tests (which hardcode legacy statuses) onto machine states."""
-    local = os.path.join(root, "projects", name, "machine.json")
+    """The project's authored state machine (dict) — ALWAYS one, so the whole TUI is machine-driven
+    like dispatch: the project's own machine.json → a `machine:` selector → the coding default.
+    Returns None only if the resolved machine file can't be loaded at all."""
     ref = project_field(root, name, "machine")
-    if not os.path.exists(local) and not ref:
-        return None
     try:
         return MC.load(MC.project_machine_path(root, name, ref))
     except Exception:
@@ -556,15 +548,15 @@ LOOP_SUMMARY_ORDER = ["ready", "needs_qa", "changes_requested"]
 
 
 def gate_count(snap, running_ids=frozenset()):
-    """Total founder-gate tasks across all projects (the ⚡ NEEDS YOU count).
-    Running tasks (running_ids: a set of (project, task_id)) are excluded because
-    needs_review appears in both GATE_ORDER and _INFLIGHT_ORDER — a running agent
-    can sweep a needs_review task into the running band, so we exclude it here to
-    keep the header ⚡N token consistent with the gate band body."""
-    return sum(1 for p in snap.projects
-               for st in GATE_ORDER
-               for t in p.tasks_by_status.get(st, [])
-               if (p.name, t.id) not in running_ids)
+    """Total founder-gate tasks across all projects (the ⚡ NEEDS YOU count) — derived from each
+    project's machine (a state whose band is NEEDS YOU: no dispatch role, a founder edge). Running
+    tasks are excluded so the header count matches the gate band body."""
+    n = 0
+    for p in snap.projects:
+        for st, tasks in p.tasks_by_status.items():
+            if p.machine and MC.band_of(p.machine, st) == "NEEDS YOU":
+                n += sum(1 for t in tasks if (p.name, t.id) not in running_ids)
+    return n
 
 
 def loop_summary(snap, running_ids=frozenset()):
@@ -1602,11 +1594,14 @@ class App:
         t = self._task_of(row)
         if t is None:
             return []
-        m = self._machine_of(row)
-        if m and self._row_kind(row) == "task":
-            return _machine_actions(m, t["status"])
-        return task_actions(t["status"], self._row_kind(row),
-                            has_pr=bool(t.get("pr_url")))
+        kind = self._row_kind(row)
+        if kind == "task":
+            return _machine_actions(self._machine_of(row), t["status"])
+        if kind == "running":                    # a live agent: cancel + metadata
+            return [Action("cancel_run", "cancel run", "x", "reverse", True),
+                    Action("set_priority", "set priority", "", "menu", False),
+                    Action("handoff", "handoff", "h", "menu", False)]
+        return []
 
     def _slot_action(self, row, slot):
         for act in self._row_actions(row):
@@ -1693,40 +1688,21 @@ class App:
         if t is None:
             self.flash = "no task selected"
             return
-        m = self._machine_of(row)
-        if m and self._row_kind(row) == "task":
-            return self._act_machine(m, action_id, row, t)
-        cmd = action_command(action_id, t)
-        if cmd is not None:
-            act = next((a for a in self._row_actions(row) if a.id == action_id), None)
-            if act and act.confirm:
-                if not self._confirm(f"{BAR_LABEL.get(action_id, action_id)} {t['id']}?"):
-                    return
-            if action_id == "ship":
-                rc = self._ship_pr(row, cmd)
-                self.refresh()
-                self.flash = (f"shipped {t['id']}" if rc == 0
-                              else f"ship: {t['id']} NOT merged (exit {rc}) — see output")
+        if self._row_kind(row) == "task":
+            return self._act_machine(self._machine_of(row), action_id, row, t)
+        # running / project rows: cancel a live agent, or a metadata op
+        if action_id == "cancel_run":
+            if not self._confirm(f"cancel {t['project']}'s running agent?"):
                 return
-            if action_id == "start":          # launches a streaming agent — background it (never over curses)
-                if self._spawn_agent(cmd):
-                    self.flash = f"started {t['id']} — see RUNNING / press L for the log"
-                self.refresh()
-                return
-            rc = self._dispatch(cmd)
+            rc = self._dispatch(["cancel", t["project"]])
             self.refresh()
-            self.flash = (f"{BAR_LABEL.get(action_id, action_id)} {t['id']}" if rc == 0
-                          else f"{action_id} failed (exit {rc})")
-            return
-        # cmd is None → interactive action
-        if action_id == "set_priority":
+            self.flash = f"cancelled {t['project']}" if rc == 0 else f"cancel failed (exit {rc})"
+        elif action_id == "set_priority":
             self._priority_menu(row)
         elif action_id == "handoff":
             self._handoff(row)
         elif action_id == "edit_title":
             self._edit_title(row)
-        elif action_id == "open_pr":
-            self.launch_pr(row)
         else:
             self.flash = f"no handler for {action_id}"
 

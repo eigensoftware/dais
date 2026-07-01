@@ -28,7 +28,6 @@ dais — your agent company control panel
   dais schedule install|uninstall|status   run the interval in the background (cross-platform)
   dais pause | resume                 park/un-park the loop (honored by watch + schedule)
   dais cancel <project>               stop the project's in-flight agent (marks it interrupted)
-  dais actions <id>                    list the founder actions for a task + the exact command for each
   dais start <id>                      run the role that handles this task's status, now
   dais run <project> <agent>          run a specific agent now (headless claude)
   dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify)
@@ -43,23 +42,11 @@ dais — your agent company control panel
 U
 }
 
-STATUSES_OPEN="('backlog','ready','doing','needs_qa','changes_requested','ready_to_merge','needs_review','proposed','blocked')"
-# Closed set of lifecycle statuses. A project MAY add custom statuses via its roles file
-# (the `handles` column, e.g. needs_marketing) — those count as valid for that project only.
-# needs_review = founder-gate for a NON-merge deliverable (a doc, a plan, a research pass that
-# has no PR to ship) — the agent parks finished work there and the founder reviews + closes it,
-# the read-only twin of ready_to_merge (which is reserved for QA-approved PRs the founder merges).
-STATUSES_CANON="backlog ready doing needs_qa changes_requested ready_to_merge needs_review proposed done blocked cancelled deferred"
-# valid_status <project> <status> -> exit 0 if allowed (canonical, a project machine state, or a
-# status declared in the project's roles)
+# valid_status <project> <status> -> exit 0 if <status> is a state in the project's machine. The
+# machine is the single source of truth for the status vocabulary (there is no fixed canonical set).
 valid_status(){
-  case " $STATUSES_CANON " in *" $2 "*) return 0;; esac
-  local mp; mp="$(machine_path "$1")"
-  if [ -n "$mp" ]; then
-    python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;m=M.load('$mp');sys.exit(0 if '$2' in m.get('states',{}) else 1)" 2>/dev/null && return 0
-  fi
-  local f="$DAIS_HOME/projects/$1/roles"
-  [ -f "$f" ] && awk -v s="$2" '!/^#/ && $4!="-"{n=split($4,h,",");for(i=1;i<=n;i++)if(h[i]==s)k=1}END{exit !k}' "$f"
+  local mp; mp="$(machine_path "$1")"; [ -n "$mp" ] || return 1
+  python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;m=M.load('$mp');sys.exit(0 if '$2' in m.get('states',{}) else 1)" 2>/dev/null
 }
 # machine_path <project> -> the resolved machine file. Unconditional: project-local machine.json
 # wins, else a `machine:` selector, else the `coding` default. (Every project is machine-driven.)
@@ -69,13 +56,10 @@ machine_path(){
   local mach; mach="$(pcfg "$1" machine 2>/dev/null)"
   python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(M.default_machine_path('$DAIS_ROOT', '$mach' or None))" 2>/dev/null
 }
-# status_help <project> -> canonical statuses + the project's custom ones, for error messages
+# status_help <project> -> the project's machine states, for error messages
 status_help(){
-  local x out=""
-  for x in $(awk '!/^#/ && $4!="-"{print $4}' "$DAIS_HOME/projects/$1/roles" 2>/dev/null | tr ',' '\n' | sort -u); do
-    case " $STATUSES_CANON " in *" $x "*) ;; *) out="$out $x";; esac
-  done
-  printf '%s' "$STATUSES_CANON"; [ -n "$out" ] && printf '  (+%s)' "$out"
+  local mp; mp="$(machine_path "$1")"; [ -n "$mp" ] || return 0
+  python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(' '.join(M.load('$mp').get('states',{})))" 2>/dev/null
 }
 
 cmd="${1:-status}"; shift 2>/dev/null || true
@@ -230,16 +214,8 @@ MD
     esac ;;
 
   actions)
-    # discoverability: list the founder actions valid for a task + the exact command
-    # for each. Pure renderer — the catalog/argv live in harness/actions.py (shared with
-    # the cockpit TUI), so the CLI just looks the row up and shells the __main__ lister.
-    id="${1:?usage: dais actions <id>}"
-    row="$(db -separator '|' "SELECT status,project,COALESCE(pr_url,''),COALESCE(priority,'medium') FROM tasks WHERE id='$(sqlesc "$id")';")"
-    [ -n "$row" ] || { echo "no such task: $id"; exit 1; }
-    st="${row%%|*}"; r="${row#*|}"; proj="${r%%|*}"; r="${r#*|}"; pr="${r%%|*}"; prio="${r##*|}"
-    haspr=0; [ -n "$pr" ] && haspr=1
-    echo "actions for $id  ($st):"
-    python3 "$DAIS_ROOT/harness/actions.py" "$st" task "$haspr" "$id" "$proj" "$pr" "$prio" ;;
+    # back-compat alias: a task's actions ARE its machine's fireable edges now.
+    exec "$0" edges "$@" ;;
 
   handoff)
     id="${1:?usage: dais handoff <id> <role> [note]}"; to="${2:?to-role}"; note="${3:-}"

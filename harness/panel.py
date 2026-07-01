@@ -130,7 +130,6 @@ _VITALS = 8         # the top vitals readout bar (dashboard pair 8 = bold white 
 # focus/selection  = curses.A_REVERSE | curses.A_BOLD (a bright bar; no color pair)
 # inactive         = curses.A_DIM (history, parked, placeholders, labels)
 _BAND_DIM = {"ARCHIVE", "DEFERRED"}                          # history/parked headers recede (inactive)
-_DIM_STATUSES = {"done", "cancelled", "deferred"}            # backlog stays readable (it's the pull pool)
 
 # ── status-dot vocabulary: one glyph per state, shared across vitals + rail (mission-control) ──
 _DOT_RUN = "●"     # ● a running agent / live project   (green when active)
@@ -147,14 +146,17 @@ def _row_search_text(r):
     return f"{r.get('tag', '')} {r['id']} {r['project']} {t.title if t else ''}"
 
 
-def _tag_attr(app, status):
-    """A WORK row's base color BY ROLE (not per-status): founder gates are needs-you yellow,
-    archive/parked recede to dim, ordinary in-flight work stays plain."""
-    if status in _DIM_STATUSES:
-        return curses.A_DIM                                  # archive/parked → inactive
-    if status in d.GATE_ORDER:
+def _tag_attr(app, row):
+    """A WORK row's base color BY BAND (derived from the machine, like every category): founder-gate
+    phases → needs-you yellow, archive/waiting phases → dim, active (queued) work → plain."""
+    m = next((p.machine for p in (app.snap.projects if app.snap else [])
+              if p.name == row.get("project")), None)
+    band = MC.band_of(m, row.get("status", ""))
+    if band in ("ARCHIVE", "WAITING"):
+        return curses.A_DIM                                  # done/parked → inactive
+    if band == "NEEDS YOU":
         return app._cp(_NEEDS_YOU)                           # founder gate → needs-you yellow
-    return 0                                                 # ordinary loop work → plain
+    return 0                                                 # active work → plain
 
 
 def render_work(scr, rect, app, focused):
@@ -191,7 +193,7 @@ def render_work(scr, rect, app, focused):
         else:
             tag, tid, proj = r["tag"], r["id"], r["project"]
             title = r["task"].title
-            base_attr = _tag_attr(app, r.get("status", ""))
+            base_attr = _tag_attr(app, r)
             blocked = getattr(r["task"], "blocked", False)
         if r["kind"] != "running" and blocked:                # ⛓ a task waiting on an unfinished predecessor
             title = "⛓ " + title
@@ -436,18 +438,6 @@ _RAIL_COLS = ("run", "you", "que", "wait", "done")  # running · needs-you · qu
 _RAIL_MIN_NAME_W = 12                            # below this the table sheds columns (right→left) for the name
 
 
-def _legacy_band(st):
-    """Compact band for a task in a project with no machine (legacy status routing) — used only by
-    the rail's roll-up so mixed workspaces still tally sensibly."""
-    if st in d.GATE_ORDER:
-        return "NEEDS YOU"
-    if st in ("done", "cancelled"):
-        return "ARCHIVE"
-    if st in ("backlog", "deferred"):
-        return "WAITING"
-    return "QUEUED"
-
-
 def _rail_counts(app, name):
     """(running, needs_you, queued, waiting, done) for one project — or summed for ALL. A compact
     aggregate of the machine bands (band_of): the WORK list shows every phase, the rail rolls them
@@ -460,7 +450,7 @@ def _rail_counts(app, name):
     you = que = wait = done = 0
     for p in projs:
         for st, ts in p.tasks_by_status.items():
-            band = MC.band_of(p.machine, st) if p.machine else _legacy_band(st)
+            band = MC.band_of(p.machine, st)
             n = len(ts)
             if band == "NEEDS YOU":  you += n
             elif band == "QUEUED":   que += n
@@ -929,26 +919,8 @@ class PanelApp(d.App):
         return super().handle(ch, rows, sel_i, sel_row)
 
 
-# WORK row model — bands of selectable rows; status → terminal-safe tag (no emoji)
-GATE_TAG = {"ready_to_merge": "MERGE", "needs_review": "REVIEW",
-            "proposed": "PROPOSE", "blocked": "BLOCKED"}
-# Every status → a ≤7-col uppercase tag so the WORK list's tag column ALWAYS aligns. Raw statuses
-# (needs_qa=8, changes_requested=18) overflow the {tag:<7} field and shove the id/project/title right.
-_STATUS_TAG = {**GATE_TAG, "needs_scoping": "SCOPE", "ready": "READY", "needs_qa": "QA",
-               "changes_requested": "CHANGES", "doing": "RUN", "backlog": "BACK",
-               "deferred": "DEFER", "done": "DONE", "cancelled": "CANC"}
-
-
-def _short_tag(status):
-    """A ≤7-col tag for any status (unknown/custom ones are abbreviated) so the tag column aligns."""
-    return _STATUS_TAG.get(status) or (status or "").upper().replace("_", "")[:7]
-_LOOP_STATUSES = d.LOOP_SUMMARY_ORDER          # ["ready","needs_qa","changes_requested"]
-_SCOPING_STATUSES = ["needs_scoping"]          # handed to the lead to flesh out before it's ready
-_ARCHIVE_STATUSES = ["done", "cancelled"]
-_BACKLOG_STATUSES = ["backlog"]
-_DEFERRED_STATUSES = ["deferred"]
+# WORK row model — bands of selectable rows (phases derived from the machine)
 _ARCHIVE_CAP = 12
-_BACKLOG_CAP = 8
 
 
 def _band(name, count):
@@ -1021,8 +993,7 @@ def _machine_work_rows(snap, projects, project, expanded, root):
     else:                                             # heterogeneous ALL -> machine-independent bands
         by_band = {}
         for p, st, t in live:
-            band = MC.band_of(p.machine, st) if p.machine else _legacy_band(st)
-            by_band.setdefault(band, []).append((p.name, t))
+            by_band.setdefault(MC.band_of(p.machine, st), []).append((p.name, t))
         for band in ("NEEDS YOU", "QUEUED", "WAITING"):
             emit(band, by_band.get(band, []))
         for band in sorted(b for b in by_band if b not in ("NEEDS YOU", "QUEUED", "WAITING", "ARCHIVE")):
@@ -1032,115 +1003,10 @@ def _machine_work_rows(snap, projects, project, expanded, root):
 
 
 def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
-    """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · QUEUED ·
-    BACKLOG · DEFERRED · ARCHIVE). `project` limits to one project. `expanded` (the g key) shows
-    the full BACKLOG, reveals DEFERRED rows, and uncaps the ARCHIVE. An empty RUNNING/NEEDS YOU/
-    QUEUED band collapses to just its dim header (no '(none …)' filler)."""
-    rows = []
+    """The panel's WORK list — bands are the machine's phases (see _machine_work_rows). Every project
+    is machine-driven, so this is a thin wrapper; `project` limits to one project, `expanded` uncaps
+    the ARCHIVE."""
     if not snap:
-        return rows
+        return []
     projects = [p for p in snap.projects if project is None or p.name == project]
-    # machine-driven projects derive their bands from the machine (top self-configures). Mixed
-    # workspaces fall to the legacy builder, where machine states still surface via OTHER STAGES.
-    if projects and all(getattr(p, "machine", None) for p in projects):
-        return _machine_work_rows(snap, projects, project, expanded, root)
-
-    def tasks_in(statuses):
-        out = []
-        for p in projects:
-            for st in statuses:
-                for t in p.tasks_by_status.get(st, []):
-                    if (p.name, t.id) in running_ids:    # a running task shows only in RUNNING
-                        continue
-                    out.append((p.name, t))
-        return out
-
-    def add_band(name, count):
-        if rows:                                    # no leading spacer above the very first band
-            rows.append({"kind": "spacer", "id": f"__sp::{name}", "sel": False, "label": ""})
-        rows.append(_band(name, count))
-
-    # RUNNING — an empty band collapses to just its dim header (no "(none …)" filler), so the
-    # screen reads calm when nominal and only the live/gated bands draw the eye.
-    now = "9999-12-31 00:00:00"            # elapsed not needed for the model; render computes it
-    threads = [t for t in d.running_threads(snap, now, root)
-               if project is None or t["project"] == project]
-    running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
-    add_band("RUNNING", len(threads))
-    for t in threads:
-        rows.append({"kind": "running", "id": f"run::{t['project']}",
-                     "project": t["project"], "task_id": t["task"], "task": None,
-                     "status": "doing", "sel": True, "agent": t["agent"],
-                     "since": t["since"], "log_path": t["log_path"]})
-
-    # NEEDS YOU (the founder gates)
-    gates = tasks_in(d.GATE_ORDER)
-    add_band("NEEDS YOU", len(gates))
-    for proj, t in gates:
-        rows.append(_task_row(proj, t, _short_tag(t.status)))
-
-    # SCOPING — sparse tasks handed to the lead to flesh out (founder → `dais handoff <id> lead`);
-    # the lead writes a real spec, then promotes to ready (or proposes new direction).
-    scoping = tasks_in(_SCOPING_STATUSES)
-    add_band("SCOPING", len(scoping))
-    for proj, t in scoping:
-        rows.append(_task_row(proj, t, "SCOPE"))
-
-    # QUEUED — work cycling through the build/QA loop (ready/needs_qa/changes_requested), waiting for
-    # its next turn; shown as rows by default (no g needed). RUNNING above = an agent live right now.
-    loop = tasks_in(_LOOP_STATUSES)
-    add_band("QUEUED", len(loop))
-    for proj, t in loop:
-        rows.append(_task_row(proj, t, _short_tag(t.status)))
-
-    # OTHER STAGES — any custom status not covered by a band above (e.g. a project that adds a
-    # `needs_design` stage) is auto-surfaced as its own band, so adding a status needs no panel change.
-    known = ({"doing"} | set(d.GATE_ORDER) | set(_SCOPING_STATUSES) | set(_LOOP_STATUSES)
-             | set(_BACKLOG_STATUSES) | set(_DEFERRED_STATUSES) | set(_ARCHIVE_STATUSES))
-    present = {st for p in projects for st, ts in p.tasks_by_status.items() if ts}
-    for st in sorted(present - known):
-        extra = tasks_in([st])
-        if not extra:
-            continue
-        add_band(st.upper().replace("_", " "), len(extra))
-        for proj, t in extra:
-            rows.append(_task_row(proj, t, _short_tag(t.status)))
-
-    # BACKLOG — the queue-able pool, always visible so you can pull from it (a promotes -> ready)
-    backlog = tasks_in(_BACKLOG_STATUSES)
-    add_band("BACKLOG", len(backlog))
-    if backlog:
-        shown = backlog if expanded else backlog[:_BACKLOG_CAP]
-        for proj, t in shown:
-            rows.append(_task_row(proj, t, "BACK"))
-        if len(backlog) > len(shown):
-            rows.append({"kind": "info", "id": "__backlog_more", "sel": False,
-                         "label": f"  +{len(backlog) - len(shown)} more   (press g to show all)"})
-    else:
-        rows.append({"kind": "info", "id": "__backlog_none", "sel": False,
-                     "label": "  (backlog empty)"})
-
-    # DEFERRED — founder-parked; its own section, collapsed to a count until expanded (g)
-    deferred = tasks_in(_DEFERRED_STATUSES)
-    add_band("DEFERRED", len(deferred))
-    if expanded:
-        for proj, t in deferred:
-            rows.append(_task_row(proj, t, "DEFER"))
-    elif deferred:
-        rows.append({"kind": "info", "id": "__deferred_sum", "sel": False,
-                     "label": f"  {len(deferred)} parked   (press g to show)"})
-
-    # ARCHIVE — history at the very bottom; shown when a project is picked or expanded; g UNCAPS it.
-    # Newest-completed first (by last status change), so the most recent work is at the top.
-    if expanded or project is not None:
-        arch = sorted(tasks_in(_ARCHIVE_STATUSES),
-                      key=lambda pt: pt[1].updated_at or "", reverse=True)
-        add_band("ARCHIVE", len(arch))
-        shown = arch if expanded else arch[:_ARCHIVE_CAP]    # g shows the full history
-        for proj, t in shown:
-            tag = "DONE" if t.status == "done" else "CANC"
-            rows.append(_task_row(proj, t, tag))
-        if len(arch) > len(shown):
-            rows.append({"kind": "info", "id": "__arch_more", "sel": False,
-                         "label": f"  +{len(arch) - len(shown)} older   (press g to show all)"})
-    return rows
+    return _machine_work_rows(snap, projects, project, expanded, root)

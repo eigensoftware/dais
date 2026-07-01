@@ -163,7 +163,7 @@ def lint(m):
 # engine — introspection
 # --------------------------------------------------------------------------- #
 def edges_from(m, state):
-    return [e for e in m.get("edges", []) if e.get("from") == state]
+    return [e for e in (m or {}).get("edges", []) if e.get("from") == state]
 
 
 def dispatch_role(m, state):
@@ -232,7 +232,7 @@ BAND_ORDER = ["NEEDS YOU", "QUEUED", "WAITING", "ARCHIVE"]
 def band_of(m, state):
     """Which board band a state belongs to, DERIVED from its role in the machine. An optional
     per-state `band` overrides the derivation for edge cases (e.g. deferred -> WAITING)."""
-    meta = m.get("states", {}).get(state, {})
+    meta = (m or {}).get("states", {}).get(state, {})
     if meta.get("band"):
         return meta["band"]
     if meta.get("terminal"):
