@@ -13,9 +13,15 @@ ROLE="$PDIR/agents/$AGENT.md"
 [ -f "$ROLE" ] || { echo "no role file: $ROLE"; exit 1; }
 
 REPO="$(repo_path "$PROJECT")"
-MODEL="$(pcfg "$PROJECT" model)"; MODEL="${MODEL:-claude-opus-4-8}"
-# Optional per-project reasoning effort (project.yaml `effort:`). Unset -> CLI default, so other projects are unaffected.
-EFFORT_FLAG=(); EFF="$(pcfg "$PROJECT" effort)"; [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
+# Model + effort: a per-role `model_<role>:` / `effort_<role>:` in project.yaml beats the
+# project-wide `model:` / `effort:`; unset effort -> CLI default, so other projects are unaffected.
+MODEL="$(pcfg "$PROJECT" "model_$AGENT")"; [ -n "$MODEL" ] || MODEL="$(pcfg "$PROJECT" model)"
+MODEL="${MODEL:-claude-opus-4-8}"
+EFF="$(pcfg "$PROJECT" "effort_$AGENT")"; [ -n "$EFF" ] || EFF="$(pcfg "$PROJECT" effort)"
+EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
+# Debug seam: print the resolved model/effort and exit WITHOUT calling claude (or touching the
+# repo), so tests can assert per-role config resolution offline.
+if [ "${DAIS_SHOW_CONFIG:-0}" = 1 ]; then echo "model=$MODEL effort=$EFF"; exit 0; fi
 [ -d "$REPO" ] || { echo "repo not found: $REPO"; exit 1; }
 git -C "$REPO" fetch -q origin 2>/dev/null || true   # always work against current origin
 # Keep the local default branch current. The fetch above only moves origin/* refs, but agents read

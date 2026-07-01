@@ -243,6 +243,39 @@ class TestRunAgentRepoPath(CliTest):
         self.assertIn("repo not found: %s" % os.path.join(base, "demo"), out)
 
 
+class TestPerRoleModelOverride(CliTest):
+    """project.yaml `model_<role>:` / `effort_<role>:` override the project-wide `model:` /
+    `effort:` for that role only; roles without an override keep the project default. Asserted
+    via the DAIS_SHOW_CONFIG=1 debug seam (prints the resolved model/effort, exits pre-claude
+    and pre-repo-guard, so no repo scaffolding is needed)."""
+
+    def _config(self, agent):
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_SHOW_CONFIG": "1"})
+        r = subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", agent],
+                           capture_output=True, text=True, env=e, cwd=self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def test_role_override_beats_project_default(self):
+        dais(self.root, "scaffold", "demo")   # template default: model claude-opus-4-8, effort high
+        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as fh:
+            fh.write("model_qa: claude-haiku-4-5\neffort_qa: low\n")
+        qa = self._config("qa")
+        self.assertIn("model=claude-haiku-4-5", qa)
+        self.assertIn("effort=low", qa)
+        eng = self._config("engineer")        # no override -> project default untouched
+        self.assertIn("model=claude-opus-4-8", eng)
+        self.assertIn("effort=high", eng)
+
+    def test_project_default_without_override_keys(self):
+        dais(self.root, "scaffold", "demo")
+        out = self._config("engineer")
+        self.assertIn("model=claude-opus-4-8", out)
+        self.assertIn("effort=high", out)
+
+
 class TestWorkspaceContextInjection(CliTest):
     """run-agent.sh injects the WORKSPACE CONTEXT.md (company-wide rules) ahead of
     the project's CONTEXT.md, so every agent run honors workspace-level decisions.

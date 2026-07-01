@@ -226,7 +226,8 @@ harness/
 ```
 
 In a workspace, each project lives under `projects/<name>/`:
-`project.yaml` (repo, model, stage goal, optional `playbook:` default + `deploy:` command), `roles` (who exists +
+`project.yaml` (repo, model + effort — with per-role `model_<role>:`/`effort_<role>:` overrides —
+stage goal, optional `playbook:` default), `roles` (who exists +
 how scheduled + each role's playbook), `agents/*.md` (role personas), `CONTEXT.md` (project
 memory agents read first), and optional `playbooks/` (project-specific craft overrides).
 
