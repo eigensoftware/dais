@@ -185,19 +185,37 @@ def _find_edge(m, state, verb):
 _PRIORITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 
+def _dep_open(conn, tid):
+    """True if the task waits on a tasks.blocked_on predecessor that isn't done/cancelled. A dangling
+    ref (deleted predecessor) or a pre-migration DB with no blocked_on column counts as unblocked, so
+    work is never stranded. (This is the cross-task dependency; the `blocked` STATE + blocks_parent
+    links are separate and handled by dispatch_role/_blockers_open.)"""
+    try:
+        row = conn.execute("SELECT blocked_on FROM tasks WHERE id=?", (tid,)).fetchone()
+    except sqlite3.Error:
+        return False
+    dep = row[0] if row else None
+    if not dep:
+        return False
+    pred = conn.execute("SELECT status FROM tasks WHERE id=?", (dep,)).fetchone()
+    return bool(pred) and pred[0] not in ("done", "cancelled")
+
+
 def next_role(conn, m, project):
     """Reactive dispatch (the scheduler): the role to launch next for this project — the dispatch
     role of the highest-priority pending task sitting in a state that auto-dispatches. '' when
     nothing is dispatchable (the caller then considers cadence roles). Blocked/parked/gate states
-    have no dispatch role, so they're naturally skipped."""
+    have no dispatch role, so they're naturally skipped; a task waiting on an open dependency
+    (tasks.blocked_on) is skipped too."""
     rows = conn.execute("SELECT id, status, COALESCE(priority,'medium') FROM tasks "
                         "WHERE project=? AND status NOT IN ('done','cancelled')", (project,)).fetchall()
     best = None
     for r in rows:
-        role = dispatch_role(m, r["status"] if hasattr(r, "keys") else r[1])
-        if not role:
-            continue
         rid = r["id"] if hasattr(r, "keys") else r[0]
+        status = r["status"] if hasattr(r, "keys") else r[1]
+        role = dispatch_role(m, status)
+        if not role or _dep_open(conn, rid):
+            continue
         prio = (r["COALESCE(priority,'medium')"] if hasattr(r, "keys") else r[2])
         key = (_PRIORITY_RANK.get(prio, 2), rid)
         if best is None or key < best[0]:

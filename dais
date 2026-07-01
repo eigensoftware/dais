@@ -60,12 +60,13 @@ valid_status(){
   local f="$DAIS_HOME/projects/$1/roles"
   [ -f "$f" ] && awk -v s="$2" '!/^#/ && $4!="-"{n=split($4,h,",");for(i=1;i<=n;i++)if(h[i]==s)k=1}END{exit !k}' "$f"
 }
-# machine_path <project> -> the resolved machine file (project-local machine.json wins), or empty
+# machine_path <project> -> the resolved machine file. Unconditional: project-local machine.json
+# wins, else a `machine:` selector, else the `coding` default. (Every project is machine-driven.)
 machine_path(){
   local local_m="$DAIS_HOME/projects/$1/machine.json"
   [ -f "$local_m" ] && { printf '%s' "$local_m"; return 0; }
-  local mach; mach="$(pcfg "$1" machine 2>/dev/null)"; [ -n "$mach" ] || return 0
-  python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(M.default_machine_path('$DAIS_ROOT','$mach'))" 2>/dev/null
+  local mach; mach="$(pcfg "$1" machine 2>/dev/null)"
+  python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(M.default_machine_path('$DAIS_ROOT', '$mach' or None))" 2>/dev/null
 }
 # status_help <project> -> canonical statuses + the project's custom ones, for error messages
 status_help(){

@@ -37,35 +37,18 @@ def parse_roles(path):
     return roles, problems
 
 
-def _has_blocked_on(db):
-    """True if tasks.blocked_on exists — lets decide() degrade safely on a pre-`dais migrate` DB."""
-    try:
-        return any(row[1] == "blocked_on" for row in db.execute("PRAGMA table_info(tasks)"))
-    except sqlite3.Error:
-        return False
-
-
-# a task is NOT actionable while it waits on a predecessor that isn't done/cancelled (dependency).
-# A dangling ref (predecessor missing) counts as unblocked so deleted prerequisites never strand work.
-_UNBLOCKED = ("AND NOT (t.blocked_on IS NOT NULL AND t.blocked_on<>'' AND EXISTS("
-              "SELECT 1 FROM tasks p WHERE p.id=t.blocked_on "
-              "AND p.status NOT IN ('done','cancelled')))")
-
-
 def _machine_for(root, project):
-    """The machine a project runs, or None (legacy status routing). A project's own machine.json
-    (seeded from a workflow template) is the primary signal — scaffolded projects are machine-driven
-    with no gate. A `machine:` selector in project.yaml still works. Absent both -> legacy."""
+    """The machine a project runs — ALWAYS one (dispatch is unconditionally machine-driven). Primary
+    signal: the project's own machine.json (seeded from a workflow template). A `machine:` selector
+    in project.yaml overrides which built-in; absent both, the `coding` default. No legacy gate."""
     import machine as MC
-    if os.path.exists(os.path.join(root, "projects", project, "machine.json")):
-        return MC.project_machine_path(root, project)
+    ref = None
     projyaml = os.path.join(root, "projects", project, "project.yaml")
     if os.path.exists(projyaml):
         with open(projyaml) as fh:
             mm = re.search(r"(?m)^machine:[ \t]*(\S+)", fh.read())
-        if mm:
-            return MC.default_machine_path(root, mm.group(1))
-    return None
+        ref = mm.group(1) if mm else None
+    return MC.project_machine_path(root, project, ref)
 
 
 def decide(root, project):
@@ -75,25 +58,14 @@ def decide(root, project):
         return None
     db = sqlite3.connect(os.path.join(root, "dais.db"))
     db.row_factory = sqlite3.Row
-    dep = _UNBLOCKED if _has_blocked_on(db) else ""
 
-    # 1) reactive dispatch. Machine mode: the dispatch role of the top pending task (the machine's
-    #    edges own state->role, replacing the roles-file `handles`). Legacy: lowest-precedence role
-    #    with an actionable, NON-blocked task (verify before build). Cadence (2) is shared by both.
-    mp = _machine_for(root, project)
-    if mp:
-        import machine as MC
-        role = MC.next_role(db, MC.load(mp), project)
-        if role:
-            return role
-    else:
-        for r in sorted([r for r in roles if r["trigger"] != "none" and r["handles"]],
-                        key=lambda r: r["prec"]):
-            ph = ",".join("?" * len(r["handles"]))
-            n = db.execute("SELECT COUNT(*) FROM tasks t WHERE t.project=? AND t.status IN (%s) %s"
-                           % (ph, dep), [project] + r["handles"]).fetchone()[0]
-            if n > 0:
-                return r["name"]
+    # 1) reactive dispatch — ALWAYS via the project's machine: the dispatch role of the top pending
+    #    task (the machine's edges own state->role; next_role skips blocked/parked states and open
+    #    dependencies). Cadence roles (2) still run on their clock for periodic discovery.
+    import machine as MC
+    role = MC.next_role(db, MC.load(_machine_for(root, project)), project)
+    if role:
+        return role
 
     # 2) cadence: a role whose interval has elapsed (only when no reactive work)
     for r in sorted([r for r in roles if r["trigger"].startswith("every:")],
