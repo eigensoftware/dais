@@ -36,60 +36,6 @@ if [ "$DRY" = 0 ] && [ -f "$DAIS_HOME/projects/.paused" ]; then
   echo "${CY}tick: paused (projects/.paused) — run 'dais resume' to continue${C0}"; exit 10
 fi
 
-# --- auto-merge pass: for projects with `automerge: true` (project.yaml), ship QA-approved PRs
-#     WITHOUT a founder click. SAFE only where merge != deploy (cedar is manual-deploy, so
-#     merging never goes live; the founder still gates the deploy). THREE guards keep it honest:
-#       1. main CI RED → PAUSE this project's auto-merge until main is green again (don't pile onto a
-#          broken main; the net for the A+B break two independently-green PRs can cause). Self-resumes.
-#       2. the PR's OWN checks must be GREEN — failing → leave for founder; still running → wait and
-#          retry. Without this, "auto-merge" would ship red code just because it's git-mergeable.
-#       3. a PR touching a migration (db/migrations or supabase/migrations) is LEFT for the founder.
-#     Runs BEFORE the cap/backoff gates: merging is gh/git, not a subscription run, so the founder's
-#     merge queue keeps draining even when agent runs are capped. ---
-if [ "$DRY" = 0 ]; then
-  if [ -n "$PROJECT" ]; then am_projects=("$PROJECT")
-  else am_projects=(); for p in "$DAIS_HOME"/projects/*/; do [ -d "$p" ] && am_projects+=("$(basename "$p")"); done; fi
-  for amp in "${am_projects[@]}"; do
-    [ "$(pcfg "$amp" automerge)" = "true" ] || continue
-    amgh="$(pcfg "$amp" github)"; [ -n "$amgh" ] || continue
-    # guard 1 — latest main CI run: pause this project's auto-merge while main is RED (fail-safe net).
-    ammain="$(gh run list --repo "$amgh" --branch main --limit 1 --json conclusion,status --jq '.[0] | (.conclusion // .status // "")' 2>/dev/null | tr 'a-z' 'A-Z')"
-    case "$ammain" in
-      FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED|STARTUP_FAILURE)
-        echo "${CR}⛔ automerge[$amp]: main CI is ${ammain} — PAUSING auto-merge until main is green (fix main first)${C0}"
-        continue ;;
-    esac
-    while IFS='|' read -r amtid ampurl; do
-      [ -z "$amtid" ] && continue
-      ampr="${ampurl##*/}"; [[ "$ampr" =~ ^[0-9]+$ ]] || continue
-      amms="$(gh pr view "$ampr" --repo "$amgh" --json mergeable --jq .mergeable 2>/dev/null)"
-      [ "$amms" = "MERGEABLE" ] || continue   # CONFLICTING/UNKNOWN → leave for founder / retry next tick
-      # guard 2 — only auto-merge a PR whose checks are GREEN (red→founder, pending→wait next tick).
-      amci="$(gh pr view "$ampr" --repo "$amgh" --json statusCheckRollup --jq '
-        [ .statusCheckRollup[]? | (.conclusion // .state // .status // "PENDING") | ascii_upcase ] as $s
-        | (["FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE"]) as $red
-        | (["PENDING","EXPECTED","QUEUED","IN_PROGRESS","WAITING","REQUESTED"]) as $wait
-        | if ($s|length)==0 then "none"
-          elif ([$s[]|select(. as $x|$red|index($x))]|length)>0 then "red"
-          elif ([$s[]|select(. as $x|$wait|index($x))]|length)>0 then "pending"
-          else "green" end' 2>/dev/null)"
-      case "$amci" in
-        green) : ;;
-        red)   echo "${CY}automerge[$amp]: PR #$ampr has FAILING checks — left ready_to_merge for the founder${C0}"; continue ;;
-        none)  echo "${CD}automerge[$amp]: PR #$ampr has no CI checks yet — waiting for CI (or founder merges manually)${C0}"; continue ;;
-        *)     echo "${CD}automerge[$amp]: PR #$ampr checks still running — waiting, retry next tick${C0}"; continue ;;
-      esac
-      ammigs="$(gh pr diff "$ampr" --repo "$amgh" --name-only 2>/dev/null | grep -E 'migrations/.*\.sql$' || true)"
-      if [ -n "$ammigs" ]; then
-        echo "${CY}automerge[$amp]: PR #$ampr touches a migration — left ready_to_merge for the founder${C0}"
-        continue
-      fi
-      echo "${CG}${CB}▸ automerge[$amp]: shipping QA-approved + CI-green PR #$ampr (no founder click; merge≠deploy)${C0}"
-      "$DAIS_ROOT/dais" ship "$amp" "$ampr" || echo "${CY}automerge[$amp]: ship of #$ampr did not complete — left for founder${C0}"
-    done < <(db "SELECT id||'|'||COALESCE(pr_url,'') FROM tasks WHERE project='$(sqlesc "$amp")' AND status='ready_to_merge' AND pr_url IS NOT NULL AND pr_url<>'';")
-  done
-fi
-
 # --- capacity gate: cool down after a recent cap hit (window resets every ~5h) ---
 capped_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='capped' AND started_at > datetime('now','-90 minutes');")"
 if [ "${capped_recent:-0}" -gt 0 ]; then

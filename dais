@@ -31,13 +31,14 @@ dais — your agent company control panel
   dais actions <id>                    list the founder actions for a task + the exact command for each
   dais start <id>                      run the role that handles this task's status, now
   dais run <project> <agent>          run a specific agent now (headless claude)
-  dais ship <project> <pr#> [--migrated]  QA-gated, migration-aware squash-merge to main (founder gate)
+  dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify)
+  dais edges <task-id>                the fireable edges from a task's current state
   dais logs <project> [N]             recent runs
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md
   dais lint [project]                 validate a project (roles + project.yaml + required files)
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
   dais migrate                        apply pending DB migrations (run with watch paused)
-  dais scaffold <project>             create a new project from the template
+  dais scaffold <project> [--template coding|marketing]  bootstrap a project (roles + machine) from a workflow template
   dais role new <project> [--desc "..."] [--yes]  Claude designs a new role (persona + routing); you confirm
 U
 }
@@ -253,8 +254,7 @@ MD
 
   approve)
     # founder-gate: greenlight a Lead `proposed` initiative → ready (the Engineer then picks it up).
-    # The front-door twin of `ship` (which gates code at the back door). To REJECT, use
-    # `dais task set <id> --status cancelled` (or backlog to park it).
+    # To REJECT, use `dais task set <id> --status cancelled` (or backlog to park it).
     id="${1:?usage: dais approve <id> [--priority high|medium|low] [\"note\"]}"; shift 2>/dev/null || true
     pri=""; note=""
     while [ $# -gt 0 ]; do case "$1" in
@@ -272,60 +272,6 @@ MD
     set_note=""; [ -n "$note" ] && set_note=", notes=COALESCE(notes,'')||'  |  approved: $(sqlesc "$note")'"
     db "UPDATE tasks SET status='ready', assignee='$(sqlesc "$asg")'$set_pri$set_note, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" \
       && echo "✓ approved $id → ready ($asg will pick it up)" ;;
-
-  ship)
-    # founder-gate: QA-gated, migration-aware squash-merge of a PR to main.
-    proj="${1:?usage: dais ship <project> <pr#> [--migrated]}"; pr="${2:?pr number}"; shift 2 2>/dev/null || true
-    migrated=0; for a in "$@"; do [ "$a" = "--migrated" ] && migrated=1; done
-    need gh "install GitHub CLI: https://cli.github.com"
-    gh="$(pcfg "$proj" github)"; [ -n "$gh" ] || { echo "no github configured for $proj"; exit 1; }
-    pe="$(sqlesc "$proj")"
-    # QA gate — only ship QA-approved work (a ready_to_merge task pointing at this PR)
-    tid="$(db "SELECT id FROM tasks WHERE project='$pe' AND pr_url LIKE '%/pull/$pr' AND status='ready_to_merge' LIMIT 1;")"
-    if [ -z "$tid" ]; then
-      echo "✋ refusing: no ready_to_merge (QA-approved) task in $proj points at PR #$pr."
-      db -separator '  ' "SELECT '   '||id, status, COALESCE(pr_url,'(no pr)') FROM tasks WHERE project='$pe' AND pr_url LIKE '%/pull/$pr';" 2>/dev/null
-      exit 1
-    fi
-    # never merge a conflicted PR
-    ms="$(gh pr view "$pr" --repo "$gh" --json mergeable --jq .mergeable 2>/dev/null)"
-    [ "$ms" = "CONFLICTING" ] && { echo "✋ PR #$pr is CONFLICTING — rebase onto main in a throwaway clone first, then re-run."; exit 1; }
-    # migration safety — additive migrations must hit prod BEFORE the merge deploys the code
-    migs="$(gh pr diff "$pr" --repo "$gh" --name-only 2>/dev/null | grep -E "$(migrations_re "$proj")" || true)"
-    if [ -n "$migs" ] && [ "$migrated" = 0 ]; then
-      echo "🛑 PR #$pr ($tid) adds DB migration(s). Apply them to prod FIRST, THEN re-run with --migrated:"
-      printf '     %s\n' $migs
-      echo "   migrate prod first (supabase example):  cd $(repo_path "$proj") && npx supabase db push"
-      echo "   then ship:                            dais ship $proj $pr --migrated"
-      exit 2
-    fi
-    # un-draft backstop: an agent may leave the PR a draft, and GitHub refuses to merge a draft
-    # even when QA approved it (mergeable=CLEAN but `gh pr merge` errors "still a draft"). Mark it
-    # ready (idempotent — no-op if already ready) so the founder gate is never blocked by a
-    # recoverable state. Belt to the engineer's suspenders (the persona also marks ready pre-QA).
-    gh pr ready "$pr" --repo "$gh" >/dev/null 2>&1 || true
-    # capture the head branch BEFORE merge — --delete-branch removes the remote ref, but we still
-    # need the name to prune the local worktree/branch the agent left behind (else it shadows main).
-    head_br="$(gh pr view "$pr" --repo "$gh" --json headRefName --jq .headRefName 2>/dev/null)"
-    # merge + record (append a ship note; keep the QA notes)
-    note="shipped PR #$pr via dais ship${migs:+ (migrations attested applied)}"
-    echo "▶ shipping $tid — squash-merge PR #$pr to $gh:main${migs:+  [migrations attested]}"
-    if gh pr merge "$pr" --repo "$gh" --squash --delete-branch; then
-      db "UPDATE tasks SET status='done', updated_at=datetime('now'), notes=COALESCE(notes,'')||'  |  $(sqlesc "$note")' WHERE id='$tid';"
-      echo "✓ $tid → done.  (merge to main may auto-deploy prod — verify the release.)"
-      # Local cleanup so the NEXT agent sees a clean, current main (not a stale ref or a dead branch
-      # to stack on). --delete-branch only touched the remote; the local worktree/branch persist.
-      rd="$(repo_path "$proj")"
-      if [ -n "$head_br" ] && [ -d "$rd" ]; then
-        wt="$(git -C "$rd" worktree list --porcelain | awk -v b="branch refs/heads/$head_br" '/^worktree /{w=$2} $0==b{print w}')"
-        [ -n "$wt" ] && git -C "$rd" worktree remove "$wt" --force >/dev/null 2>&1
-        git -C "$rd" worktree prune >/dev/null 2>&1 || true
-        git -C "$rd" branch -D "$head_br" >/dev/null 2>&1 || true
-        git -C "$rd" fetch -q origin 2>/dev/null || true
-        git -C "$rd" merge --ff-only origin/main >/dev/null 2>&1 || true
-        echo "  ↳ pruned local branch/worktree '$head_br' and refreshed local main"
-      fi
-    else echo "✗ merge failed (see above)"; exit 1; fi ;;
 
   run)
     exec "$DAIS_ROOT/harness/run-agent.sh" "$@" ;;
@@ -349,62 +295,6 @@ MD
     [ -n "$role" ] || { echo "start: no role handles status '$st' in $proj/roles"; exit 1; }
     echo "▶ starting $proj/$role for $id ($st)…"
     exec "$DAIS_ROOT/harness/run-agent.sh" "$proj" "$role" ;;
-
-  deploy)
-    # founder-gate: run the project's own `deploy:` command (project.yaml) — the THIRD gate after
-    # build → merge, for projects where merge != deploy (e.g. cedar auto-merges but deploys
-    # manually). Domain-neutral: deploy: is any shell command (ssh pull, fly/vercel, a script, …).
-    # Logged as a run (agent='deploy') so it shows in the FEED / runs history + is cancellable; on
-    # success it records the deployed origin/main SHA in the summary so the panel can show how many
-    # merged commits are still un-deployed.
-    #   --migrate  →  run the `deploy_migrate:` command instead (a migration-inclusive deploy). This
-    #   is CLI-only + manual on purpose (the panel `D` only ever runs the plain `deploy:`), so a
-    #   point-of-no-return migration release can't be fat-fingered — do the pre-flight first.
-    #   --check  →  ask the SERVER what SHA it's running (the project's `deployed_rev:` command) and
-    #   cache it in projects/<p>/.deploy-rev, so the panel's "needs deploy?" is the truth (prod vs
-    #   main) without you ever knowing prod's state. Runs nothing else.
-    proj="${1:?usage: dais deploy <project> [--migrate] [--check]}"; shift 2>/dev/null || true
-    pe="$(sqlesc "$proj")"; key=deploy; check=0
-    while [ $# -gt 0 ]; do case "$1" in
-      --migrate) key=deploy_migrate; shift;;
-      --check)   check=1; shift;;
-      *) shift;; esac; done
-    [ -d "$DAIS_HOME/projects/$proj" ] || { echo "no such project: $proj"; exit 1; }
-    REVF="$DAIS_HOME/projects/$proj/.deploy-rev"
-    if [ "$check" = 1 ]; then
-      revcmd="$(pcfg "$proj" deployed_rev)"
-      [ -n "$revcmd" ] || { echo "deploy --check: no 'deployed_rev:' in projects/$proj/project.yaml (can't ask the server)"; exit 1; }
-      prod="$(eval "$revcmd" 2>/dev/null | tail -1 | tr -d '[:space:]')"
-      [ -n "$prod" ] || { echo "deploy --check: deployed_rev returned nothing (server unreachable?)"; exit 1; }
-      printf '%s\n%s\n' "$prod" "$(date -u +'%Y-%m-%d %H:%M:%S')" > "$REVF"
-      echo "✓ $proj prod is at $prod (recorded)"; exit 0
-    fi
-    cmd="$(pcfg "$proj" "$key")"
-    [ -n "$cmd" ] || { echo "deploy: no '$key:' command in projects/$proj/project.yaml — nothing to run"; exit 1; }
-    PDIR="$DAIS_HOME/projects/$proj"; mkdir -p "$PDIR/logs"
-    LOCK="$PDIR/.lock-deploy"
-    if [ -e "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
-      echo "deploy: already deploying $proj (pid $(cat "$LOCK"))"; exit 0; fi
-    echo $$ > "$LOCK"; trap 'rm -f "$LOCK"' EXIT INT TERM
-    LOG="$PDIR/logs/deploy-$(date +%Y%m%d-%H%M%S).log"
-    RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$pe','deploy','$LOG'); SELECT last_insert_rowid();")"
-    rp="$(repo_path "$proj")"
-    echo "▶ deploying $proj — running its $key: command…" | tee "$LOG"
-    ( cd "$rp" 2>/dev/null; eval "$cmd" ) 2>&1 | tee -a "$LOG"
-    rc=${PIPESTATUS[0]}
-    if [ "$rc" -eq 0 ]; then
-      git -C "$rp" fetch -q origin main 2>/dev/null || true   # prod now == main: cache it as the live SHA
-      sha="$(git -C "$rp" rev-parse --short origin/main 2>/dev/null || git -C "$rp" rev-parse --short HEAD 2>/dev/null || echo '?')"
-      printf '%s\n%s\n' "$sha" "$(date -u +'%Y-%m-%d %H:%M:%S')" > "$REVF"
-      mtag=""; [ "$key" = deploy_migrate ] && mtag=" (migrate)"
-      db "UPDATE runs SET ended_at=datetime('now'), status='succeeded', summary='deployed $sha$mtag' WHERE id=$RUNID;"
-      echo "✓ deployed $proj ($sha)$mtag"
-    else
-      db "UPDATE runs SET ended_at=datetime('now'), status='failed', summary='deploy failed (exit $rc)' WHERE id=$RUNID;"
-      echo "✗ deploy failed (exit $rc) — see $LOG"
-    fi
-    rm -f "$LOCK"; trap - EXIT INT TERM
-    [ "$rc" -eq 0 ] ;;
 
   scaffold)
     # bootstrap a project from a WORKFLOW TEMPLATE (coding | marketing | …). The template seeds the
