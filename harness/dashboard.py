@@ -217,7 +217,12 @@ def stage_goal(root, name):
 def _load_machine(root, name):
     """The project's authored state machine (dict), or None (legacy). Primary signal is the project's
     own machine.json (seeded from a workflow template); a `machine:` selector still works. Lets the
-    TUI derive its bands/actions from the machine instead of hardcoded statuses."""
+    TUI derive its bands/actions from the machine instead of hardcoded statuses.
+
+    NOTE: still gated (returns None for a machine-less project) so the legacy TUI path + its ~15 tests
+    stay valid. Making this unconditional is the final legacy pass (#4/#5): it turns the legacy
+    panel_work_rows branch, the actions.py catalog, and the classic renderer into dead code to delete,
+    and requires rewriting those TUI tests (which hardcode legacy statuses) onto machine states."""
     local = os.path.join(root, "projects", name, "machine.json")
     ref = project_field(root, name, "machine")
     if not os.path.exists(local) and not ref:
