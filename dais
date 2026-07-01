@@ -177,7 +177,7 @@ MD
         cols="id,project,title,priority,status,assignee,notes"; vals="'$(sqlesc "$id")','$pe','$(sqlesc "$title")','$(sqlesc "$pri")','$(sqlesc "$st")',$([ -n "$asg" ] && echo "'$(sqlesc "$asg")'" || echo NULL),$([ -n "$notes" ] && echo "'$(sqlesc "$notes")'" || echo NULL)"
         [ -n "$dep" ] && { cols="$cols,blocked_on"; vals="$vals,'$(sqlesc "$dep")'"; }
         db "INSERT INTO tasks($cols) VALUES($vals);" \
-          && echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]" ;;
+          && { link_run_task "$id" create; echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]"; } ;;
       set)
         id="$1"; shift
         sets=""; newst=""; dep=""; depset=0
@@ -205,7 +205,8 @@ MD
           [ -n "$proj" ] || { echo "no task: $id"; exit 1; }
           valid_status "$proj" "$newst" || { echo "task set: invalid status '$newst'. valid: $(status_help "$proj")"; exit 1; }
         fi
-        db "UPDATE tasks SET $sets, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" && echo "updated $id" ;;
+        db "UPDATE tasks SET $sets, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" \
+          && { verb=touch; [ "$newst" = doing ] && verb=claim; link_run_task "$id" "$verb"; echo "updated $id"; } ;;
       *) usage ;;
     esac ;;
 
@@ -230,7 +231,7 @@ MD
     { [ -z "$st" ] || [ "$st" = "-" ]; } && st="ready"
     nset=""; [ -n "$note" ] && nset=", notes='$(sqlesc "$note")'"
     db "UPDATE tasks SET assignee='$(sqlesc "$to")', status='$st'$nset, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" \
-      && echo "handoff: $id -> $to ($st)" ;;
+      && { verb=touch; [ "$st" = doing ] && verb=claim; link_run_task "$id" "$verb"; echo "handoff: $id -> $to ($st)"; } ;;
 
   approve)
     # founder-gate: greenlight a Lead `proposed` initiative → ready (the Engineer then picks it up).

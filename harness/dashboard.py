@@ -128,6 +128,9 @@ class Run:
     log_path: str = None
     dur_min: int = None
     project: str = None
+    id: int = None            # runs.id — needed to join the authoritative run_tasks links
+    task_ids: tuple = ()      # tasks this run touched (from run_tasks); () when unlinked/pre-migration
+    claim: str = None         # the task this run picked up (verb='claim'), if any — else None
 
 
 @dataclass
@@ -260,13 +263,14 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 pr_url=r["pr_url"], notes=r["notes"], updated_at=r["updated_at"],
                 blocked_on=(r["blocked_on"] if dep else None)))
         run_rows = conn.execute(
-            "SELECT started_at,ended_at,agent,status,summary,log_path FROM runs "
+            "SELECT id,started_at,ended_at,agent,status,summary,log_path FROM runs "
             "WHERE project=? ORDER BY id DESC LIMIT ?", (name, recent)).fetchall()
-        proj_runs = [Run(started_at=r["started_at"], agent=r["agent"],
+        proj_runs = [Run(id=r["id"], started_at=r["started_at"], agent=r["agent"],
                          status=r["status"], summary=r["summary"],
                          log_path=r["log_path"], project=name,
                          dur_min=minutes_between(r["started_at"], r["ended_at"]))
                      for r in run_rows]
+        attach_run_tasks(conn, proj_runs)
         running = []
         for agent in running_agents(os.path.join(root, "projects", name)):
             since = conn.execute(
@@ -298,14 +302,15 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 t.blocked = bool(t.blocked_on) and \
                     status_by_id.get(t.blocked_on) not in (None, "done", "cancelled")
     grows = conn.execute(
-        "SELECT started_at,ended_at,project,agent,status,summary,log_path FROM runs "
+        "SELECT id,started_at,ended_at,project,agent,status,summary,log_path FROM runs "
         "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()
-    recent_runs = [Run(started_at=r["started_at"],
+    recent_runs = [Run(id=r["id"], started_at=r["started_at"],
                        agent=f"{r['project']}/{r['agent']}",
                        status=r["status"], summary=r["summary"],
                        log_path=r["log_path"], project=r["project"],
                        dur_min=minutes_between(r["started_at"], r["ended_at"]))
                    for r in grows]
+    attach_run_tasks(conn, recent_runs)
     capped = conn.execute(
         "SELECT COUNT(*) c FROM runs WHERE status='capped' "
         "AND started_at > datetime(?, '-90 minutes')", (now,)).fetchone()["c"]
@@ -640,8 +645,41 @@ def watch_args(interval, par):
     return [str(iv), str(p)]
 
 
+def attach_run_tasks(conn, runs):
+    """Populate each Run's authoritative task links from run_tasks (migration 0002): `.task_ids` (all
+    tasks the run touched, in first-seen order) and `.claim` (the verb='claim' task it picked up, if
+    any). A no-op that leaves the defaults when the run_tasks table is absent (a dais.db that predates
+    `dais migrate`) or the runs carry no id — callers then fall back to the legacy summary scan."""
+    ids = [r.id for r in runs if getattr(r, "id", None) is not None]
+    if not ids:
+        return runs
+    try:
+        rows = conn.execute(
+            "SELECT run_id, task_id, verb FROM run_tasks WHERE run_id IN (%s) ORDER BY id"
+            % ",".join("?" * len(ids)), ids).fetchall()
+    except Exception:
+        return runs                       # no run_tasks table yet -> summary-scan fallback
+    touched, claim = {}, {}
+    for row in rows:
+        rid, tid, verb = row["run_id"], row["task_id"], row["verb"]
+        lst = touched.setdefault(rid, [])
+        if tid not in lst:
+            lst.append(tid)
+        if verb == "claim" and rid not in claim:
+            claim[rid] = tid
+    for r in runs:
+        if r.id in touched:
+            r.task_ids = tuple(touched[r.id])
+            r.claim = claim.get(r.id)
+    return runs
+
+
 def runs_touching(runs, task_id):
-    return [r for r in runs if r.summary and task_id in r.summary]
+    """Runs that touched `task_id`. Prefers the authoritative run_tasks links; falls back to the
+    legacy summary substring-scan only for runs with no links (pre-migration history)."""
+    return [r for r in runs
+            if task_id in r.task_ids
+            or (not r.task_ids and r.summary and task_id in r.summary)]
 
 
 def filter_rows(rows, term, key):
@@ -710,13 +748,20 @@ def running_threads(snap, now=None, root=HOME):
                     if p.recent_runs and p.recent_runs[0].status == "running" else None)
         roles_exist = os.path.exists(os.path.join(root, "projects", p.name, "roles"))
         for agent, since in p.running:
-            handles = _agent_handles(root, p.name, agent)
-            if handles is not None:                  # a known role → agent-aware guess
-                task = running_task_id(p, handles)
-            elif roles_exist:                        # roles file present, agent absent → non-role (deploy) → task-less
-                task = ""
-            else:                                    # no roles file at all → generic fallback guess
-                task = running_task_id(p)
+            # Authoritative first: the task THIS running agent recorded via run_tasks — its claim, else
+            # the first task it has touched so far. Only when the run has recorded nothing yet (before
+            # it claims) or predates the feature do we fall through to the heuristic guess below.
+            rr = next((x for x in p.recent_runs
+                       if x.status == "running" and x.agent == agent), None)
+            task = (rr.claim or (rr.task_ids[0] if rr.task_ids else "")) if rr else ""
+            if not task:
+                handles = _agent_handles(root, p.name, agent)
+                if handles is not None:              # a known role → agent-aware guess
+                    task = running_task_id(p, handles)
+                elif roles_exist:                    # roles file present, agent absent → non-role (deploy) → task-less
+                    task = ""
+                else:                                # no roles file at all → generic fallback guess
+                    task = running_task_id(p)
             out.append(dict(project=p.name, agent=agent, since=since,
                             secs=seconds_between(since, now),
                             task=task, log_path=live_log))

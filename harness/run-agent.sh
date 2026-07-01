@@ -40,6 +40,11 @@ echo $$ > "$LOCK"
 mkdir -p "$PDIR/logs"
 TS="$(date +%Y%m%d-%H%M%S)"; LOG="$PDIR/logs/$AGENT-$TS.log"
 RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$PROJECT','$AGENT','$LOG'); SELECT last_insert_rowid();")"
+# Publish the run id to the agent's environment. The agent coordinates by shelling out to `dais
+# task ...`, and those calls inherit DAIS_RUN_ID — so every task the agent creates/changes is
+# recorded against THIS run in run_tasks (see link_run_task). Scoped to this process; child `dais`
+# invocations inherit it, the founder's own shell never sees it.
+export DAIS_RUN_ID="$RUNID"
 START_TS="$(db "SELECT datetime('now');")"   # used to summarize what this run changed
 
 # Clean up on ANY exit — including Ctrl-C / watch-stop / sleep-kill. An interrupted run

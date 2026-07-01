@@ -60,6 +60,18 @@ db(){ [ -f "$DB" ] || db_init >/dev/null 2>&1; sqlite3 -cmd ".timeout 10000" "$D
 has_blocked_on(){ [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='blocked_on';" 2>/dev/null)" ]; }
 sqlesc(){ printf '%s' "${1:-}" | sed "s/'/''/g"; }
 
+# Record that the currently-active run touched a task (run_tasks table, migration 0002). Called from
+# every task mutation in the dais CLI. A no-op unless DAIS_RUN_ID is set — run-agent.sh exports it for
+# the duration of an agent run, so an agent's `dais task ...` calls are attributed to its run, while
+# founder actions from a plain shell (no DAIS_RUN_ID) are correctly NOT attributed to any run.
+#   $1 = task id   $2 = verb (claim | create | touch; default touch)
+# Best-effort: the insert is swallowed so a mutation never fails on account of the link — and on a
+# dais.db that hasn't had `dais migrate` run yet (no run_tasks table) it simply records nothing.
+link_run_task(){
+  case "${DAIS_RUN_ID:-}" in ''|*[!0-9]*) return 0;; esac      # no active run (or non-numeric) -> skip
+  db "INSERT INTO run_tasks(run_id,task_id,verb) VALUES($DAIS_RUN_ID,'$(sqlesc "$1")','$(sqlesc "${2:-touch}")');" 2>/dev/null || true
+}
+
 # read a single-line field from projects/<project>/project.yaml
 pcfg(){ grep -E "^$2:" "$DAIS_HOME/projects/$1/project.yaml" 2>/dev/null | head -1 | sed "s/^$2:[[:space:]]*//"; }
 
