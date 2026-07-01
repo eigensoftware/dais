@@ -1505,7 +1505,10 @@ class App:
 
     def toggle_pause(self):
         verb = "resume" if os.path.exists(os.path.join(self.root, PAUSED)) else "pause"
-        subprocess.call([self._dais(), verb])
+        # silence the CLI's stdout echo — otherwise it prints onto the curses screen at the
+        # cursor position, corrupting the layout. The flash below is the in-panel feedback.
+        subprocess.run([self._dais(), verb],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.flash = "resumed" if verb == "resume" else "paused"
 
     def tick_project(self, proj):
@@ -1767,6 +1770,11 @@ class App:
             return
         t = self._task_of(row)
         if not t or not t.get("id"):
+            return
+        # respect the single source (_row_actions): if a row can't take set_priority
+        # (e.g. a done/cancelled task), the +/- keys are a no-op too.
+        if not any(a.id == "set_priority" for a in self._row_actions(row)):
+            self.flash = "priority doesn't apply to a done/cancelled task"
             return
         newp = priority_cycle(t.get("priority"), direction)
         rc = self._dispatch(["task", "set", t["id"], "--priority", newp])

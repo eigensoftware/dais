@@ -113,7 +113,8 @@ def task_actions(status, kind="task", has_pr=False):
                 _m("set_priority"), _m("handoff")]
 
     if status in ("done", "cancelled"):
-        return [_m("set_priority"), _m("edit_title")]
+        # terminal — priority only affects queue ordering of schedulable work, so it's a no-op here.
+        return [_m("edit_title")]
 
     # unknown / custom status (e.g. a project-defined needs_design) → no inherent advance/reverse
     # semantics, but keep it ROUTABLE: `handoff` (h) sends it to whatever role should take it next.
