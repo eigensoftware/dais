@@ -10,6 +10,15 @@ SELF="$(cd "$(dirname "$0")" && pwd)"; source "$SELF/lib.sh"
 DRY=0; PROJECT=""
 for a in "$@"; do [ "$a" = "--dry-run" ] && DRY=1 || PROJECT="$a"; done
 
+# --- tick journal: every REAL tick's outcome is appended to projects/.watch.log (rotated),
+#     so "why didn't that tick launch anything?" is answerable after the fact — the console
+#     scrollback is not the only record. One line per outcome; the console output is unchanged. ---
+TLOG="$DAIS_HOME/projects/.watch.log"
+tlog(){ [ "$DRY" = 0 ] && echo "[$(date '+%F %T')] $*" >> "$TLOG" 2>/dev/null || true; }
+if [ "$DRY" = 0 ] && [ -f "$TLOG" ] && [ "$(wc -l < "$TLOG" 2>/dev/null)" -gt 800 ]; then
+  tail -400 "$TLOG" > "$TLOG.tmp" && mv "$TLOG.tmp" "$TLOG"
+fi
+
 # --- reconcile orphaned state (self-heal across stops/starts): drop dead lock files, and if
 #     nothing is actually running, mark any leftover 'running' row interrupted AND rewind its
 #     task via the MACHINE: fire each project's own system `interrupt` edge(s) (machine.py
@@ -36,6 +45,7 @@ fi
 #     One check here makes pause honored by every dispatcher: watch, a hand-run tick, and the
 #     launchd schedule. ---
 if [ "$DRY" = 0 ] && [ -f "$DAIS_HOME/projects/.paused" ]; then
+  tlog "paused — idling"
   echo "${CY}tick: paused (projects/.paused) — run 'dais resume' to continue${C0}"; exit 10
 fi
 
@@ -55,12 +65,14 @@ fi
 # --- capacity gate: cool down after a recent cap hit (window resets every ~5h) ---
 capped_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='capped' AND started_at > datetime('now','-90 minutes');")"
 if [ "${capped_recent:-0}" -gt 0 ]; then
+  tlog "cap cooldown ($capped_recent capped run(s) in 90m)"
   echo "${CY}tick: hit the subscription cap within 90 min — cooling down until the window frees up${C0}"; exit 20
 fi
 
 # --- error backoff: don't spin on a persistent failure (Execution error, transient outage) ---
 fail_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='failed' AND started_at > datetime('now','-30 minutes');")"
 if [ "${fail_recent:-0}" -ge 2 ]; then
+  tlog "error backoff ($fail_recent failed run(s) in 30m)"
   echo "${CY}tick: 2+ failed runs in last 30 min — backing off (check the latest log; will retry later)${C0}"; exit 20
 fi
 
@@ -124,6 +136,7 @@ if [ "$free" -gt 0 ] && [ "${#eligible[@]}" -gt 0 ]; then
       # foreground call) so we can pre-write the lock with the agent's REAL pid — closing the
       # window before run-agent's slow git-fetch where a second dispatcher (a launchd tick, a
       # manual `dais tick`) would see the project idle and double-launch into the same repo.
+      tlog "launch $proj/$agent (serial)"
       echo "${CC}${CB}▸ tick[$proj]: running $agent${C0}"
       "$SELF/run-agent.sh" "$proj" "$agent" &
       echo $! > "$DAIS_HOME/projects/$proj/.lock-$agent"
@@ -136,6 +149,7 @@ if [ "$free" -gt 0 ] && [ "${#eligible[@]}" -gt 0 ]; then
     # parallel: launch in the background (quiet — its stream goes to the log, not the console),
     # stagger by 1s to avoid a git-fetch / db-insert thundering herd. The agent still prints its
     # own one-line start/finish markers, and `dais watch` can stop the whole tree on Ctrl-C.
+    tlog "launch $proj/$agent (slot $((running+launched+1))/$MAX)"
     echo "${CC}${CB}▸ tick[$proj]: launching $agent  ${CD}(slot $((running+launched+1))/$MAX, prio $prio)${C0}"
     DAIS_QUIET=1 "$SELF/run-agent.sh" "$proj" "$agent" &
     # Reserve the slot NOW, synchronously, with the agent's real pid ($! is run-agent.sh's pid,
