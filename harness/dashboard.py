@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 # so a bare `from actions import …` resolves in both.
 from actions import task_actions, action_command, priority_cycle, Action  # noqa: F401
 import router  # parse_roles — so the running-task guess can be agent-aware (which statuses a role owns)
+import machine as MC  # machine-driven projects: derive the action bar from edges (not the actions.py catalog)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # tool code dir
 HOME = os.environ.get("DAIS_HOME") or ROOT                           # workspace (data) dir
@@ -147,6 +148,7 @@ class Project:
     deploy_commits: list = field(default_factory=list)   # (sha7, subject) of what's awaiting deploy
     deploy_failed: bool = False       # the most recent deploy ATTEMPT failed (not yet superseded)
     deploy_failed_at: str = None      # when it failed
+    machine: dict = None              # the project's authored state machine (or None = legacy status routing)
 
 
 @dataclass
@@ -217,6 +219,48 @@ def project_field(root, name, key):
 
 def stage_goal(root, name):
     return project_field(root, name, "stage_goal")
+
+
+def _load_machine(root, name):
+    """The project's authored state machine (dict) if project.yaml declares `machine:`, else None.
+    Lets the TUI derive its bands/actions from the machine instead of hardcoded statuses."""
+    ref = project_field(root, name, "machine")
+    if not ref:
+        return None
+    try:
+        return MC.load(MC.default_machine_path(root, ref))
+    except Exception:
+        return None
+
+
+_REVERSE_VERBS = {"reject", "cancel", "request_changes", "abort", "give_up", "defer"}
+
+
+def _machine_actions(m, state):
+    """Action rows for a machine task, derived from its outgoing edges (MC.edge_actions). The founder
+    sees: `start` (launch the dispatch agent, if any) as advance, one founder edge as advance ('a'),
+    one reverse-ish founder edge as reverse ('x'), the rest under the Enter menu. Agent-only edges
+    (claim/complete/pass…) aren't founder keys — they fire from agent runs. `confirm` carries through
+    so guarded edges prompt; strong-human guards (typed_confirm/attest) are handled at execution."""
+    acts, adv_used, rev_used = [], False, False
+    for a in MC.edge_actions(m, state):
+        verb = a["verb"]
+        if verb == "__start":
+            acts.append(Action("__start", a["label"], "a", "advance", False)); adv_used = True
+            continue
+        if not a.get("human"):            # agent edges aren't the founder's to press
+            continue
+        is_rev = verb in _REVERSE_VERBS
+        if is_rev and not rev_used:
+            key, slot, rev_used = "x", "reverse", True
+        elif not is_rev and not adv_used:
+            key, slot, adv_used = "a", "advance", True
+        else:
+            key, slot = "", "menu"
+        acts.append(Action(verb, a["label"], key, slot, a["confirm"]))
+    acts.append(Action("set_priority", "set priority", "", "menu", False))   # metadata, orthogonal
+    acts.append(Action("edit_title", "edit title", "e", "menu", False))       # to the state machine
+    return acts
 
 
 def workspace_name(home=HOME):
@@ -290,7 +334,8 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                                 recent_runs=proj_runs, deploy_configured=dcfg,
                                 deploy_needs=dneeds, deploy_checked_at=dchecked,
                                 deploy_migration=dmig, deploy_commits=dcommits,
-                                deploy_failed=dfail, deploy_failed_at=dfail_at))
+                                deploy_failed=dfail, deploy_failed_at=dfail_at,
+                                machine=_load_machine(root, name)))
     # resolve dependencies once across ALL projects (a predecessor may live in another project):
     # a task is blocked when its predecessor exists and isn't done/cancelled. A dangling ref
     # (predecessor missing) is treated as unblocked so a deleted prerequisite never strands work.
@@ -1671,11 +1716,24 @@ class App:
         return {"id": row.get("task_id"), "project": row.get("project"),
                 "status": row.get("status"), "pr_url": None, "priority": None}
 
+    def _machine_of(self, row):
+        """The authored machine for a row's project, or None (legacy status-routed project)."""
+        if not self.snap or not row:
+            return None
+        for p in self.snap.projects:
+            if p.name == row.get("project"):
+                return p.machine
+        return None
+
     def _row_actions(self, row):
-        """task_actions for a row (the single source the bar, menu and keys share)."""
+        """The actions for a row (the single source the bar, menu and keys share). A machine project
+        DERIVES them from the task's outgoing edges (edge_actions); legacy uses the actions.py catalog."""
         t = self._task_of(row)
         if t is None:
             return []
+        m = self._machine_of(row)
+        if m and self._row_kind(row) == "task":
+            return _machine_actions(m, t["status"])
         return task_actions(t["status"], self._row_kind(row),
                             has_pr=bool(t.get("pr_url")))
 
@@ -1764,6 +1822,9 @@ class App:
         if t is None:
             self.flash = "no task selected"
             return
+        m = self._machine_of(row)
+        if m and self._row_kind(row) == "task":
+            return self._act_machine(m, action_id, row, t)
         cmd = action_command(action_id, t)
         if cmd is not None:
             act = next((a for a in self._row_actions(row) if a.id == action_id), None)
@@ -1797,6 +1858,37 @@ class App:
             self.launch_pr(row)
         else:
             self.flash = f"no handler for {action_id}"
+
+    def _act_machine(self, m, verb, row, t):
+        """Execute a machine action: launch the dispatch agent (__start), a metadata op, or fire the
+        edge via `dais fire`. Strong-human-guard edges (typed_confirm/attest) stay human-in-the-loop —
+        we surface the exact shell command instead of auto-confirming them."""
+        if verb == "set_priority":
+            return self._priority_menu(row)
+        if verb == "edit_title":
+            return self._edit_title(row)
+        if verb == "__start":
+            if self._spawn_agent(["start", t["id"]]):
+                self.flash = f"started {t['id']} — see RUNNING / press L for the log"
+            self.refresh()
+            return
+        edge = next((e for e in MC.edges_from(m, t["status"]) if e.get("verb") == verb), None)
+        if not edge:
+            self.flash = f"no '{verb}' edge from {t['status']}"
+            return
+        guards = edge.get("guards", [])
+        strong = [g for g in guards if g == "typed_confirm" or g.startswith("attest:")]
+        if strong:
+            flags = " ".join(("--typed " + t["id"]) if g == "typed_confirm"
+                             else ("--attest " + g.split(":", 1)[1].split(" ")[0]) for g in strong)
+            self.flash = f"{verb} is human-gated — run:  dais fire {t['id']} {verb} {flags}"
+            return
+        if "confirm" in guards and not self._confirm(f"{verb} {t['id']}?"):
+            return
+        cmd = ["fire", t["id"], verb, "--by", "founder"] + (["--confirm"] if "confirm" in guards else [])
+        rc = self._dispatch(cmd)
+        self.refresh()
+        self.flash = f"{verb} {t['id']}" if rc == 0 else f"{verb} failed (exit {rc})"
 
     def _action_menu(self, row):
         """Open the Enter menu and dispatch the chosen action. Shows each action's KEY (mirroring the

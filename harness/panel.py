@@ -15,6 +15,7 @@ import re
 import textwrap
 
 import dashboard as d
+import machine as MC   # bands/edge_actions — so a machine project's board derives itself
 from dashboard import _add, clip_cols, pad_cols, disp_width  # width-aware primitives
 
 Rect = namedtuple("Rect", "y x h w")
@@ -1001,6 +1002,58 @@ def _task_row(proj, task, tag):
             "status": task.status, "tag": tag, "sel": True}
 
 
+def _machine_work_rows(snap, projects, project, expanded, root):
+    """WORK list for machine-driven projects — bands DERIVED from each project's machine
+    (machine.band_of), so changing the model needs no panel edits. RUNNING is the live-run overlay;
+    the rest come straight from the machine's state->band mapping (NEEDS YOU/QUEUED/WAITING/ARCHIVE,
+    plus any founder-defined custom bands). Empty NEEDS YOU/QUEUED collapse to a dim header; WAITING
+    only shows when non-empty; ARCHIVE is capped unless expanded."""
+    rows = []
+
+    def add_band(name, count):
+        if rows:
+            rows.append({"kind": "spacer", "id": f"__sp::{name}", "sel": False, "label": ""})
+        rows.append(_band(name, count))
+
+    now = "9999-12-31 00:00:00"
+    threads = [t for t in d.running_threads(snap, now, root)
+               if project is None or t["project"] == project]
+    running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
+    add_band("RUNNING", len(threads))
+    for t in threads:
+        rows.append({"kind": "running", "id": f"run::{t['project']}",
+                     "project": t["project"], "task_id": t["task"], "task": None,
+                     "status": "doing", "sel": True, "agent": t["agent"],
+                     "since": t["since"], "log_path": t["log_path"]})
+
+    # bucket every non-running task into its machine-derived band
+    bucket = {}
+    for p in projects:
+        for st, ts in p.tasks_by_status.items():
+            band = MC.band_of(p.machine, st)
+            for t in ts:
+                if (p.name, t.id) in running_ids:
+                    continue
+                bucket.setdefault(band, []).append((p.name, t))
+
+    def emit(name, items, cap=None):
+        add_band(name, len(items))
+        show = items if (cap is None or expanded) else items[:cap]
+        for proj, t in show:
+            rows.append(_task_row(proj, t, _short_tag(t.status)))
+
+    emit("NEEDS YOU", bucket.pop("NEEDS YOU", []))            # always shown (collapses when empty)
+    emit("QUEUED", bucket.pop("QUEUED", []))
+    waiting = bucket.pop("WAITING", [])
+    if waiting:                                               # only when non-empty
+        emit("WAITING", waiting)
+    for name in sorted(b for b in bucket if b not in ("ARCHIVE",)):   # founder-defined custom bands
+        if bucket[name]:
+            emit(name, bucket[name])
+    emit("ARCHIVE", bucket.pop("ARCHIVE", []), cap=_ARCHIVE_CAP)
+    return rows
+
+
 def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
     """The panel's WORK list: ordered bands of selectable rows (RUNNING · NEEDS YOU · QUEUED ·
     BACKLOG · DEFERRED · ARCHIVE). `project` limits to one project. `expanded` (the g key) shows
@@ -1010,6 +1063,10 @@ def panel_work_rows(snap, *, project=None, expanded=False, root=d.HOME):
     if not snap:
         return rows
     projects = [p for p in snap.projects if project is None or p.name == project]
+    # machine-driven projects derive their bands from the machine (top self-configures). Mixed
+    # workspaces fall to the legacy builder, where machine states still surface via OTHER STAGES.
+    if projects and all(getattr(p, "machine", None) for p in projects):
+        return _machine_work_rows(snap, projects, project, expanded, root)
 
     def tasks_in(statuses):
         out = []
