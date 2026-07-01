@@ -669,6 +669,59 @@ class TestRolePalette(unittest.TestCase):
         return None
 
 
+class TestInspectorModelLine(unittest.TestCase):
+    """The inspector shows WHICH MODEL (and effort) a task/agent runs on, resolved exactly as
+    run-agent.sh resolves it: per-role model_<role>:/effort_<role>: beats the project-wide
+    model:/effort:, else the tool default. A parked state (no dispatch role) shows no line."""
+
+    def _papp(self, status, yaml_text):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pmdl-")
+        os.makedirs(os.path.join(root, "projects", "p"), exist_ok=True)
+        with open(os.path.join(root, "projects", "p", "project.yaml"), "w") as fh:
+            fh.write(yaml_text)
+        conn = _conn()
+        conn.execute("INSERT INTO tasks(id,project,title,status,priority) VALUES(?,?,?,?,?)",
+                     ("t-1", "p", "title", status, "high"))
+        conn.commit()
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp.sel_id = "t-1"
+        return papp
+
+    YAML = "project: p\nrepo: p\nmodel: claude-opus-4-8\neffort: high\nmodel_engineer: claude-fable-5\n"
+
+    def test_ready_task_shows_dispatch_role_model_override(self):
+        # ready dispatches the engineer (coding machine) -> the per-role override + project effort
+        papp = self._papp("ready", self.YAML)
+        body = "\n".join(pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1]))
+        self.assertIn("runs as engineer", body)
+        self.assertIn("claude-fable-5", body)
+        self.assertIn("effort high", body)
+
+    def test_qa_task_shows_project_default_model(self):
+        # qa_review dispatches qa — no model_qa override -> the project-wide model
+        papp = self._papp("qa_review", self.YAML)
+        body = "\n".join(pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1]))
+        self.assertIn("runs as qa", body)
+        self.assertIn("claude-opus-4-8", body)
+        self.assertNotIn("claude-fable-5", body)
+
+    def test_parked_state_shows_no_model_line(self):
+        # approved parks (no dispatch role) -> no "runs as" line
+        papp = self._papp("approved", self.YAML)
+        body = "\n".join(pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1]))
+        self.assertNotIn("runs as", body)
+
+    def test_running_header_shows_model_and_effort(self):
+        papp = self._papp("doing", self.YAML)
+        row = {"project": "p", "agent": "engineer", "task_id": "t-1",
+               "since": "2026-07-01 10:00:00"}
+        head = "\n".join(papp.running_header(row, "2026-07-01 10:05:00"))
+        self.assertIn("claude-fable-5", head)
+        self.assertIn("effort high", head)
+
+
 class TestInspectorReflow(unittest.TestCase):
     def _papp(self, notes):
         import tempfile

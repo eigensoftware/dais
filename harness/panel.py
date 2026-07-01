@@ -326,6 +326,10 @@ def _panel_detail_lines(app, sel_row):
            f'"{task.title}"',
            f"assignee {task.assignee or '-'} · prio {task.priority} · "
            f"pr {task.pr_url or '(none)'}"]
+    role = MC.dispatch_role(p.machine, task.status)     # who the machine launches from this state
+    if role:
+        model, eff = d.agent_model(app.root, p.name, role)
+        out.append(f"runs as {role} · {model}" + (f" · effort {eff}" if eff else ""))
     if getattr(task, "blocked", False):                 # waiting on an unfinished predecessor
         out.append(f"⛓ blocked on {task.blocked_on} — won't run until it's done")
     out.append("")

@@ -212,6 +212,18 @@ def project_field(root, name, key):
     return ""
 
 
+def agent_model(root, project, agent):
+    """The (model, effort) run-agent.sh will resolve for this project's agent: a per-role
+    `model_<agent>:` / `effort_<agent>:` beats the project-wide `model:` / `effort:`; the tool
+    default is claude-opus-4-8, effort '' (the CLI default). Mirrors run-agent.sh so what the
+    panel shows is what a run actually uses."""
+    model = (project_field(root, project, "model_" + agent)
+             or project_field(root, project, "model") or "claude-opus-4-8")
+    effort = (project_field(root, project, "effort_" + agent)
+              or project_field(root, project, "effort"))
+    return model, effort
+
+
 def stage_goal(root, name):
     return project_field(root, name, "stage_goal")
 
@@ -965,6 +977,8 @@ class App:
         head = [f"{tid}  {row['project']}/{row['agent']} · running {el}"]
         if task:
             head.append(f'"{truncate_words(task.title, 56)}"')
+        model, eff = agent_model(self.root, row["project"], row["agent"])
+        head.append(f"model {model}" + (f" · effort {eff}" if eff else ""))
         return head
 
     # ---- draw ----
