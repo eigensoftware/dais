@@ -1415,10 +1415,16 @@ class App:
             self.flash = f"no '{verb}' edge from {t['status']}"
             return
         guards = edge.get("guards", [])
-        strong = [g for g in guards if g == "typed_confirm" or g.startswith("attest:")]
+        # human-gated guards are NEVER auto-satisfied from the panel: typed_confirm/attest need
+        # explicit input, and a verify:<check> with no declared checker (machine `checks`) can
+        # only pass as a --verify self-assertion — surface the exact command instead of stamping it.
+        checks = (m or {}).get("checks", {})
+        strong = [g for g in guards if g == "typed_confirm" or g.startswith("attest:")
+                  or (g.startswith("verify:") and g.split(":", 1)[1] not in checks)]
         if strong:
             flags = " ".join(("--typed " + t["id"]) if g == "typed_confirm"
-                             else ("--attest " + g.split(":", 1)[1].split(" ")[0]) for g in strong)
+                             else ("--attest " + g.split(":", 1)[1].split(" ")[0]) if g.startswith("attest:")
+                             else ("--verify " + g.split(":", 1)[1]) for g in strong)
             self.flash = f"{verb} is human-gated — run:  dais fire {t['id']} {verb} {flags}"
             return
         if "confirm" in guards and not self._confirm(f"{verb} {t['id']}?"):
@@ -1426,9 +1432,7 @@ class App:
         cmd = ["fire", t["id"], verb, "--by", "founder"]
         if "confirm" in guards:
             cmd.append("--confirm")
-        for g in guards:                      # verify checks: the workflow satisfied them upstream
-            if g.startswith("verify:"):
-                cmd += ["--verify", g.split(":", 1)[1]]
+        # verify guards with a DECLARED checker run inside the engine on fire — nothing to pass.
         rc = self._dispatch(cmd)
         self.refresh()
         self.flash = f"{verb} {t['id']}" if rc == 0 else f"{verb} failed (exit {rc})"

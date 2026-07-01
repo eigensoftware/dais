@@ -146,6 +146,21 @@ def lint_project(root, project):
             warnings.append("role '%s': playbook '%s' has no file (looked in projects/%s/playbooks/ "
                             "and harness/playbooks/); falls back to no conventions"
                             % (r["name"], r["playbook"], project))
+
+    # 3) every role the MACHINE dispatches needs a persona file — the scheduler will launch it,
+    #    and run-agent exits before recording a run when the persona is missing (silent stall).
+    #    Machine roles needn't be in the roles file (that's scheduling metadata), but they must
+    #    be runnable.
+    try:
+        import machine as MC
+        m = MC.load(_machine_for(root, project))
+        dispatchable = {MC.dispatch_role(m, s) for s in m.get("states", {})} - {None}
+        for role in sorted(dispatchable):
+            if not os.path.exists(os.path.join(root, "projects", project, "agents", role + ".md")):
+                errors.append("machine dispatches role '%s' but projects/%s/agents/%s.md is missing "
+                              "— its runs will fail before recording anything" % (role, project, role))
+    except Exception:
+        pass                                   # machine lint reports its own problems
     return errors, warnings
 
 

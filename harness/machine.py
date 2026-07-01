@@ -105,7 +105,8 @@ def lint(m):
     for s in states:
         if states[s].get("pool"):
             continue
-        agents = {e["by"] for e in out.get(s, []) if e.get("by") not in IMPLICIT_ACTORS}
+        agents = {e.get("by") for e in out.get(s, [])
+                  if e.get("by") and e.get("by") not in IMPLICIT_ACTORS}
         if len(agents) > 1:
             errors.append(f"E3 ambiguous dispatch: state {s!r} auto-dispatches multiple roles "
                           f"{sorted(agents)} (add \"pool\": true to allow any-of)")
@@ -114,6 +115,20 @@ def lint(m):
         errors.append("E4: no `initial` state declared")
     if not terminals:
         errors.append("E4: no `terminal` state declared")
+    if m.get("entry") and m["entry"] not in states:
+        errors.append(f"E4: `entry` {m['entry']!r} is not a state (new tasks would enter an "
+                      f"unknown state with no edges)")
+
+    # E5: a duplicate (from, verb) pair is non-deterministic — fire() takes the first match,
+    # silently shadowing the other edge (and whatever guards/effects it carries).
+    seen_fv = {}
+    for e in edges:
+        fv = (e.get("from"), e.get("verb"))
+        if all(fv) and fv in seen_fv:
+            errors.append(f"E5 duplicate edge: {fv[0]!r} --{fv[1]}--> appears more than once "
+                          f"(-> {seen_fv[fv]!r} and -> {e.get('to')!r}); the second is unreachable")
+        elif all(fv):
+            seen_fv[fv] = e.get("to")
 
     # entry points: declared initials PLUS any state a spawn effect drops a new task into
     spawn_targets = {e["effect"]["spawn"]["initial"] for e in edges
@@ -167,12 +182,23 @@ def edges_from(m, state):
 
 
 def dispatch_role(m, state):
-    """The single agent role the scheduler launches for a task in `state`, or None (parks for a
-    human / awaits a system edge). Ambiguity is an E3 lint error, so at runtime it's <=1."""
-    if state not in (m or {}).get("states", {}):
+    """The agent role the scheduler launches for a task in `state`, or None (parks for a human /
+    awaits a system edge). One agent actor → that role. Multiple actors is an E3 lint error UNLESS
+    the state is tagged `pool: true` (any-of-N dispatch): then the pick is deterministic — the
+    first pool member in the machine's `roles` declaration order (declaration order = precedence)."""
+    states = (m or {}).get("states", {})
+    if state not in states:
         return None
-    agents = {e["by"] for e in edges_from(m, state) if e.get("by") not in IMPLICIT_ACTORS}
-    return next(iter(agents)) if len(agents) == 1 else None
+    agents = {e.get("by") for e in edges_from(m, state)
+              if e.get("by") and e.get("by") not in IMPLICIT_ACTORS}
+    if len(agents) == 1:
+        return next(iter(agents))
+    if len(agents) > 1 and states[state].get("pool"):
+        for r in (m or {}).get("roles", {}):
+            if r in agents:
+                return r
+        return sorted(agents)[0]
+    return None
 
 
 def _find_edge(m, state, verb):
@@ -309,7 +335,24 @@ def _blockers_open(conn, tid):
     return False
 
 
-def _check_guards(conn, edge, task, ctx):
+def _run_check(m, check, task):
+    """Run the machine's declared checker command for `verify:<check>` (the machine's `checks`
+    map: {name: shell command}). True = passed (exit 0). None = no checker declared, so the
+    guard can only be satisfied by an explicit --verify self-assertion from the firing role."""
+    cmd = (m or {}).get("checks", {}).get(check)
+    if not cmd:
+        return None
+    import subprocess
+    env = dict(os.environ, DAIS_TASK=task["id"], DAIS_PROJECT=task["project"] or "")
+    try:
+        return subprocess.run(cmd, shell=True, env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=600).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _check_guards(conn, m, edge, task, ctx):
     for g in edge.get("guards", []):
         if g == "confirm":
             if not ctx.get("confirm"):
@@ -325,8 +368,12 @@ def _check_guards(conn, edge, task, ctx):
             if not (ctx.get("attest") or {}).get(fact):
                 raise GuardFailure(f"guard `attest:{fact}` unmet (needs --attest {fact})")
         elif g.startswith("verify:"):
+            # an explicit --verify (the firing role asserting it ran the check) wins; else the
+            # machine's declared checker command runs; a check with neither fails closed.
             check = g[len("verify:"):]
             v = (ctx.get("verifiers") or {}).get(check)
+            if v is None:
+                v = _run_check(m, check, task)
             if not v:
                 raise GuardFailure(f"guard `verify:{check}` unmet (checker returned false/absent)")
         elif g.startswith("role:"):
@@ -334,25 +381,48 @@ def _check_guards(conn, edge, task, ctx):
                 raise GuardFailure(f"guard `role:` unmet")
 
 
-def fire(conn, m, tid, verb, actor, ctx=None):
+def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
     """Fire the (state,verb) edge as `actor`. Validates actor + guards, applies the state change,
-    then runs effects — which themselves fire edges. Returns a result dict. Raises GuardFailure."""
-    ctx = ctx or {}
-    task = _task(conn, tid)
-    if not task:
-        raise ValueError(f"no such task: {tid}")
-    edge = _find_edge(m, task["status"], verb)
-    if not edge:
-        raise ValueError(f"no edge {verb!r} from state {task['status']!r} for task {tid}")
-    if actor != edge.get("by"):
-        raise GuardFailure(f"actor {actor!r} may not fire this edge (owner is {edge.get('by')!r})")
-    _check_guards(conn, edge, task, ctx)
+    then runs effects — which themselves fire edges. Returns a result dict. Raises GuardFailure.
 
-    conn.execute("UPDATE tasks SET status=?, updated_at=datetime('now') WHERE id=?", (edge["to"], tid))
-    _link_run(conn, tid, "claim" if verb == "claim" else "touch")
-    result = {"task": tid, "from": task["status"], "to": edge["to"], "verb": verb, "spawned": [], "encompassed": []}
-    _apply_effect(conn, m, task, edge, result, ctx)
-    conn.commit()
+    ATOMIC: the transition and ALL its effects (spawns, links, nested `then` fires) commit
+    together or not at all — a failing effect rolls the whole fire back, so the DB never shows
+    a half-applied release. Concurrency-safe: the state change is a compare-and-swap
+    (`WHERE status=<from>`), so two racing fires can't both apply (and double-run effects) —
+    the loser sees the task moved and fails cleanly."""
+    ctx = ctx or {}
+    top = not _nested
+    if top:
+        # SAVEPOINT (not BEGIN) so a caller's open transaction is joined, not clobbered;
+        # standalone it opens one. Rollback-to-savepoint undoes only this fire's work.
+        conn.execute("SAVEPOINT dais_fire")
+    try:
+        task = _task(conn, tid)
+        if not task:
+            raise ValueError(f"no such task: {tid}")
+        edge = _find_edge(m, task["status"], verb)
+        if not edge:
+            raise ValueError(f"no edge {verb!r} from state {task['status']!r} for task {tid}")
+        if actor != edge.get("by"):
+            raise GuardFailure(f"actor {actor!r} may not fire this edge (owner is {edge.get('by')!r})")
+        _check_guards(conn, m, edge, task, ctx)
+
+        cas = conn.execute("UPDATE tasks SET status=?, updated_at=datetime('now') "
+                           "WHERE id=? AND status=?", (edge["to"], tid, task["status"]))
+        if cas.rowcount != 1:                       # someone else moved it between read and write
+            raise GuardFailure(f"task {tid} left state {task['status']!r} concurrently — "
+                               f"re-check with: dais edges {tid}")
+        _link_run(conn, tid, "claim" if verb == "claim" else "touch")
+        result = {"task": tid, "from": task["status"], "to": edge["to"], "verb": verb, "spawned": [], "encompassed": []}
+        _apply_effect(conn, m, task, edge, result, ctx)
+    except BaseException:
+        if top:
+            conn.execute("ROLLBACK TO SAVEPOINT dais_fire")
+            conn.execute("RELEASE SAVEPOINT dais_fire")
+        raise
+    if top:
+        conn.execute("RELEASE SAVEPOINT dais_fire")
+        conn.commit()
     return result
 
 
@@ -387,10 +457,16 @@ def _apply_effect(conn, m, task, edge, result, ctx):
         want = dict(kv.split("=", 1) for kv in sel.split(",") if "=" in kv)
         rows = conn.execute("SELECT id FROM tasks WHERE project=? AND status=?",
                             (task["project"], want.get("state"))).fetchall()
+        # "already encompassed" counts only links whose encompassing parent is still OPEN —
+        # a task swept into a release that was later aborted/cancelled (terminal parent) is
+        # re-aggregatable, else it would strand in the select state with no path out.
+        terminals = sorted(s for s, meta in m.get("states", {}).items() if meta.get("terminal"))
+        q = ("SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+             "WHERE l.child_id=? AND l.rel='encompasses'")
+        if terminals:
+            q += " AND p.status NOT IN (%s)" % ",".join("?" * len(terminals))
         for (cid,) in rows:
-            already = conn.execute("SELECT 1 FROM task_links WHERE child_id=? AND rel='encompasses'",
-                                   (cid,)).fetchone()
-            if already:
+            if conn.execute(q, [cid] + terminals).fetchone():
                 continue
             conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,'encompasses')",
                          (task["id"], cid))
@@ -406,7 +482,9 @@ def _apply_effect(conn, m, task, edge, result, ctx):
             for (cid,) in kids:
                 c = _task(conn, cid)
                 if c and c["status"] == from_state and child_edge:
-                    fire(conn, m, cid, child_edge["verb"], "system", ctx)
+                    # nested: joins the outer fire's transaction — the release and every
+                    # child close together, or the whole fire rolls back.
+                    fire(conn, m, cid, child_edge["verb"], "system", ctx, _nested=True)
     # eff["script"] would run an external effect script here (merge/deploy/publish) — out of scope
     # for the engine prototype; the transition + guards above are what make it safe.
 

@@ -39,7 +39,7 @@ echo $$ > "$LOCK"
 
 mkdir -p "$PDIR/logs"
 TS="$(date +%Y%m%d-%H%M%S)"; LOG="$PDIR/logs/$AGENT-$TS.log"
-RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$PROJECT','$AGENT','$LOG'); SELECT last_insert_rowid();")"
+RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")'); SELECT last_insert_rowid();")"
 # Publish the run id to the agent's environment. The agent coordinates by shelling out to `dais
 # task ...`, and those calls inherit DAIS_RUN_ID — so every task the agent creates/changes is
 # recorded against THIS run in run_tasks (see link_run_task). Scoped to this process; child `dais`

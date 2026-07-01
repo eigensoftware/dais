@@ -45,7 +45,7 @@ unblocked dependency, a release effect firing a child's edge).
 
 ```yaml
 states:
-  <name>: { initial: true?, terminal: true?, pool: true? }   # tags only
+  <name>: { initial: true?, terminal: true?, pool: true?, band: <BAND>? }   # tags only
 edges:
   - from: <state>
     to:   <state>
@@ -53,12 +53,24 @@ edges:
     verb: <label>                     # human name for the edge
     guards: [ ... ]                   # preconditions (see vocab); default none
     effect: { spawn|aggregate|script|then }   # optional side effect
+checks:                                # optional: verify:<name> -> a real command
+  <name>: <shell command>              # exit 0 = the check passed
 ```
+
+`fire` is ATOMIC: a transition and all its effects (spawns, links, nested
+`then` fires) commit together or roll back together, and the state write is a
+compare-and-swap — two racing fires can't both apply.
+
+System edge VERBS are harness event names — authoring one is how a machine
+opts into that harness behavior: `interrupt` (fired by the dispatcher's
+orphan-reconcile when no agent is live) and any edge guarded `unblocked`
+(fired each dispatch tick once its blockers are terminal).
 
 Dispatch is derived: the scheduler launches the (single) agent role with an
 outgoing edge from a task's current state. `founder`/`system` edges are not
 dispatched. `pool: true` opts a state into any-of-N dispatch (multiple agent
-roles allowed).
+roles allowed); the pick is deterministic — the first pool member in the
+machine's `roles` declaration order (declaration order = precedence).
 
 ### Guard vocabulary (closed — compose, don't invent)
 
@@ -66,8 +78,8 @@ roles allowed).
 |---|---|---|
 | `confirm` | a click | weak; an auto-approver can satisfy it |
 | `typed_confirm` | a human typing a phrase | **strong human** |
-| `attest:<fact> [when <cond>]` | a human asserting an unverifiable fact | **strong human**; conditional |
-| `verify:<check>` | an automatic check (tests, CI, no-conflict, def_of_ready, brand_voice) | resolves to a defined checker |
+| `attest:<fact>` | a human asserting an unverifiable fact | **strong human** (when-conditions: future) |
+| `verify:<check>` | an automatic check (tests, CI, no-conflict, brand_voice) | the machine's `checks.<check>` command runs on fire; absent that, only an explicit `--verify` self-assertion by the firing role passes it (fails closed) |
 | `role:<r>` | actor authorization | |
 
 Strong-human guards (`typed_confirm`, `attest:`) are what make an outward edge
@@ -90,7 +102,7 @@ everything policy/safety-flavored is a warning you can wave off. (`design/lint_m
 
 **Errors (block):** E1 referential integrity · E2 no dead-end (every
 non-terminal has an out-edge) · E3 unambiguous dispatch · E4 has an initial and
-a terminal.
+a terminal (and a valid `entry`) · E5 no duplicate (from, verb) edge.
 
 **Warnings (advisory):** W1 unreachable-from-initial · W2 can't-reach-terminal ·
 W3 outward effect with no strong-human guard on it or its approach.
@@ -99,7 +111,9 @@ Green errors ⇒ build whatever shape you want.
 
 ## The coding default (authored, fully editable)
 
-`design/machines/coding.machine.json` is the runnable form; here it is as YAML.
+`harness/machines/coding.machine.json` is the runnable form (this YAML is the
+original design sketch — state names evolved: awaiting_release→approved,
+release_ready→release_open, backlog folded into ready).
 It exercises every feature: proposal→spawn, qa-fail→spawn-fix + block, batched
 release via aggregate, upstream human gate on deploy, and a rollback path.
 

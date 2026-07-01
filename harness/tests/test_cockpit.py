@@ -148,10 +148,11 @@ class TestDoAction(unittest.TestCase):
         self.addCleanup(self.p.stop)
 
     def test_advance_on_proposal_review_approves(self):
+        # NO auto --verify: the panel never self-asserts a verify guard (approve's gate is
+        # the founder's own confirm).
         self.app.do_action("approve", task_row(status="proposal_review"))
         self.sub.call.assert_called_once_with(
-            ["dais", "fire", "cou-1", "approve", "--by", "founder", "--confirm",
-             "--verify", "def_of_ready"])
+            ["dais", "fire", "cou-1", "approve", "--by", "founder", "--confirm"])
 
     def test_reverse_on_ready_defers(self):
         self.app.do_action("defer", task_row(status="ready"))
@@ -213,8 +214,7 @@ class TestKeyWiring(unittest.TestCase):
     def test_a_advances_proposal_review(self):
         self._press(ord("a"), task_row(status="proposal_review"))
         self.sub.call.assert_called_once_with(
-            ["dais", "fire", "cou-1", "approve", "--by", "founder", "--confirm",
-             "--verify", "def_of_ready"])
+            ["dais", "fire", "cou-1", "approve", "--by", "founder", "--confirm"])
 
     def test_x_reverses_ready(self):
         self._press(ord("x"), task_row(status="ready"))

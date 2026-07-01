@@ -20,7 +20,7 @@
   "edges": [
     {"from": "proposed",     "to": "brief_review", "by": "strategist", "verb": "submit"},
     {"from": "brief_review", "to": "done",         "by": "founder", "verb": "approve",
-       "guards": ["confirm", "verify:brief_ready"],
+       "guards": ["confirm"],
        "effect": {"spawn": {"template": "content", "initial": "writing", "by": "writer", "rel": "from_proposal"}}},
     {"from": "brief_review", "to": "proposed",     "by": "founder", "verb": "request_changes"},
     {"from": "proposed",     "to": "cancelled",    "by": "founder", "verb": "reject", "guards": ["confirm"]},

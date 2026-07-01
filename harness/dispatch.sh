@@ -120,10 +120,18 @@ if [ "$free" -gt 0 ] && [ "${#eligible[@]}" -gt 0 ]; then
       launched=$((launched+1)); continue
     fi
     if [ "$MAX" -eq 1 ]; then
-      # serial (default): run in the foreground with the full live stream, exactly as before
+      # serial (default): run with the full live stream. Backgrounded + waited (not a plain
+      # foreground call) so we can pre-write the lock with the agent's REAL pid — closing the
+      # window before run-agent's slow git-fetch where a second dispatcher (a launchd tick, a
+      # manual `dais tick`) would see the project idle and double-launch into the same repo.
       echo "${CC}${CB}▸ tick[$proj]: running $agent${C0}"
-      "$SELF/run-agent.sh" "$proj" "$agent"
-      exit 0   # one agent this tick; the next tick picks up the next thing
+      "$SELF/run-agent.sh" "$proj" "$agent" &
+      echo $! > "$DAIS_HOME/projects/$proj/.lock-$agent"
+      wait $!; rc=$?
+      # a nonzero exit here is a CONFIG failure before any run row exists (missing persona,
+      # missing repo) — report idle (10), not work-in-flight (0), or `dais watch` hot-spins
+      # on its 10s drain sleep forever with nothing for the error-backoff gate to count.
+      [ "$rc" -eq 0 ] && exit 0 || exit 10
     fi
     # parallel: launch in the background (quiet — its stream goes to the log, not the console),
     # stagger by 1s to avoid a git-fetch / db-insert thundering herd. The agent still prints its

@@ -138,12 +138,24 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(_status(self.conn, impl), "ready")        # impl work goes to the engineer
         self.assertEqual(r["spawned"][0]["rel"], "spawned_from")
 
-    def test_approve_blocked_without_def_of_ready(self):
-        p = M.create_task(self.conn, self.m, "proj", "vague idea")
-        M.fire(self.conn, self.m, p, "submit", "lead")
-        with self.assertRaises(M.GuardFailure):   # def_of_ready checker returns false
-            M.fire(self.conn, self.m, p, "approve", "founder", {"confirm": True})
-        self.assertEqual(_status(self.conn, p), "proposal_review")  # unchanged
+    def test_verify_guard_fails_closed_without_assertion_or_checker(self):
+        # qa `pass` carries verify:tests_pass; with no --verify and no declared checker
+        # the guard fails closed and the task doesn't move.
+        t = M.create_task(self.conn, self.m, "proj", "impl", state="qa_review", assignee="qa")
+        with self.assertRaises(M.GuardFailure):
+            M.fire(self.conn, self.m, t, "pass", "qa")
+        self.assertEqual(_status(self.conn, t), "qa_review")  # unchanged
+
+    def test_verify_guard_runs_the_machines_declared_checker(self):
+        # a machine `checks` entry turns verify:<name> into a REAL command the engine runs.
+        t = M.create_task(self.conn, self.m, "proj", "impl", state="qa_review", assignee="qa")
+        self.m["checks"] = {"tests_pass": "false"}          # checker fails -> guard fails
+        with self.assertRaises(M.GuardFailure):
+            M.fire(self.conn, self.m, t, "pass", "qa")
+        self.m["checks"] = {"tests_pass": "true"}           # checker passes -> edge fires
+        M.fire(self.conn, self.m, t, "pass", "qa")
+        self.assertEqual(_status(self.conn, t), "approved")
+        del self.m["checks"]
 
     def test_wrong_actor_rejected(self):
         p = M.create_task(self.conn, self.m, "proj", "x")
@@ -213,6 +225,96 @@ class TestFlow(unittest.TestCase):
         r = M.fire(self.conn, self.m, rel, "release_error", "system")
         self.assertEqual(_status(self.conn, rel), "release_failed")
         self.assertEqual(r["spawned"][0]["rel"], "blocks_parent")    # a rollback task
+
+
+class TestAtomicityAndConcurrency(unittest.TestCase):
+    """fire() is one transaction: the transition + ALL effects commit together or roll back
+    together, and the state change is a compare-and-swap so racing fires can't double-apply."""
+
+    def setUp(self):
+        self.conn = _db()
+        self.m = M.load(CODING)
+
+    def _release_with_kids(self, n=2):
+        kids = [M.create_task(self.conn, self.m, "proj", f"k{i}", state="approved") for i in range(n)]
+        rel = M.create_task(self.conn, self.m, "proj", "rel", state="release_open", assignee="engineer")
+        M.fire(self.conn, self.m, rel, "assemble", "engineer")
+        M.fire(self.conn, self.m, rel, "greenlight", "founder",
+               {"typed": rel, "attest": {"migrations_applied": True}})
+        return rel, kids
+
+    def test_failing_nested_effect_rolls_back_the_whole_fire(self):
+        # guard the child edge (approved --released--> done) so the SECOND kid's nested fire
+        # fails mid-effect: the parent transition and the first kid must roll back too.
+        rel, kids = self._release_with_kids(2)
+        for e in self.m["edges"]:
+            if e["from"] == "approved" and e["verb"] == "released":
+                e["guards"] = ["unblocked"]
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('blk','proj','b','ready')")
+        self.conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,?)",
+                          (kids[1], "blk", "blocks_parent"))     # kid2's guard will fail
+        with self.assertRaises(M.GuardFailure):
+            M.fire(self.conn, self.m, rel, "shipped", "engineer")
+        self.assertEqual(_status(self.conn, rel), "releasing")   # parent NOT half-shipped
+        self.assertEqual(_status(self.conn, kids[0]), "approved")  # kid1 rolled back too
+
+    def test_stale_state_is_a_cas_failure_not_a_double_apply(self):
+        # simulate a concurrent writer: the task moves between fire()'s read and its UPDATE.
+        t = M.create_task(self.conn, self.m, "proj", "t", state="ready", assignee="engineer")
+        real_task = M._task
+        def stale(conn, tid):
+            row = real_task(conn, tid)
+            if tid == t:
+                conn.execute("UPDATE tasks SET status='deferred' WHERE id=?", (t,))  # racer wins
+                M._task = real_task                              # only interpose once
+            return row
+        M._task = stale
+        try:
+            with self.assertRaises(M.GuardFailure):
+                M.fire(self.conn, self.m, t, "claim", "engineer")
+        finally:
+            M._task = real_task
+        # the loser must NOT have applied its transition (in this same-connection simulation
+        # the rollback also undoes the simulated racer's write; the point is no double-apply).
+        self.assertNotEqual(_status(self.conn, t), "doing")
+
+    def test_reaggregate_after_aborted_release(self):
+        # a task swept into a release that gets aborted must be re-aggregatable by the next
+        # release — otherwise it strands in `approved` with no path to done.
+        rel, kids = self._release_with_kids(1)
+        M.fire(self.conn, self.m, rel, "release_error", "system")   # releasing -> release_failed
+        M.fire(self.conn, self.m, rel, "give_up", "founder", {"confirm": True})  # -> cancelled
+        rel2 = M.create_task(self.conn, self.m, "proj", "rel2", state="release_open", assignee="engineer")
+        r = M.fire(self.conn, self.m, rel2, "assemble", "engineer")
+        self.assertIn(kids[0], r["encompassed"])
+
+
+class TestLintGaps(unittest.TestCase):
+    def setUp(self):
+        self.m = M.load(CODING)
+
+    def test_edge_missing_by_is_reported_not_a_crash(self):
+        self.m["edges"].append({"from": "ready", "to": "doing", "verb": "oops"})
+        errors, _ = M.lint(self.m)                                # must not raise
+        self.assertTrue(any("unknown actor" in e for e in errors))
+
+    def test_bad_entry_is_an_error(self):
+        self.m["entry"] = "typo"
+        errors, _ = M.lint(self.m)
+        self.assertTrue(any("E4" in e and "typo" in e for e in errors))
+
+    def test_duplicate_from_verb_is_an_error(self):
+        self.m["edges"].append({"from": "ready", "to": "cancelled", "by": "founder", "verb": "claim"})
+        errors, _ = M.lint(self.m)
+        self.assertTrue(any("E5" in e for e in errors))
+
+    def test_pool_state_actually_dispatches(self):
+        # pool: true = any-of-N dispatch; deterministic pick is roles-declaration order.
+        self.m["states"]["ready"]["pool"] = True
+        self.m["edges"].append({"from": "ready", "to": "doing", "by": "qa", "verb": "grab"})
+        errors, _ = M.lint(self.m)
+        self.assertEqual(errors, [])                              # E3 suppressed by pool
+        self.assertEqual(M.dispatch_role(self.m, "ready"), "engineer")  # declared before qa
 
 
 class TestSystemSweeps(unittest.TestCase):
