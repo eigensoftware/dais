@@ -1,4 +1,5 @@
-# name      access  trigger   handles                       prec
-qa          review  reactive  needs_qa                      10
-engineer    edit    reactive  ready,changes_requested       20
-lead        draft   every:24h -                             30
+# name      access  trigger   handles   prec
+# dispatch comes from the project's machine.json (state -> role); `handles` is unused.
+qa          review  reactive  -         10
+engineer    edit    reactive  -         20
+lead        draft   every:24h -         30

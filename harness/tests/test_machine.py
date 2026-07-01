@@ -215,5 +215,46 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(r["spawned"][0]["rel"], "blocks_parent")    # a rollback task
 
 
+class TestSystemSweeps(unittest.TestCase):
+    """The dispatcher's machine hooks: `advance` (system `unblocked` edges, each tick) and
+    `recover` (system `interrupt` edges, orphan-reconcile) — both scoped to ONE project so a
+    machine never sweeps another project's same-named states."""
+
+    def setUp(self):
+        self.conn = _db()
+        self.m = M.load(CODING)
+
+    def test_advance_is_project_scoped(self):
+        # two blocked tasks with no open blockers, in different projects — only the
+        # scoped project's task advances.
+        a = M.create_task(self.conn, self.m, "alpha", "a", state="blocked")
+        b = M.create_task(self.conn, self.m, "beta", "b", state="blocked")
+        self.assertEqual(M.advance_unblocked(self.conn, self.m, "alpha"), [a])
+        self.assertEqual(_status(self.conn, a), "qa_review")
+        self.assertEqual(_status(self.conn, b), "blocked")   # other project untouched
+
+    def test_recover_fires_the_machines_interrupt_edge(self):
+        # an orphaned mid-flight task (doing) rewinds via the machine's own system
+        # `interrupt` edge — to wherever the machine says work resumes (ready).
+        t = M.create_task(self.conn, self.m, "alpha", "t", state="doing")
+        self.assertEqual(M.recover_interrupted(self.conn, self.m, "alpha"), [t])
+        self.assertEqual(_status(self.conn, t), "ready")
+
+    def test_recover_is_project_scoped_and_skips_settled_states(self):
+        other = M.create_task(self.conn, self.m, "beta", "o", state="doing")
+        parked = M.create_task(self.conn, self.m, "alpha", "p", state="ready")
+        self.assertEqual(M.recover_interrupted(self.conn, self.m, "alpha"), [])
+        self.assertEqual(_status(self.conn, other), "doing")   # other project untouched
+        self.assertEqual(_status(self.conn, parked), "ready")  # not mid-flight — untouched
+
+    def test_advance_skips_tasks_with_open_blockers(self):
+        parent = M.create_task(self.conn, self.m, "alpha", "p", state="blocked")
+        child = M.create_task(self.conn, self.m, "alpha", "fix", state="ready")
+        self.conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,?)",
+                          (parent, child, "blocks_parent"))
+        self.assertEqual(M.advance_unblocked(self.conn, self.m, "alpha"), [])
+        self.assertEqual(_status(self.conn, parent), "blocked")  # guard held it back, no error
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,18 +17,15 @@ dais — your agent company control panel
 
   dais status                         everything at a glance (tasks + recent runs)
   dais top [secs]                     live TUI dashboard (read-only; default 2s refresh)
-  dais backlog <project>              stage goal + ranked queue
   dais tasks <project> [--assignee A] [--status S]
   dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."]
   dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."]
-  dais handoff <id> <role> ["note"]   reassign + advance status (target status from roles config)
-  dais approve <id> [--priority P] ["note"]  greenlight a Lead 'proposed' initiative → ready (front-door founder gate)
   dais tick [project] [--dry-run]     check the list once: run the most valuable pending task
   dais watch [seconds]                keep checking on an interval (default 900s); Ctrl-C to stop
   dais schedule install|uninstall|status   run the interval in the background (cross-platform)
   dais pause | resume                 park/un-park the loop (honored by watch + schedule)
   dais cancel <project>               stop the project's in-flight agent (marks it interrupted)
-  dais start <id>                      run the role that handles this task's status, now
+  dais start <id>                      run the role the machine dispatches for this task's state, now
   dais run <project> <agent>          run a specific agent now (headless claude)
   dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify)
   dais edges <task-id>                the fireable edges from a task's current state
@@ -48,14 +45,7 @@ valid_status(){
   local mp; mp="$(machine_path "$1")"; [ -n "$mp" ] || return 1
   python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;m=M.load('$mp');sys.exit(0 if '$2' in m.get('states',{}) else 1)" 2>/dev/null
 }
-# machine_path <project> -> the resolved machine file. Unconditional: project-local machine.json
-# wins, else a `machine:` selector, else the `coding` default. (Every project is machine-driven.)
-machine_path(){
-  local local_m="$DAIS_HOME/projects/$1/machine.json"
-  [ -f "$local_m" ] && { printf '%s' "$local_m"; return 0; }
-  local mach; mach="$(pcfg "$1" machine 2>/dev/null)"
-  python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(M.default_machine_path('$DAIS_ROOT', '$mach' or None))" 2>/dev/null
-}
+# machine_path lives in lib.sh (shared with dispatch.sh + run-agent.sh).
 # status_help <project> -> the project's machine states, for error messages
 status_help(){
   local mp; mp="$(machine_path "$1")"; [ -n "$mp" ] || return 0
@@ -109,23 +99,18 @@ MD
     python3 "$DAIS_ROOT/harness/dashboard.py" ;;
 
   top)
-    # the responsive control panel is the default; DAIS_CLASSIC=1 dais top → the old single-pane UI
+    # the responsive multi-pane control panel (harness/panel.py)
     secs="${1:-2}"
     case "$secs" in ''|*[!0-9.]*) echo "top: secs must be a number"; exit 1;; esac
     [ -f "$DB" ] || db_init >/dev/null 2>&1
     python3 "$DAIS_ROOT/harness/dashboard.py" --tui --interval "$secs" ;;
 
   backlog)
-    proj="${1:?usage: dais backlog <project>}"; pe="$(sqlesc "$proj")"
-    echo "STAGE GOAL: $(pcfg "$proj" stage_goal)"; echo ""
-    echo "READY (Engineer pulls top-down):"
-    db -separator ' | ' "SELECT '  ['||priority||'] '||id, title FROM tasks WHERE project='$pe' AND status IN ('changes_requested','ready') ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END;" || true
-    echo ""; echo "IN FLIGHT:"
-    db -separator ' | ' "SELECT '  '||status||' '||id, title FROM tasks WHERE project='$pe' AND status IN ('doing','needs_qa','ready_to_merge','needs_review');" || true
-    echo ""; echo "BLOCKED (on founder):"
-    db -separator ' | ' "SELECT '  '||id, title FROM tasks WHERE project='$pe' AND status='blocked';" || true
-    echo ""; echo "BACKLOG / fast-follow:"
-    db -separator ' | ' "SELECT '  ['||priority||'] '||id, title FROM tasks WHERE project='$pe' AND status='backlog' ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END LIMIT 20;" || true ;;
+    # REMOVED: it grouped by hardcoded legacy statuses. The board derives from the machine now.
+    echo "✋ 'dais backlog' was removed — the board derives from each project's machine."
+    echo "   dais status              the whole board, grouped by machine phase"
+    echo "   dais tasks ${1:-<project>}     one project's tasks"
+    exit 1 ;;
 
   tasks)
     proj="${1:?usage: dais tasks <project> [--assignee A] [--status S]}"; shift 2>/dev/null || true
@@ -217,58 +202,41 @@ MD
     # back-compat alias: a task's actions ARE its machine's fireable edges now.
     exec "$0" edges "$@" ;;
 
-  handoff)
-    id="${1:?usage: dais handoff <id> <role> [note]}"; to="${2:?to-role}"; note="${3:-}"
-    proj="$(db "SELECT project FROM tasks WHERE id='$(sqlesc "$id")';")"
-    [ -n "$proj" ] || { echo "no task: $id"; exit 1; }
-    # target status = the role's first 'handles' status, from the project's roles config
-    st="$(awk -v r="$to" '!/^#/ && $1==r {split($4,h,","); print h[1]}' "$DAIS_HOME/projects/$proj/roles" 2>/dev/null | head -1)"
-    { [ -z "$st" ] || [ "$st" = "-" ]; } && st="ready"
-    nset=""; [ -n "$note" ] && nset=", notes='$(sqlesc "$note")'"
-    db "UPDATE tasks SET assignee='$(sqlesc "$to")', status='$st'$nset, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" \
-      && { verb=touch; [ "$st" = doing ] && verb=claim; link_run_task "$id" "$verb"; echo "handoff: $id -> $to ($st)"; } ;;
-
-  approve)
-    # founder-gate: greenlight a Lead `proposed` initiative → ready (the Engineer then picks it up).
-    # To REJECT, use `dais task set <id> --status cancelled` (or backlog to park it).
-    id="${1:?usage: dais approve <id> [--priority high|medium|low] [\"note\"]}"; shift 2>/dev/null || true
-    pri=""; note=""
-    while [ $# -gt 0 ]; do case "$1" in
-      --priority) pri="$2"; shift 2;;
-      *) note="$1"; shift;;
-    esac; done
-    cur="$(db "SELECT status FROM tasks WHERE id='$(sqlesc "$id")';")"
-    [ -n "$cur" ] || { echo "no task: $id"; exit 1; }
-    [ "$cur" = "proposed" ] || { echo "✋ $id is '$cur', not 'proposed' — approve is for Lead proposals (use 'dais task set' for other moves)."; exit 1; }
-    proj="$(db "SELECT project FROM tasks WHERE id='$(sqlesc "$id")';")"
-    asg="$(awk '!/^#/ && $4!="-"{n=split($4,h,",");for(i=1;i<=n;i++)if(h[i]=="ready"){print $1;exit}}' \
-           "$DAIS_HOME/projects/$proj/roles" 2>/dev/null)"
-    [ -n "$asg" ] || asg="engineer"
-    set_pri=""; [ -n "$pri" ] && set_pri=", priority='$(sqlesc "$pri")'"
-    set_note=""; [ -n "$note" ] && set_note=", notes=COALESCE(notes,'')||'  |  approved: $(sqlesc "$note")'"
-    db "UPDATE tasks SET status='ready', assignee='$(sqlesc "$asg")'$set_pri$set_note, updated_at=datetime('now') WHERE id='$(sqlesc "$id")';" \
-      && echo "✓ approved $id → ready ($asg will pick it up)" ;;
+  handoff|approve)
+    # REMOVED: both were legacy status pokes that bypassed the machine (and could strand a task
+    # in a state its machine doesn't have). Every state change is a transition now.
+    id="${1:-<task-id>}"
+    echo "✋ 'dais $cmd' was removed — every state change fires a machine edge now."
+    echo "   see what can fire:  dais edges $id"
+    echo "   then fire it:       dais fire $id <verb> [--confirm | --typed $id | --attest <fact>]"
+    exit 1 ;;
 
   run)
     exec "$DAIS_ROOT/harness/run-agent.sh" "$@" ;;
 
   start)
-    # run the reactive role that handles this task's status, right now. Non-runnable
-    # statuses (founder gates / terminal) print the fix and exit nonzero; a runnable
-    # one resolves the role whose `handles` includes the status (the awk idiom from
-    # `approve`/`handoff`) and execs the runner like `dais run`.
+    # run the role the MACHINE dispatches for this task's current state, right now (the same
+    # resolution the scheduler uses — machine.dispatch_role). A state with no dispatch role
+    # explains itself by its band: a founder gate waits on you, a waiting state on a system
+    # event, a terminal has nothing to run.
     id="${1:?usage: dais start <id>}"
     row="$(db -separator '|' "SELECT status,project FROM tasks WHERE id='$(sqlesc "$id")';")"
     [ -n "$row" ] || { echo "no such task: $id"; exit 1; }
     st="${row%%|*}"; proj="${row##*|}"
-    case "$st" in
-      proposed)        echo "start: $id is 'proposed' — approve it first:  dais approve $id"; exit 1 ;;
-      backlog)         echo "start: $id is 'backlog' — promote it:  dais task set $id --status ready"; exit 1 ;;
-      deferred)        echo "start: $id is 'deferred' — un-defer:  dais task set $id --status ready"; exit 1 ;;
-      done|cancelled)  echo "start: $id is '$st' — nothing to run."; exit 1 ;;
-    esac
-    role="$(awk -v s="$st" '!/^#/ && $4!="-"{n=split($4,h,","); for(i=1;i<=n;i++) if(h[i]==s){print $1; exit}}' "$DAIS_HOME/projects/$proj/roles" 2>/dev/null)"
-    [ -n "$role" ] || { echo "start: no role handles status '$st' in $proj/roles"; exit 1; }
+    MP="$(machine_path "$proj")"
+    info="$(DAIS_MP="$MP" DAIS_ST="$st" python3 -c "
+import os, sys; sys.path.insert(0, '$DAIS_ROOT/harness'); import machine as M
+m = M.load(os.environ['DAIS_MP']); st = os.environ['DAIS_ST']
+print((M.dispatch_role(m, st) or '') + '|' + M.band_of(m, st))" 2>/dev/null)"
+    role="${info%%|*}"; band="${info##*|}"
+    if [ -z "$role" ]; then
+      case "$band" in
+        ARCHIVE)     echo "start: $id is '$st' — nothing to run." ;;
+        "NEEDS YOU") echo "start: $id is '$st' — it waits on YOU. See what you can fire:  dais edges $id" ;;
+        *)           echo "start: $id is '$st' — no agent dispatches this state (it waits on a system event). See:  dais edges $id" ;;
+      esac
+      exit 1
+    fi
     echo "▶ starting $proj/$role for $id ($st)…"
     exec "$DAIS_ROOT/harness/run-agent.sh" "$proj" "$role" ;;
 
@@ -314,7 +282,7 @@ MD
         PDIR="$DAIS_HOME/projects/$proj"
         existing="$(grep -v '^#' "$PDIR/roles" 2>/dev/null | sed '/^[[:space:]]*$/d')"
         pbs="$( { ls "$DAIS_ROOT/harness/playbooks/"*.md "$PDIR/playbooks/"*.md ; } 2>/dev/null | sed 's#.*/##; s#\.md$##' | sort -u | paste -sd, - )"
-        genprompt="You are configuring ONE new agent role for the dais multi-agent harness (a status-routed board).
+        genprompt="You are configuring ONE new agent role for the dais multi-agent harness (a machine-routed board: each project's machine.json routes task states to roles).
 Role to design: $desc
 Project: $proj
 Existing roles (columns: name access trigger handles prec playbook):
@@ -322,11 +290,11 @@ $existing
 Available playbooks: ${pbs:-code}
 Rules:
 - access: edit (may modify the repo/docs) | review | draft (both read-only) | none.
-- trigger: reactive (runs when a status it handles has work) | every:Nh (cadence) | none.
-- handles: comma-separated statuses this role acts on. A REACTIVE role's status must NOT collide with another reactive role's (exactly one reactive role per status). Prefer a NEW custom status like needs_<x>.
+- trigger: reactive (runs when the machine dispatches it) | every:Nh (cadence) | none.
+- handles: leave as '-' (dispatch comes from the project's machine — to route work to this role, add edges with by: <role> to projects/$proj/machine.json).
 - playbook: pick from the available list the craft that fits (or 'code').
 - prec: integer; reviewers low, builders mid, planners high — fit it among the existing precs.
-- persona: a crisp system prompt — who the agent is, the ONE kind of work it does per run, that it reads its queue via 'dais tasks $proj --assignee <name>' and hands off with 'dais handoff'. Do NOT repeat coordination boilerplate, the playbook, or CONTEXT — the harness injects those.
+- persona: a crisp system prompt — who the agent is, the ONE kind of work it does per run, that it reads its queue via 'dais tasks $proj --assignee <name>' and advances work by firing machine edges ('dais edges <task-id>' then 'dais fire <task-id> <verb>'). Do NOT repeat coordination boilerplate, the playbook, or CONTEXT — the harness injects those.
 Output EXACTLY this and nothing else (header lines, then a line with three dashes, then the persona markdown):
 name: <slug>
 access: <edit|review|draft|none>

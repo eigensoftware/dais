@@ -411,18 +411,42 @@ def _apply_effect(conn, m, task, edge, result, ctx):
     # for the engine prototype; the transition + guards above are what make it safe.
 
 
-def advance_unblocked(conn, m):
-    """Scheduler helper: any task in a state that has a system `unblocked` edge whose blockers are
-    all terminal gets that edge fired. Returns the ids advanced. (Runs each tick in the real loop.)"""
-    advanced = []
+def _system_edge_sweep(conn, m, project, match):
+    """Fire every system edge selected by `match(edge)` on the project's tasks sitting in that
+    edge's from-state. A task whose guards don't hold is skipped (not an error) so one held-back
+    task never blocks the rest of the sweep. Returns the ids advanced."""
+    moved = []
     for e in m.get("edges", []):
-        if e.get("by") == "system" and "unblocked" in e.get("guards", []):
-            rows = conn.execute("SELECT id FROM tasks WHERE status=?", (e["from"],)).fetchall()
-            for (tid,) in rows:
-                if not _blockers_open(conn, tid):
-                    fire(conn, m, tid, e["verb"], "system")
-                    advanced.append(tid)
-    return advanced
+        if e.get("by") != "system" or not match(e):
+            continue
+        q, args = "SELECT id FROM tasks WHERE status=?", [e["from"]]
+        if project:
+            q += " AND project=?"; args.append(project)
+        for (tid,) in conn.execute(q, args).fetchall():
+            try:
+                fire(conn, m, tid, e["verb"], "system")
+                moved.append(tid)
+            except GuardFailure:
+                continue
+    return moved
+
+
+def advance_unblocked(conn, m, project=None):
+    """Scheduler helper, run each dispatch tick: any task in a state with a system `unblocked` edge
+    whose blockers are all terminal gets that edge fired (e.g. blocked -> qa_review once the spawned
+    fix lands). Scoped to `project` so one machine never sweeps another project's same-named states."""
+    return _system_edge_sweep(conn, m, project,
+                              lambda e: "unblocked" in e.get("guards", []))
+
+
+def recover_interrupted(conn, m, project):
+    """Orphan-reconcile, run by the dispatcher only when NO agent is live: fire the machine's own
+    system `interrupt` edge(s) so mid-flight tasks return to whatever state the machine says
+    re-dispatches them — the machine decides where work resumes, never a hardcoded status.
+    (`interrupt` is a harness event name, like the `unblocked` guard: authoring a
+    `by: system, verb: interrupt` edge is how a machine opts into rewind-on-interruption.)"""
+    return _system_edge_sweep(conn, m, project,
+                              lambda e: e.get("verb") == "interrupt")
 
 
 # --------------------------------------------------------------------------- #
@@ -452,9 +476,18 @@ def _main(argv):
         print("usage: machine.py lint <machine> | edges <machine> <state> | "
               "create <db> <machine> <project> <title> [state] | "
               "fire <db> <machine> <task> <verb> <actor> [--confirm] [--typed X] "
-              "[--attest fact] [--verify check]", file=sys.stderr)
+              "[--attest fact] [--verify check] | "
+              "advance <db> <machine> <project> | recover <db> <machine> <project>", file=sys.stderr)
         return 2
     cmd = argv[0]
+    if cmd in ("advance", "recover"):
+        # dispatcher hooks: `advance` fires system `unblocked` edges each tick; `recover` fires
+        # system `interrupt` edges on orphan-reconcile. Prints the ids moved, one per line.
+        conn = _open(argv[1])
+        f = advance_unblocked if cmd == "advance" else recover_interrupted
+        for tid in f(conn, load(argv[2]), argv[3]):
+            print(tid)
+        return 0
     if cmd == "lint":
         errors, warns = lint(load(argv[1]))
         for w in warns:

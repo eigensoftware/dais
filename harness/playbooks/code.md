@@ -1,9 +1,9 @@
 Code work happens in the project's repo (your run starts with the working directory set to it).
 
-Open PRs with `gh` — as ready-for-review, NOT draft; mark the PR ready BEFORE you hand off to QA,
-since a draft can't be merged at the founder gate. When a change is QA-approved and has a PR, park it
-`ready_to_merge` (the founder git-merges it). For a finished NON-code deliverable with no PR (a doc,
-plan, or research pass), use `needs_review` instead.
+Open PRs with `gh` — as ready-for-review, NOT draft; mark the PR ready BEFORE you fire the edge
+that hands the task to QA, since a draft can't be merged at the founder gate. Record the PR on the
+task (`dais task set <id> --pr <url>`) so reviewers and the founder can find it from the board.
+Hand work on by firing your role's machine edge — never by setting a status.
 
 Base any new branch on the freshly-fetched origin/main, never on local refs you happen to find. A
 just-merged PR is squash-merged and its branch DELETED on the remote, but a stale local branch or

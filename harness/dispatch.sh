@@ -12,11 +12,10 @@ for a in "$@"; do [ "$a" = "--dry-run" ] && DRY=1 || PROJECT="$a"; done
 
 # --- reconcile orphaned state (self-heal across stops/starts): drop dead lock files, and if
 #     nothing is actually running, mark any leftover 'running' row interrupted AND rewind its
-#     task to a re-pickable status. A builder parks a task in 'doing' while working, but NO role
-#     `handles` 'doing' (see each project's roles file) — so without this rewind an interrupted
-#     task strands there forever and never resumes, despite the stop() banner promising it would.
-#     'ready' is re-picked by the engineer (handles ready,changes_requested), so the work resumes.
-#     Safe because this only fires when live=0 (no agent holds a lock → nothing is mid-`doing`). ---
+#     task via the MACHINE: fire each project's own system `interrupt` edge(s) (machine.py
+#     recover), so an interrupted task returns to whatever state its machine says re-dispatches
+#     it — no hardcoded statuses, correct for any authored machine. Safe because this only fires
+#     when live=0 (no agent holds a lock → nothing is genuinely mid-flight). ---
 if [ "$DRY" = 0 ]; then
   live=0
   for lk in "$DAIS_HOME"/projects/*/.lock-*; do
@@ -25,7 +24,11 @@ if [ "$DRY" = 0 ]; then
   done
   if [ "$live" = 0 ]; then
     db "UPDATE runs SET status='interrupted', ended_at=datetime('now') WHERE status='running';"
-    db "UPDATE tasks SET status='ready', updated_at=datetime('now') WHERE status='doing';"
+    for p in "$DAIS_HOME"/projects/*/; do
+      [ -d "$p" ] || continue; pj="$(basename "$p")"
+      mp="$(machine_path "$pj")"; [ -n "$mp" ] || continue
+      python3 "$SELF/machine.py" recover "$DB" "$mp" "$pj" 2>/dev/null || true
+    done
   fi
 fi
 
@@ -34,6 +37,19 @@ fi
 #     launchd schedule. ---
 if [ "$DRY" = 0 ] && [ -f "$DAIS_HOME/projects/.paused" ]; then
   echo "${CY}tick: paused (projects/.paused) — run 'dais resume' to continue${C0}"; exit 10
+fi
+
+# --- machine maintenance: fire each project's system `unblocked` edges whose blockers are all
+#     done (machine.py advance) — e.g. blocked → qa_review once the spawned fix lands — so freed
+#     work is dispatchable THIS tick instead of stranding in a waiting state. ---
+if [ "$DRY" = 0 ]; then
+  for p in "$DAIS_HOME"/projects/*/; do
+    [ -d "$p" ] || continue; pj="$(basename "$p")"
+    mp="$(machine_path "$pj")"; [ -n "$mp" ] || continue
+    python3 "$SELF/machine.py" advance "$DB" "$mp" "$pj" 2>/dev/null | while IFS= read -r t; do
+      [ -n "$t" ] && echo "${CD}tick[$pj]: unblocked $t${C0}"
+    done
+  done
 fi
 
 # --- capacity gate: cool down after a recent cap hit (window resets every ~5h) ---

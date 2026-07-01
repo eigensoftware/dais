@@ -75,6 +75,16 @@ link_run_task(){
 # read a single-line field from projects/<project>/project.yaml
 pcfg(){ grep -E "^$2:" "$DAIS_HOME/projects/$1/project.yaml" 2>/dev/null | head -1 | sed "s/^$2:[[:space:]]*//"; }
 
+# machine_path <project> -> the project's resolved machine file. Unconditional: the project's own
+# machine.json wins, else a `machine:` selector in project.yaml, else the `coding` default. Shared
+# by the dais CLI, the dispatcher (recover/advance) and run-agent (the machine-native prompt).
+machine_path(){
+  local local_m="$DAIS_HOME/projects/$1/machine.json"
+  [ -f "$local_m" ] && { printf '%s' "$local_m"; return 0; }
+  local mach; mach="$(pcfg "$1" machine 2>/dev/null)"
+  DAIS_MACH="$mach" python3 -c "import os,sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(M.default_machine_path('$DAIS_ROOT', os.environ.get('DAIS_MACH') or None))" 2>/dev/null
+}
+
 # expand a leading ~ to $HOME
 expand(){ printf '%s' "${1/#\~/$HOME}"; }
 

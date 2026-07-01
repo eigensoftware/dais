@@ -1291,8 +1291,7 @@ class App:
             return _machine_actions(self._machine_of(row), t["status"])
         if kind == "running":                    # a live agent: cancel + metadata
             return [Action("cancel_run", "cancel run", "x", "reverse", True),
-                    Action("set_priority", "set priority", "", "menu", False),
-                    Action("handoff", "handoff", "h", "menu", False)]
+                    Action("set_priority", "set priority", "", "menu", False)]
         return []
 
     def _slot_action(self, row, slot):
@@ -1391,8 +1390,6 @@ class App:
             self.flash = f"cancelled {t['project']}" if rc == 0 else f"cancel failed (exit {rc})"
         elif action_id == "set_priority":
             self._priority_menu(row)
-        elif action_id == "handoff":
-            self._handoff(row)
         elif action_id == "edit_title":
             self._edit_title(row)
         else:
@@ -1407,8 +1404,10 @@ class App:
         if verb == "edit_title":
             return self._edit_title(row)
         if verb == "__start":
+            # the launch is detached (a foreground claude stream would corrupt curses), so this
+            # flash claims INTENT, not success — the RUNNING band / watch log is the truth.
             if self._spawn_agent(["start", t["id"]]):
-                self.flash = f"started {t['id']} — see RUNNING / press L for the log"
+                self.flash = f"launching {t['id']} — watch RUNNING / press L for the log"
             self.refresh()
             return
         edge = next((e for e in MC.edges_from(m, t["status"]) if e.get("verb") == verb), None)
@@ -1474,19 +1473,6 @@ class App:
         rc = self._dispatch(["task", "set", t["id"], "--priority", newp])
         self.refresh()
         self.flash = (f"{t['id']} → {newp}" if rc == 0 else f"priority failed (exit {rc})")
-
-    def _handoff(self, row):
-        t = self._task_of(row)
-        if not t or not t.get("id"):
-            return
-        roles = [r for r in project_roles(self.root, t["project"]) if r != "founder"]
-        idx = self._menu(f"handoff {t['id']} to which role?", roles)
-        if idx is None:
-            return
-        rc = self._dispatch(["handoff", t["id"], roles[idx]])
-        self.refresh()
-        self.flash = (f"{t['id']} → {roles[idx]}" if rc == 0
-                      else f"handoff failed (exit {rc})")
 
     def _edit_title(self, row):
         t = self._task_of(row)

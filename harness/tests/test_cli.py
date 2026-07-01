@@ -162,26 +162,29 @@ class TestPreflight(unittest.TestCase):
         self.assertEqual(r.stderr, "")
 
 
-class TestApproveAssignee(CliTest):
-    def _project_with_builder(self, name, builder_role):
-        d = os.path.join(self.root, "projects", name)
-        os.makedirs(os.path.join(d, "agents"))
-        with open(os.path.join(d, "roles"), "w") as fh:
-            fh.write("# name access trigger handles prec\n")
-            fh.write("%s edit reactive ready,changes_requested 20\n" % builder_role)
+class TestRemovedLegacyVerbs(CliTest):
+    """approve/handoff/backlog were legacy status pokes that bypassed the machine (and could
+    strand a task in a state its machine doesn't have). They exit nonzero, change NOTHING,
+    and point at the machine path (dais edges / dais fire)."""
 
-    def test_assignee_resolved_from_roles(self):
-        self._project_with_builder("demo", "builder")
+    def test_approve_is_removed_and_changes_nothing(self):
         dais(self.root, "task", "add", "demo", "Idea", "--id", "d-1", "--status", "proposed")
         r = dais(self.root, "approve", "d-1")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(q(self.root, "SELECT assignee FROM tasks WHERE id='d-1'")[0], "builder")
-        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='d-1'")[0], "ready")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dais fire", r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='d-1'")[0], "proposed")
 
-    def test_assignee_falls_back_to_engineer(self):
-        dais(self.root, "task", "add", "solo", "Idea", "--id", "s-1", "--status", "proposed")
-        dais(self.root, "approve", "s-1")
-        self.assertEqual(q(self.root, "SELECT assignee FROM tasks WHERE id='s-1'")[0], "engineer")
+    def test_handoff_is_removed_and_changes_nothing(self):
+        dais(self.root, "task", "add", "demo", "Idea", "--id", "d-2", "--status", "ready")
+        r = dais(self.root, "handoff", "d-2", "qa")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dais fire", r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='d-2'")[0], "ready")
+
+    def test_backlog_is_removed(self):
+        r = dais(self.root, "backlog", "demo")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dais status", r.stdout + r.stderr)
 
 
 class TestRepoPath(unittest.TestCase):
@@ -285,6 +288,47 @@ class TestWorkspaceContextInjection(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("Workspace context:", r.stdout)
         self.assertIn("Project context", r.stdout)         # project line unaffected
+
+
+class TestMachinePromptInjection(CliTest):
+    """The agent prompt is machine-native: the coordination block is ALWAYS injected (every
+    project resolves a machine — its own machine.json, a `machine:` selector, or the coding
+    default), derived from that machine (states + this role's own edges), with NO legacy
+    closed-set status vocabulary. Asserted via the DAIS_SHOW_PROMPT seam."""
+
+    def _prompt(self, agent="engineer"):
+        dais(self.root, "scaffold", "demo")
+        base = tempfile.mkdtemp(prefix="dais-repos-")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        os.makedirs(os.path.join(base, "demo"))
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_AGENT_REPOS": base, "DAIS_SHOW_PROMPT": "1"})
+        return subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"),
+                               "demo", agent],
+                              capture_output=True, text=True, env=e, cwd=self.root).stdout
+
+    def test_machine_block_always_injected(self):
+        # scaffolded projects have machine.json but NO `machine:` key in project.yaml —
+        # the block must inject anyway (the old gate on `machine:` left agents blind).
+        out = self._prompt()
+        self.assertIn("dais fire", out)
+        self.assertIn("dais edges", out)
+        self.assertIn("proposal_review", out)              # the machine's state vocabulary
+        self.assertIn("NEVER set a status directly", out)
+
+    def test_roles_own_edges_are_listed(self):
+        out = self._prompt("engineer")
+        self.assertIn("claim", out)                         # ready --claim--> doing
+        self.assertIn("complete", out)                      # doing --complete--> qa_review
+        qa = self._prompt("qa")
+        self.assertIn("fail", qa)                           # qa_review --fail--> blocked
+
+    def test_no_legacy_status_vocabulary(self):
+        out = self._prompt()
+        for legacy in ("CLOSED set", "needs_qa", "ready_to_merge", "needs_review",
+                       "changes_requested", "dais handoff", "dais backlog"):
+            self.assertNotIn(legacy, out)
 
 
 class TestRolePlaybook(CliTest):
@@ -714,15 +758,26 @@ class TestActionsVerb(CliTest):
 
 
 class TestStartVerb(CliTest):
-    """`dais start <id>` runs the reactive role whose `handles` includes the
-    task's status. Non-runnable statuses print the fix and exit nonzero."""
+    """`dais start <id>` runs the role the MACHINE dispatches for the task's state
+    (machine.dispatch_role — the same resolution the scheduler uses). States with no
+    dispatch role explain themselves by band and exit nonzero."""
 
-    def test_proposed_is_guarded(self):
+    def test_founder_gate_waits_on_you(self):
+        # proposal_review has only founder edges (band NEEDS YOU) — nothing to launch.
         dais(self.root, "task", "add", "demo", "Idea",
-             "--id", "s-1", "--status", "proposed")
+             "--id", "s-1", "--status", "proposal_review")
         r = dais(self.root, "start", "s-1")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("approve it first", r.stdout + r.stderr)
+        self.assertIn("waits on YOU", r.stdout + r.stderr)
+        self.assertIn("dais edges s-1", r.stdout + r.stderr)
+
+    def test_waiting_state_explains_the_system_event(self):
+        # blocked has only a system `unblocked` edge (band WAITING) — no agent to launch.
+        dais(self.root, "task", "add", "demo", "Stuck",
+             "--id", "s-4", "--status", "blocked")
+        r = dais(self.root, "start", "s-4")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("system event", r.stdout + r.stderr)
 
     def test_done_has_nothing_to_run(self):
         dais(self.root, "task", "add", "demo", "Shipped",
@@ -736,16 +791,25 @@ class TestStartVerb(CliTest):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no such task", r.stdout + r.stderr)
 
-    def test_ready_resolves_the_handling_role(self):
-        # the scaffold template's roles has engineer handling `ready`. run-agent.sh
-        # fails fast (no real repo/claude), so we don't assert success — only that
-        # the role resolved, proven by the "starting <proj>/<role>" line printed
-        # BEFORE the exec.
+    def test_ready_resolves_the_machine_dispatch_role(self):
+        # ready dispatches the engineer (machine edge, not roles-file `handles`).
+        # run-agent.sh fails fast (no real repo/claude), so we don't assert success —
+        # only that the role resolved, proven by the "starting <proj>/<role>" line
+        # printed BEFORE the exec.
         dais(self.root, "scaffold", "demo")
         dais(self.root, "task", "add", "demo", "Build it",
              "--id", "s-3", "--status", "ready")
         r = dais(self.root, "start", "s-3")
         self.assertIn("starting demo/engineer", r.stdout)
+
+    def test_proposed_resolves_the_lead(self):
+        # proposed dispatches the LEAD under the machine (legacy start refused it and
+        # pointed at the removed `dais approve`).
+        dais(self.root, "scaffold", "demo2")
+        dais(self.root, "task", "add", "demo2", "Idea",
+             "--id", "s-5", "--status", "proposed")
+        r = dais(self.root, "start", "s-5")
+        self.assertIn("starting demo2/lead", r.stdout)
 
 
 if __name__ == "__main__":

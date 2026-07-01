@@ -81,18 +81,31 @@ PLAYBOOK=""
 Working conventions ($PB) — how this kind of work is done here:
 $(cat "$PB_FILE")"
 
-# Machine coordination: if the project runs an authored state machine, the agent advances a task by
-# FIRING an edge (dais fire), never by inventing a status. Empty for legacy status-routed projects.
-MACHINE_COORD=""
-MREF="$(pcfg "$PROJECT" machine)"
-if [ -n "$MREF" ]; then
-  MACHINE_COORD="This project runs an authored state machine ('$MREF'). Advance a task by FIRING an edge — never invent a status:
-  - See a task's fireable edges:  $DAIS_ROOT/dais edges <task-id>
-  - Fire one (you act as '$AGENT'):  $DAIS_ROOT/dais fire <task-id> <verb>   (guards, when the edge needs them: --confirm | --typed <id> | --attest <fact> | --verify <check>)
-  Do the work your role owns for the task's current state, then fire the edge that hands it to the next role. Effects (spawning follow-up tasks, batching a release) happen automatically when you fire the edge that declares them.
+# Machine coordination: EVERY project runs an authored state machine (project machine.json →
+# `machine:` selector → the coding default). The agent advances a task by FIRING an edge
+# (dais fire), never by setting a status. The state vocabulary and this role's own edges are
+# DERIVED from the machine, so the prompt always matches exactly what the CLI accepts.
+MP="$(machine_path "$PROJECT")"
+M_STATES="$(DAIS_MP="$MP" python3 -c "
+import os, sys; sys.path.insert(0, '$DAIS_ROOT/harness'); import machine as M
+print(', '.join(M.load(os.environ['DAIS_MP']).get('states', {})))" 2>/dev/null)"
+M_EDGES="$(DAIS_MP="$MP" DAIS_AG="$AGENT" python3 -c "
+import os, sys; sys.path.insert(0, '$DAIS_ROOT/harness'); import machine as M
+m = M.load(os.environ['DAIS_MP'])
+for e in m.get('edges', []):
+    if e.get('by') == os.environ['DAIS_AG']:
+        g = ('   (guards: ' + ', '.join(e['guards']) + ')') if e.get('guards') else ''
+        print('  - task in %s:  dais fire <task-id> %s   -> %s%s' % (e['from'], e['verb'], e['to'], g))" 2>/dev/null)"
+[ -n "$M_EDGES" ] || M_EDGES="  (none — this role isn't a machine actor; work the board via 'dais tasks' and propose new work as tasks at the machine's entry state)"
+MACHINE_COORD="This project runs an authored task state machine. Task states are: ${M_STATES:-see dais edges}.
+Advance a task ONLY by firing one of its edges as your role ('$AGENT') — NEVER set a status directly and NEVER invent one:
+  - A task's fireable edges:  $DAIS_ROOT/dais edges <task-id>
+  - Fire one:                 $DAIS_ROOT/dais fire <task-id> <verb>   (guards, when the edge needs them: --confirm | --typed <id> | --attest <fact> | --verify <check>)
+Your role's own edges in this machine:
+$M_EDGES
+Do the work your role owns for the task's current state, then fire the edge that hands it to the next role. Effects (spawning follow-up tasks, batching a release) happen automatically when you fire the edge that declares them. A task that spans multiple runs simply stays in its state — the scheduler re-dispatches you next tick, so don't park it anywhere special.
 
 "
-fi
 
 STANDING="You are running headless as the **$AGENT** for the '$PROJECT' project.
 
@@ -101,15 +114,12 @@ Stage goal: $STAGE_GOAL
 ${WS_CONTEXT}Project context + memory: FIRST read $PDIR/CONTEXT.md — the goal, targets/metrics, founder decisions (honor them), and hard-won gotchas. If you discover something durable this run (a decision, a gotcha, a recurring fix), record it with: $DAIS_ROOT/dais learn $PROJECT \"one concise line\".
 
 ${MACHINE_COORD}Coordination runs through the dais CLI (at $DAIS_ROOT/dais) backed by a shared SQLite db — that is the single source of truth for what to work on and how to hand off:
-  - Your queue:      $DAIS_ROOT/dais tasks $PROJECT --assignee $AGENT
-  - The backlog:     $DAIS_ROOT/dais backlog $PROJECT
-  - Update a task:   $DAIS_ROOT/dais task set <id> --status <s> [--pr <url>] [--notes \"...\"]
-  - Hand off:        $DAIS_ROOT/dais handoff <id> <role> [\"note\"]   (sets the status that role handles)
+  - Your queue:        $DAIS_ROOT/dais tasks $PROJECT --assignee $AGENT
+  - All project tasks: $DAIS_ROOT/dais tasks $PROJECT
+  - Task metadata:     $DAIS_ROOT/dais task set <id> [--pr <url>] [--notes \"...\"] [--priority <p>]   (metadata ONLY — state changes go through 'dais fire')
+  - New task:          $DAIS_ROOT/dais task add $PROJECT \"title\" [--notes \"...\"]   (enters at the machine's entry state)
 
-Statuses are a CLOSED set — use ONLY: backlog, ready, doing, needs_qa, changes_requested, ready_to_merge, needs_review, done, blocked, cancelled, deferred (plus any custom status your project's roles define, e.g. needs_legal). NEVER invent a status (e.g. 'in_progress') — the CLI rejects unknown ones. A task that spans multiple runs stays in a re-pickable status (e.g. ready / changes_requested) so it resumes next run; don't park it in a made-up status.
-Finished work parks at a founder gate: use needs_review for a deliverable the founder reviews and closes — set it with \`dais task set <id> --status needs_review --assignee founder\`. (ready_to_merge is the code-specific variant for a QA-approved change that has a PR the founder merges — your working conventions below say when it applies. \`handoff <id> founder\` resolves to ready_to_merge, so don't use it for no-PR work.)
-
-Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, update the task's status / hand it off per your role.${PLAYBOOK}"
+Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, fire the edge that hands the work on per your role.${PLAYBOOK}"
 
 # Debug seam: dump the assembled agent prompt and exit, WITHOUT calling claude. Lets tests
 # assert prompt wiring (e.g. workspace-context injection) without an end-to-end model run.

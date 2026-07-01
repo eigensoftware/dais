@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""dais control panel -- the responsive multi-pane TUI (a view rebuild of `dais top`).
+"""dais control panel -- the responsive multi-pane TUI behind `dais top`.
 
 PanelApp subclasses dashboard.App: it inherits all data/action-engine/log/selection
-logic and overrides only the view (draw/handle) to render panes into a responsive
-layout. This is the default `dais top`; `DAIS_CLASSIC=1 dais top` opts back into the
-classic single-pane UI. The panel reads as a mission-control cockpit: focal-point vitals
-(a distinct-coloured top readout), status dots, bands that collapse when empty, and an
-outlined inspector.
+logic and provides the view (draw/handle), rendering panes into a responsive layout.
+The panel reads as a mission-control cockpit: focal-point vitals (a distinct-coloured
+top readout), status dots, machine-derived bands, and an outlined inspector.
 """
 from collections import namedtuple
 
