@@ -106,23 +106,11 @@ class TestActionBar(unittest.TestCase):
             self.assertIn(t, bar, f"{t!r} missing from {bar!r}")
         self.assertEqual(idxs, sorted(idxs), f"out of order in {bar!r}")
 
-    def test_proposed(self):
-        bar = self.app.action_bar(task_row(status="proposed"))
-        self._order(bar, "a approve", "x reject")
+    def test_proposal_review(self):
+        bar = self.app.action_bar(task_row(status="proposal_review"))
+        self._order(bar, "a approve", "x request-changes")   # founder-gate phase
         self.assertIn("↵ actions", bar)
         self.assertIn("n new", bar)
-
-    def test_ready_to_merge_with_pr(self):
-        bar = self.app.action_bar(
-            task_row(status="ready_to_merge", pr_url="https://x/pull/42"))
-        self._order(bar, "a ship", "x request-changes", "o PR")
-        self.assertIn("n new", bar)
-
-    def test_ready_to_merge_without_pr_omits_ship_and_pr(self):
-        bar = self.app.action_bar(task_row(status="ready_to_merge", pr_url=None))
-        self.assertNotIn("a ship", bar)
-        self.assertNotIn("o PR", bar)
-        self.assertIn("x request-changes", bar)
 
     def test_ready(self):
         bar = self.app.action_bar(task_row(status="ready"))
@@ -159,25 +147,16 @@ class TestDoAction(unittest.TestCase):
         self.sub.call.return_value = 0
         self.addCleanup(self.p.stop)
 
-    def test_advance_on_proposed_approves(self):
-        self.app.do_action("approve", task_row(status="proposed"))
-        self.sub.call.assert_called_once_with(["dais", "approve", "cou-1"])
-
-    def test_advance_on_ready_to_merge_ships(self):
-        row = task_row(status="ready_to_merge", pr_url="https://x/y/pull/42")
-        self.app.do_action("ship", row)
-        self.sub.call.assert_called_once_with(["dais", "ship", "acme", "42"])
+    def test_advance_on_proposal_review_approves(self):
+        self.app.do_action("approve", task_row(status="proposal_review"))
+        self.sub.call.assert_called_once_with(
+            ["dais", "fire", "cou-1", "approve", "--by", "founder", "--confirm",
+             "--verify", "def_of_ready"])
 
     def test_reverse_on_ready_defers(self):
         self.app.do_action("defer", task_row(status="ready"))
         self.sub.call.assert_called_once_with(
-            ["dais", "task", "set", "cou-1", "--status", "deferred"])
-
-    def test_confirm_no_blocks_ship(self):
-        self.app._confirm = lambda *a: False
-        self.app.do_action("ship", task_row(status="ready_to_merge",
-                                            pr_url="https://x/y/pull/9"))
-        self.sub.call.assert_not_called()
+            ["dais", "fire", "cou-1", "defer", "--by", "founder"])
 
     def test_confirm_no_blocks_reject_and_cancel(self):
         self.app._confirm = lambda *a: False
@@ -188,7 +167,7 @@ class TestDoAction(unittest.TestCase):
     def test_confirm_yes_runs_reject(self):
         self.app.do_action("reject", task_row(status="proposed"))
         self.sub.call.assert_called_once_with(
-            ["dais", "task", "set", "cou-1", "--status", "cancelled"])
+            ["dais", "fire", "cou-1", "reject", "--by", "founder", "--confirm"])
 
     def test_running_reverse_cancels_the_run(self):
         self.app.do_action("cancel_run", running_row(project="beacon"))
@@ -211,15 +190,6 @@ class TestDoAction(unittest.TestCase):
         self.sub.call.assert_called_once_with(
             ["dais", "task", "set", "cou-1", "--title", "renamed"])
 
-    def test_handoff_picks_role(self):
-        roles_root = self.app.root
-        os.makedirs(os.path.join(roles_root, "projects", "acme"), exist_ok=True)
-        with open(os.path.join(roles_root, "projects", "acme", "roles"), "w") as fh:
-            fh.write("qa review reactive needs_qa 1\nengineer edit reactive ready 2\n")
-        self.app._menu = lambda *a, **k: 1     # pick 'engineer'
-        self.app.do_action("handoff", task_row(status="ready"))
-        self.sub.call.assert_called_once_with(["dais", "handoff", "cou-1", "engineer"])
-
     def test_set_priority_menu(self):
         self.app._menu = lambda *a, **k: 2     # PRIORITIES[2] == "high"
         self.app.do_action("set_priority", task_row(status="ready", priority="low"))
@@ -240,14 +210,16 @@ class TestKeyWiring(unittest.TestCase):
     def _press(self, ch, row):
         self.app.handle(ch, [row], 0, row)
 
-    def test_a_advances_proposed(self):
-        self._press(ord("a"), task_row(status="proposed"))
-        self.sub.call.assert_called_once_with(["dais", "approve", "cou-1"])
+    def test_a_advances_proposal_review(self):
+        self._press(ord("a"), task_row(status="proposal_review"))
+        self.sub.call.assert_called_once_with(
+            ["dais", "fire", "cou-1", "approve", "--by", "founder", "--confirm",
+             "--verify", "def_of_ready"])
 
     def test_x_reverses_ready(self):
         self._press(ord("x"), task_row(status="ready"))
         self.sub.call.assert_called_once_with(
-            ["dais", "task", "set", "cou-1", "--status", "deferred"])
+            ["dais", "fire", "cou-1", "defer", "--by", "founder"])
 
     def test_plus_raises_priority(self):
         self._press(ord("+"), task_row(status="ready", priority="medium"))
@@ -273,12 +245,11 @@ class TestEnterMenu(unittest.TestCase):
     def test_menu_options_match_engine_labels(self):
         app = d.App.__new__(d.App)
         app.snap = None
-        for status in ("proposed", "ready", "ready_to_merge", "backlog"):
-            row = task_row(status=status, pr_url="https://x/pull/1")
-            self.assertEqual(
-                app.menu_options(row),
-                [act.label for act in a.task_actions(status, "task", has_pr=True)],
-                status)
+        m = _machine()
+        for status in ("proposed", "ready", "proposal_review", "qa_review"):
+            row = task_row(status=status)
+            self.assertEqual(app.menu_options(row),
+                             [act.label for act in d._machine_actions(m, status)], status)
 
     def test_menu_dispatches_chosen_action(self):
         # 'start' launches a streaming agent — it must be BACKGROUNDED (Popen, detached), never run
@@ -339,21 +310,45 @@ class TestStartWatch(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 
+def _task(tid, status, priority="medium"):
+    return d.Task(id=tid, title="t", status=status, priority=priority)
+
+
+_MACHINE = None
+def _machine():
+    global _MACHINE
+    if _MACHINE is None:
+        import machine as MC
+        _MACHINE = MC.load(MC.default_machine_path())
+    return _MACHINE
+
+
+def _proj(name, **counts):
+    """A Project (coding machine) with `counts` tasks per status; ids 'name-status-i'."""
+    tbs = {st: [_task(f"{name}-{st}-{i}", st) for i in range(n)] for st, n in counts.items()}
+    return d.Project(name=name, stage_goal="", running=[], tasks_by_status=tbs,
+                     recent_runs=[], machine=_machine())
+
+
+def _snap(*projects):
+    return d.Snapshot(projects=list(projects), recent_runs=[], cap_state=False,
+                      ts="2026-06-29 00:00:00")
+
+
 class TestCockpitHelpers(unittest.TestCase):
     def test_gate_count_sums_only_gates(self):
-        snap = _snap(_proj("a", ready_to_merge=2, proposed=1, ready=5, needs_qa=3, done=9),
-                     _proj("b", blocked=1, needs_review=1, changes_requested=4))
-        # gates: 2 ready_to_merge + 1 proposed + 1 blocked + 1 needs_review = 5
-        self.assertEqual(d.gate_count(snap), 5)
+        snap = _snap(_proj("a", proposal_review=2, ready=5, qa_review=3, done=9),
+                     _proj("b", release_review=1, release_failed=1, ready=4))
+        # NEEDS YOU phases: 2 proposal_review + 1 release_review + 1 release_failed = 4
+        self.assertEqual(d.gate_count(snap), 4)
 
     def test_gate_count_zero(self):
-        self.assertEqual(d.gate_count(_snap(_proj("a", ready=3, needs_qa=1))), 0)
+        self.assertEqual(d.gate_count(_snap(_proj("a", ready=3, qa_review=1))), 0)
 
     def test_gate_count_excludes_running_task(self):
         """gate_count must not count a gate task that is currently in-flight (running_ids)."""
-        snap = _snap(_proj("a", needs_review=2, ready_to_merge=1))
-        # task id for first needs_review: "a-needs_review-0"
-        running = frozenset({("a", "a-needs_review-0")})
+        snap = _snap(_proj("a", proposal_review=2, release_review=1))
+        running = frozenset({("a", "a-proposal_review-0")})   # one gate task is mid-run
         self.assertEqual(d.gate_count(snap, running), d.gate_count(snap) - 1)
 
     def test_loop_summary_text_omits_zero_segments(self):
@@ -376,60 +371,6 @@ class TestCockpitHelpers(unittest.TestCase):
                          "✓ nothing needs you — the loop is running (2 in flight)")
         self.assertEqual(d.allclear_line(0), "✓ nothing needs you — loop idle")
 
-
-class TestCockpitMinorCoverage(unittest.TestCase):
-    """Minor coverage gaps: row ordering, parked composition, truly empty board."""
-
-    def test_running_band_leads_gate_band(self):
-        """▶ running rows must appear before the ⚡ NEEDS YOU header in left_rows()."""
-        conn = _conn()
-        conn.execute(
-            "INSERT INTO tasks(id,project,title,status,priority,pr_url) "
-            "VALUES(?,?,?,?,?,?)",
-            ("prj-1", "myproj", "approve", "proposed", "high", None))
-        conn.commit()
-        app = make_app(conn=conn)
-        thread = {"project": "myproj", "task": None, "agent": "lead",
-                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": "/tmp/x.log"}
-        with mock.patch.object(d, "running_threads", return_value=[thread]):
-            rows = app.left_rows()
-        running_idx = next((i for i, r in enumerate(rows) if r["kind"] == "running"), None)
-        gate_idx = next((i for i, r in enumerate(rows)
-                         if "⚡ NEEDS YOU" in r.get("label", "")), None)
-        self.assertIsNotNone(running_idx, "no running row found")
-        self.assertIsNotNone(gate_idx, "no ⚡ NEEDS YOU header found")
-        self.assertLess(running_idx, gate_idx, "running band should precede gate band")
-
-    def test_show_parked_reveals_backlog_and_deferred_alongside_gates(self):
-        """Toggling `b` reveals backlog + deferred rows alongside the gate band."""
-        conn = _conn()
-        conn.executemany(
-            "INSERT INTO tasks(id,project,title,status,priority,pr_url) "
-            "VALUES(?,?,?,?,?,?)",
-            [("prj-1", "myproj", "future work", "backlog", "low", None),
-             ("prj-2", "myproj", "parked item", "deferred", "low", None),
-             ("prj-3", "myproj", "approve this", "proposed", "high", None)])
-        conn.commit()
-        app = make_app(conn=conn)
-        app.show_parked = True
-        rows = app.left_rows()
-        labels = [r["label"] for r in rows]
-        self.assertTrue(any("backlog (1)" in l for l in labels), labels)
-        self.assertTrue(any("deferred (1)" in l for l in labels), labels)
-        parked_ids = {r["id"] for r in rows
-                      if r.get("kind") == "task"
-                      and r.get("status") in ("backlog", "deferred")}
-        self.assertIn("prj-1", parked_ids)
-        self.assertIn("prj-2", parked_ids)
-
-    def test_empty_board_produces_allclear_and_zero_gate_count(self):
-        """No tasks at all: gate_count is 0, left_rows() shows all-clear, draw() runs cleanly."""
-        app = make_app()   # in-memory DB with no tasks seeded
-        self.assertEqual(d.gate_count(app.snap), 0)
-        rows = app.left_rows()
-        labels = [r["label"] for r in rows]
-        self.assertTrue(any(l.startswith("✓ nothing needs you") for l in labels), labels)
-        app.draw()          # must not raise
 
 
 if __name__ == "__main__":

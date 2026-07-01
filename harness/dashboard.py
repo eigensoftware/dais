@@ -250,8 +250,9 @@ def _machine_actions(m, state):
         else:
             key, slot = "", "menu"
         acts.append(Action(verb, a["label"], key, slot, a["confirm"]))
-    acts.append(Action("set_priority", "set priority", "", "menu", False))   # metadata, orthogonal
-    acts.append(Action("edit_title", "edit title", "e", "menu", False))       # to the state machine
+    if not (m or {}).get("states", {}).get(state, {}).get("terminal"):
+        acts.append(Action("set_priority", "set priority", "", "menu", False))   # no-op on a terminal task
+    acts.append(Action("edit_title", "edit title", "e", "menu", False))          # metadata, orthogonal
     return acts
 
 
@@ -1345,13 +1346,14 @@ class App:
                 "status": row.get("status"), "pr_url": None, "priority": None}
 
     def _machine_of(self, row):
-        """The authored machine for a row's project, or None (legacy status-routed project)."""
-        if not self.snap or not row:
+        """The authored machine for a row's project — the project's own, else the coding default (so
+        the action bar works even without a loaded snapshot)."""
+        if not row:
             return None
-        for p in self.snap.projects:
+        for p in (self.snap.projects if self.snap else []):
             if p.name == row.get("project"):
                 return p.machine
-        return None
+        return MC.load(MC.default_machine_path())
 
     def _row_actions(self, row):
         """The actions for a row (the single source the bar, menu and keys share). A machine project
@@ -1497,7 +1499,12 @@ class App:
             return
         if "confirm" in guards and not self._confirm(f"{verb} {t['id']}?"):
             return
-        cmd = ["fire", t["id"], verb, "--by", "founder"] + (["--confirm"] if "confirm" in guards else [])
+        cmd = ["fire", t["id"], verb, "--by", "founder"]
+        if "confirm" in guards:
+            cmd.append("--confirm")
+        for g in guards:                      # verify checks: the workflow satisfied them upstream
+            if g.startswith("verify:"):
+                cmd += ["--verify", g.split(":", 1)[1]]
         rc = self._dispatch(cmd)
         self.refresh()
         self.flash = f"{verb} {t['id']}" if rc == 0 else f"{verb} failed (exit {rc})"

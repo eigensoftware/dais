@@ -169,7 +169,7 @@ def edges_from(m, state):
 def dispatch_role(m, state):
     """The single agent role the scheduler launches for a task in `state`, or None (parks for a
     human / awaits a system edge). Ambiguity is an E3 lint error, so at runtime it's <=1."""
-    if state not in m.get("states", {}):
+    if state not in (m or {}).get("states", {}):
         return None
     agents = {e["by"] for e in edges_from(m, state) if e.get("by") not in IMPLICIT_ACTORS}
     return next(iter(agents)) if len(agents) == 1 else None

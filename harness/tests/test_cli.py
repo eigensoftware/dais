@@ -697,21 +697,20 @@ class TestActionsVerb(CliTest):
     """`dais actions <id>` lists the founder actions for a task plus the exact
     command for each (it shells harness/actions.py's __main__ lister)."""
 
-    def test_lists_actions_for_a_proposed_task(self):
+    def test_lists_edges_for_a_proposed_task(self):
         dais(self.root, "scaffold", "demo")
         dais(self.root, "task", "add", "demo", "An initiative",
              "--id", "a-1", "--status", "proposed")
-        r = dais(self.root, "actions", "a-1")
+        r = dais(self.root, "actions", "a-1")            # alias for `dais edges`
         out = r.stdout + r.stderr
         self.assertEqual(r.returncode, 0, out)
-        self.assertIn("dais approve a-1", r.stdout)   # the advance action's command
-        self.assertIn("reject", r.stdout)             # the reverse action's label
-        self.assertIn("new task", r.stdout)           # the trailing "new task" line
+        self.assertIn("submit", r.stdout)               # the lead's edge from proposed
+        self.assertIn("proposal_review", r.stdout)      # its target state
 
     def test_unknown_task_errors(self):
         r = dais(self.root, "actions", "nope")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("no such task", r.stdout + r.stderr)
+        self.assertIn("no task", r.stdout + r.stderr)
 
 
 class TestStartVerb(CliTest):

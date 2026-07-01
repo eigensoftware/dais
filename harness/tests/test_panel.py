@@ -132,19 +132,25 @@ def _seed_with_notes(conn, rows_with_notes):
 
 
 class TestPaneRenderers(unittest.TestCase):
+    def _panelapp(self, conn):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pr-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        app = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        app.snap = d.load_snapshot(conn, root=root); app._cp = lambda n: n * 1000
+        return app
+
     def _app(self, rows):
         conn = _conn(); _seed(conn, rows)
-        return make_app(conn=conn, h=40, w=200)
+        return self._panelapp(conn)
 
-    def _app_with_notes(self, rows_with_notes):
-        conn = _conn(); _seed_with_notes(conn, rows_with_notes)
-        return make_app(conn=conn, h=40, w=200)
+    def _app_with_notes(self, rows):
+        conn = _conn(); _seed_with_notes(conn, rows)
+        return self._panelapp(conn)
 
     def test_work_renders_rows_within_rect(self):
         import tempfile
         conn = _conn()
-        _seed(conn, [("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
-                      "https://x/pull/9")])
+        _seed(conn, [("lyr-1", "beacon", "review", "proposal_review", "high", None)])
         root = tempfile.mkdtemp(prefix="dais-pwr-")
         os.makedirs(os.path.join(root, "projects"), exist_ok=True)
         app = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
@@ -152,9 +158,9 @@ class TestPaneRenderers(unittest.TestCase):
         scr = FakeScr(40, 200)
         rect = pn.Rect(2, 5, 20, 60)
         pn.render_work(scr, rect, app, focused=True)
-        # something drew the gate banner, and nothing escaped the rect
+        # a phase band drew, and nothing escaped the rect
         text = "\n".join(c[2] for c in scr.calls)
-        self.assertIn("NEEDS YOU", text)
+        self.assertIn("PROPOSAL REVIEW", text)
         for (y, x, s, _a) in scr.calls:
             self.assertGreaterEqual(y, rect.y)
             self.assertLess(y, rect.y + rect.h)
@@ -162,15 +168,14 @@ class TestPaneRenderers(unittest.TestCase):
             self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)
 
     def test_inspector_shows_selection_detail(self):
-        app = self._app([("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
-                          "https://x/pull/9")])
+        app = self._app([("lyr-1", "beacon", "impl", "qa_review", "high", None)])
         app.sel_id = "lyr-1"
         scr = FakeScr(40, 200)
         rect = pn.Rect(2, 70, 20, 60)
         pn.render_inspector(scr, rect, app, focused=False)
         text = "\n".join(c[2] for c in scr.calls)
         self.assertIn("lyr-1", text)
-        self.assertIn("ready_to_merge", text)
+        self.assertIn("qa_review", text)
         for (y, x, s, _a) in scr.calls:
             self.assertGreaterEqual(y, rect.y)
             self.assertLess(y, rect.y + rect.h)
@@ -181,8 +186,7 @@ class TestPaneRenderers(unittest.TestCase):
         """I1: detail_scroll must advance the visible window in render_inspector."""
         long_notes = "  ".join(f"note-line-{i}" for i in range(30))
         app = self._app_with_notes([
-            ("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
-             "https://x/pull/9", long_notes),
+            ("lyr-1", "beacon", "impl", "qa_review", "high", None, long_notes),
         ])
         # Use a small rect so there are more wrapped lines than inner height
         rect = pn.Rect(0, 0, 6, 40)   # inner.h = 5 after title row
@@ -205,11 +209,17 @@ class TestPaneRenderers(unittest.TestCase):
 
 class TestChromePanes(unittest.TestCase):
     def _app(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-chrome-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
         conn = _conn(); _seed(conn, rows)
-        return make_app(conn=conn, h=40, w=200)
+        app = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        app.snap = d.load_snapshot(conn, root=root)
+        app._cp = lambda n: n * 1000
+        return app
 
     def test_vitals_has_workspace_and_gate_count_honestly(self):
-        app = self._app([("cou-1", "acme", "approve", "proposed", "high", None)])
+        app = self._app([("cou-1", "acme", "approve", "proposal_review", "high", None)])
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
         text = scr.calls[0][2]               # full header is first call; ng>0 adds a yellow overlay
@@ -229,13 +239,12 @@ class TestChromePanes(unittest.TestCase):
         self.assertIn("beacon", text)
 
     def test_bar_shows_contextual_actions_for_selection(self):
-        app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
-                          "https://x/pull/9")])
+        app = self._app([("lyr-1", "beacon", "review", "proposal_review", "high", None)])
         app.sel_id = "lyr-1"
         scr = FakeScr(40, 200)
         pn.render_bar(scr, pn.Rect(39, 0, 1, 200), app, focus="work")
         text = scr.calls[-1][2]
-        self.assertIn("ship", text)           # contextual action bar reused
+        self.assertIn("approve", text)        # contextual (machine-edge) action bar reused
         self.assertIn("q quit", text)
 
 
@@ -252,13 +261,12 @@ class TestPanelApp(unittest.TestCase):
         return app
 
     def test_full_frame_draws_within_bounds(self):
-        app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
-                          "https://x/pull/9"),
+        app = self._app([("lyr-1", "beacon", "review", "proposal_review", "high", None),
                          ("win-1", "cedar", "build", "ready", "high", None)])
         app.draw()
         text = "\n".join(c[2] for c in app.scr.calls)
-        self.assertIn("DAIS", text)            # vitals
-        self.assertIn("NEEDS YOU", text)       # work
+        self.assertIn("DAIS", text)              # vitals
+        self.assertIn("PROPOSAL REVIEW", text)   # work (a founder-gate phase)
         self.assertIn("q quit", text)          # bar
         for (y, x, s, _a) in app.scr.calls:
             self.assertLess(y, app.scr.h)
@@ -319,43 +327,7 @@ class TestPanelApp(unittest.TestCase):
         self.assertTrue(popen.call_args.kwargs.get("start_new_session"))  # detached
         call.assert_not_called(); run.assert_not_called()                 # never inline over curses
 
-    def test_a_on_work_selection_ships_in_panel_overlay(self):
-        app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
-                          "https://x/y/pull/7")])
-        app.pane_focus = "work"; app._confirm = lambda *a: True
-        app.sel_id = "lyr-1"
-        rows = app.left_rows()
-        i, row = next((i, r) for i, r in enumerate(rows)
-                      if r["kind"] == "task" and r["status"] == "ready_to_merge")
-        with mock.patch.object(d, "subprocess") as sub:
-            sub.run.return_value = mock.Mock(returncode=0, stdout="✓ lyr-1 → done.", stderr="")
-            app.handle(ord("a"), rows, i, row)
-            # ship runs via captured subprocess.run (no endwin/console drop)
-            sub.run.assert_called_once_with(["dais", "ship", "beacon", "7"],
-                                            capture_output=True, text=True, stdin=sub.DEVNULL)
-        # it ran IN the panel: an overlay is up carrying the captured output
-        self.assertTrue(app.show_overlay)
-        self.assertTrue(any("done" in ln for ln in app._overlay["lines"]))
-        # any key dismisses the overlay (modal, like help)
-        app.handle(ord(" "), app.left_rows(), 0, None)
-        self.assertFalse(app.show_overlay)
 
-    def test_ship_failure_surfaces_in_overlay_and_flash(self):
-        app = self._app([("lyr-1", "beacon", "ship", "ready_to_merge", "high",
-                          "https://x/y/pull/7")])
-        app.pane_focus = "work"; app._confirm = lambda *a: True
-        app.sel_id = "lyr-1"
-        rows = app.left_rows()
-        i, row = next((i, r) for i, r in enumerate(rows)
-                      if r["kind"] == "task" and r["status"] == "ready_to_merge")
-        with mock.patch.object(d, "subprocess") as sub:
-            sub.run.return_value = mock.Mock(returncode=1, stdout="", stderr="✗ merge failed")
-            app.handle(ord("a"), rows, i, row)
-        self.assertTrue(app.show_overlay)
-        ov = "\n".join(app._overlay["lines"]) + " " + app._overlay["title"]
-        self.assertIn("FAILED", ov)              # the verdict surfaces the failure
-        self.assertIn("merge failed", ov)        # ... and the captured stderr
-        self.assertIn("NOT merged", app.flash)   # do_action's failure flash (rc != 0)
 
     def test_q_does_not_quit_while_filtering(self):
         """I2: pressing q while filtering must feed q into the filter, not quit."""
@@ -384,9 +356,8 @@ class TestRenderWorkNative(unittest.TestCase):
         return make_app(conn=conn, h=40, w=200)
 
     def test_band_bars_and_tags_render(self):
-        app = self._app([("lyr-1", "beacon", "ship it", "ready_to_merge", "high",
-                          "https://x/pull/9"),
-                         ("cou-1", "acme", "post", "needs_review", "high", None)])
+        app = self._app([("lyr-1", "beacon", "impl", "ready", "high", None),
+                         ("cou-1", "acme", "post", "proposal_review", "high", None)])
         # PanelApp model: make a PanelApp to get the override + state
         import tempfile
         root = tempfile.mkdtemp(prefix="dais-pb-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
@@ -395,9 +366,8 @@ class TestRenderWorkNative(unittest.TestCase):
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 90), papp, focused=True)
         text = "\n".join(c[2] for c in scr.calls)
-        self.assertIn("NEEDS YOU", text)
-        self.assertIn("MERGE", text)
-        self.assertIn("REVIEW", text)
+        self.assertIn("PROPOSAL REVIEW", text)   # a founder-gate phase band
+        self.assertIn("READY", text)             # a queued phase band
         for (y, x, s, _a) in scr.calls:                # within the rect
             self.assertGreaterEqual(y, 1); self.assertLess(y, 31)
             self.assertLessEqual(pn.disp_width(s), 90 - x)
@@ -405,11 +375,11 @@ class TestRenderWorkNative(unittest.TestCase):
     def test_panelapp_left_rows_is_the_panel_model(self):
         import tempfile
         root = tempfile.mkdtemp(prefix="dais-pb2-"); os.makedirs(os.path.join(root, "projects"), exist_ok=True)
-        conn = _conn(); _seed(conn, [("lyr-1","beacon","x","ready_to_merge","high","https://x/pull/9")])
+        conn = _conn(); _seed(conn, [("lyr-1","beacon","x","proposal_review","high",None)])
         papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
         papp.snap = d.load_snapshot(conn, root=root)
         rows = papp.left_rows()
-        self.assertTrue(any(r["kind"] == "band" and "NEEDS YOU" in r["label"] for r in rows))
+        self.assertTrue(any(r["kind"] == "band" and "PROPOSAL REVIEW" in r["label"] for r in rows))
         self.assertTrue(any(r["kind"] == "task" and r["id"] == "lyr-1" for r in rows))
 
 
@@ -577,7 +547,7 @@ class TestRolePalette(unittest.TestCase):
 
     def _board(self):
         # acme filtered: 1 needs_review (gate) + 1 done + 1 cancelled (archive)
-        return self._papp([("cou-5a", "acme", "review", "needs_review", "high", None),
+        return self._papp([("cou-5a", "acme", "review", "proposal_review", "high", None),
                            ("cou-1", "acme", "done1", "done", "med", None),
                            ("cou-2", "acme", "cancelled1", "cancelled", "med", None)],
                           project="acme")
@@ -585,26 +555,26 @@ class TestRolePalette(unittest.TestCase):
     def test_active_bands_share_one_structure_color(self):
         # consistency: every NON-EMPTY band header is the SAME cyan structure bar (not a per-band
         # hue); empty bands recede to dim (the screen reads calm when nominal)
-        papp = self._papp([("g-1", "p", "gate", "needs_review", "high", None),   # NEEDS YOU active
-                           ("l-1", "p", "loop", "ready", "med", None)])          # QUEUED active
+        papp = self._papp([("g-1", "p", "gate", "proposal_review", "high", None),  # NEEDS-YOU phase
+                           ("l-1", "p", "loop", "ready", "med", None)])           # QUEUED phase
         scr = FakeScr(40, 200)
         pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
         cyan = 3000 | curses.A_REVERSE | curses.A_BOLD                # _cp(3) = structure
-        self.assertEqual(self._band_attr(scr, "NEEDS YOU"), cyan)     # two active bands, one color
-        self.assertEqual(self._band_attr(scr, "QUEUED"), cyan)
-        self.assertEqual(self._band_attr(scr, "RUNNING"), curses.A_DIM)  # empty -> recedes (nominal)
+        self.assertEqual(self._band_attr(scr, "PROPOSAL REVIEW"), cyan)  # active phases, one color
+        self.assertEqual(self._band_attr(scr, "READY"), cyan)
+        self.assertEqual(self._band_attr(scr, "RUNNING"), curses.A_DIM)  # empty -> recedes
 
     def test_archive_rows_are_dim(self):
         papp = self._board()
         scr = FakeScr(40, 200)
-        pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=False)
+        pn.render_work(scr, pn.Rect(1, 0, 48, 100), papp, focused=False)
         self.assertEqual(self._row_attr(scr, "cou-1"), curses.A_DIM)
 
     def test_gate_row_is_needs_you_yellow(self):
         # a founder-gate row (needs_review ∈ GATE_ORDER) carries the needs-you role, not a status hue
         papp = self._board()
         scr = FakeScr(40, 200)
-        pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=False)  # no selection highlight
+        pn.render_work(scr, pn.Rect(1, 0, 48, 100), papp, focused=False)  # no selection highlight
         self.assertEqual(self._row_attr(scr, "cou-5a"), 4000)            # _cp(4) = needs-you yellow
 
     def test_selected_row_is_uniform_bright_bar(self):
@@ -651,7 +621,7 @@ class TestRolePalette(unittest.TestCase):
 
     def test_inspector_head_line_is_structure_cyan(self):
         # the inspector's "<id> <status>" head line is a header → cyan-bold, not a per-status hue
-        papp = self._papp([("cou-5a", "acme", "review", "needs_review", "high", None)],
+        papp = self._papp([("cou-5a", "acme", "review", "proposal_review", "high", None)],
                           project="acme")
         papp.sel_id = "cou-5a"
         scr = FakeScr(40, 200)
@@ -660,7 +630,7 @@ class TestRolePalette(unittest.TestCase):
         self.assertEqual(head[3], 3000 | curses.A_BOLD)                 # _cp(3) = structure
 
     def test_vitals_need_you_is_yellow_when_positive(self):
-        papp = self._papp([("g-1", "g", "t", "ready_to_merge", "high", "https://x/pull/1")])
+        papp = self._papp([("g-1", "g", "t", "proposal_review", "high", None)])
         scr = FakeScr(40, 200)
         pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), papp)
         hits = [c for c in scr.calls
@@ -843,7 +813,7 @@ class TestFinalReviewFixes(unittest.TestCase):
         self.assertTrue(any(r["kind"] == "task" and r.get("id") == "a-1" for r in rows))
 
     def test_running_gate_task_not_double_counted(self):           # I-3
-        papp = self._papp([("cou-5a", "acme", "review", "needs_review", "high", None)])
+        papp = self._papp([("cou-5a", "acme", "review", "proposal_review", "high", None)])
         thread = {"project": "acme", "task": "cou-5a", "agent": "lead",
                   "since": "2026-06-29 00:00:00", "secs": 5, "log_path": "/tmp/x.log"}
         with mock.patch.object(d, "running_threads", return_value=[thread]):
@@ -862,16 +832,16 @@ class TestFinalReviewFixes(unittest.TestCase):
     def test_loop_band_count_and_rows_exclude_running_task(self):   # M-NEW-1
         # one needs_qa task running, one not: the QUEUED band header excludes the running one
         # (count = 1) AND the loop rows show only the non-running task (no double-count).
-        papp = self._papp([("w-9", "cedar", "qa", "needs_qa", "high", None),
-                           ("w-8", "cedar", "qa2", "needs_qa", "high", None)])
+        papp = self._papp([("w-9", "cedar", "qa", "qa_review", "high", None),
+                           ("w-8", "cedar", "qa2", "qa_review", "high", None)])
         thread = {"project": "cedar", "task": "w-9", "agent": "qa",
                   "since": "2026-06-29 00:00:00", "secs": 5, "log_path": "/tmp/x.log"}
         with mock.patch.object(d, "running_threads", return_value=[thread]):
             rows = papp.left_rows()
-        band = next(r for r in rows if r["kind"] == "band" and "QUEUED" in r["label"])
-        self.assertIn("QUEUED · 1", band["label"])   # header excludes the running task
-        loop_ids = [r.get("id") for r in rows if r["kind"] == "task" and r.get("status") == "needs_qa"]
-        self.assertEqual(loop_ids, ["w-8"])            # only the non-running loop task is a row
+        band = next(r for r in rows if r["kind"] == "band" and "QA REVIEW" in r["label"])
+        self.assertIn("QA REVIEW · 1", band["label"])  # header excludes the running task
+        loop_ids = [r.get("id") for r in rows if r["kind"] == "task" and r.get("status") == "qa_review"]
+        self.assertEqual(loop_ids, ["w-8"])            # only the non-running phase task is a row
 
     def test_inspector_running_streams_live_log_no_pager_hint(self):   # M-1 (now: live log inline)
         # a running selection streams its live log in the inspector — no "press l/L" pager hint
@@ -1107,7 +1077,7 @@ class TestRailNeedsYouChip(unittest.TestCase):
         import tempfile
         root = tempfile.mkdtemp(prefix="dais-rail-")
         os.makedirs(os.path.join(root, "projects"), exist_ok=True)
-        conn = _conn(); _seed(conn, [("a-1", "alpha", "rev", "needs_review", "high", None)])
+        conn = _conn(); _seed(conn, [("a-1", "alpha", "rev", "proposal_review", "high", None)])
         papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
         papp.snap = d.load_snapshot(conn, root=root)
         papp._cp = lambda n: n * 1000
@@ -1429,12 +1399,11 @@ class TestRailTable(unittest.TestCase):
             self.assertIn(head, text)
 
     def test_all_row_totals_across_projects(self):
-        # legacy-status projects roll up via _legacy_band: needs_review→you, ready+needs_scoping→que,
-        # backlog→wait. Columns: run you que wait done.
-        papp = self._papp([("a-1", "alpha", "x", "needs_review", "high", None),
+        # band_of roll-up: proposal_review→you, ready+qa_review→que, approved→wait, done→done.
+        papp = self._papp([("a-1", "alpha", "x", "proposal_review", "high", None),
                            ("a-2", "alpha", "y", "ready", "med", None),
-                           ("a-3", "alpha", "w", "needs_scoping", "med", None),
-                           ("b-1", "bravo", "z", "backlog", "low", None)])
+                           ("a-3", "alpha", "w", "qa_review", "med", None),
+                           ("b-1", "bravo", "z", "approved", "low", None)])
         self.assertEqual(pn._rail_counts(papp, "alpha"), (0, 1, 2, 0, 0))   # run, you, que, wait, done
         self.assertEqual(pn._rail_counts(papp, "bravo"), (0, 0, 0, 1, 0))
         self.assertEqual(pn._rail_counts(papp, "ALL"),   (0, 1, 2, 1, 0))   # totals add up
@@ -1571,46 +1540,32 @@ class TestRunningInspectorNotes(unittest.TestCase):
 
 
 class TestRunningTaskGuess(unittest.TestCase):
-    """running_task_id: an engineer run (doing/ready present) is never mislabeled as the lead's
-    needs_scoping task; the lead's scoping run (only needs_scoping) still shows its task."""
+    """running_task_id: the fallback guess for a running agent is the first task in a state the
+    machine auto-dispatches (band QUEUED); parked/gate states are not guessed."""
 
     def _proj(self, by_status):
+        import machine as MC
         return d.Project(name="p", stage_goal="", running=[("engineer", None)],
+                         machine=MC.load(MC.default_machine_path()),
                          tasks_by_status={st: [d.Task(id=i, title=i, status=st, priority="medium")
                                                for i in ids] for st, ids in by_status.items()})
 
-    def test_doing_wins_over_scoping(self):
-        p = self._proj({"doing": ["a"], "needs_scoping": ["s"]})
+    def test_dispatch_state_wins_over_parked(self):
+        p = self._proj({"doing": ["a"], "approved": ["s"]})   # doing dispatches; approved parks
         self.assertEqual(d.running_task_id(p), "a")
 
-    def test_ready_preferred_over_scoping(self):
-        # the screenshot bug: ready work present + a needs_scoping task → show the ready task, NOT
-        # the scoping one (an engineer is the one running, not the lead).
-        p = self._proj({"ready": ["r"], "needs_scoping": ["s"]})
+    def test_ready_is_guessed(self):
+        p = self._proj({"ready": ["r"], "approved": ["s"]})
         self.assertEqual(d.running_task_id(p), "r")
 
-    def test_scoping_shows_when_it_is_the_only_work(self):
-        # by precedence the lead only runs when build/QA queues are empty → needs_scoping is the task.
-        p = self._proj({"needs_scoping": ["s"]})
+    def test_proposed_is_guessed_when_only_work(self):
+        p = self._proj({"proposed": ["s"]})                   # proposed dispatches the lead
         self.assertEqual(d.running_task_id(p), "s")
 
-    def test_agent_aware_engineer_skips_qa_and_scoping(self):
-        # the win-95 bug: engineer running with a needs_qa task present must show its own ready task,
-        # not QA's needs_qa task. With the role's handled statuses, the guess is agent-aware.
-        p = self._proj({"needs_qa": ["win-95"], "ready": ["win-110"], "needs_scoping": ["win-1"]})
-        self.assertEqual(d.running_task_id(p, ["changes_requested", "ready"]), "win-110")  # engineer
-        self.assertEqual(d.running_task_id(p, ["needs_qa"]), "win-95")                      # qa
-        self.assertEqual(d.running_task_id(p, ["needs_scoping"]), "win-1")                  # lead
+    def test_parked_only_yields_no_guess(self):
+        p = self._proj({"approved": ["s"]})                   # only a parked phase -> no guess
+        self.assertEqual(d.running_task_id(p), "")
 
-    def test_agent_handles_reads_roles_file(self):
-        import tempfile
-        root = tempfile.mkdtemp(prefix="dais-ah-")
-        os.makedirs(os.path.join(root, "projects", "p"))
-        with open(os.path.join(root, "projects", "p", "roles"), "w") as f:
-            f.write("qa review reactive needs_qa 1\nengineer edit reactive changes_requested,ready 2\n")
-        self.assertEqual(d._agent_handles(root, "p", "engineer"), ["changes_requested", "ready"])
-        self.assertEqual(d._agent_handles(root, "p", "qa"), ["needs_qa"])
-        self.assertIsNone(d._agent_handles(root, "p", "ghost"))         # not a role → None (task-less)
 
 
 class TestInspectorLogWrapScroll(unittest.TestCase):

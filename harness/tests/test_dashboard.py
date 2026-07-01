@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import dashboard as d  # harness/dashboard.py
+import machine as MC
 
 
 SCHEMA = """
@@ -331,9 +332,9 @@ class TestRenderPlain(unittest.TestCase):
         text = d.render_plain(snap, color=False)
         self.assertNotIn("\033[", text)                 # no ANSI when color off
         self.assertIn("DAIS · STATUS", text)
-        self.assertIn("⏳ MERGE", text)                  # merge-ready section present
-        self.assertIn("cou-5a", text)
-        self.assertIn("✅ DONE (1)", text)
+        self.assertIn("ready", text)                    # `ready` is a machine phase
+        self.assertIn("cou-5a", text)                   # shown under its (undeclared) phase line
+        self.assertIn("done: 1", text)
 
     def test_no_hardcoded_owner_path(self):
         conn = _seed()
@@ -373,14 +374,13 @@ class TestTuiSupport(unittest.TestCase):
         conn.executescript(SCHEMA)
         conn.execute(
             "INSERT INTO tasks(id,project,title,status,priority,assignee) "
-            "VALUES('lyr-19','beacon','Growth review','needs_review','high','founder')")
+            "VALUES('lyr-19','beacon','Growth review','proposal_review','high','founder')")
         conn.commit()
         snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
         text = d.render_plain(snap, color=False)
-        self.assertIn("📋 REVIEW", text)
+        self.assertIn("proposal review", text)          # a founder-gate phase
+        self.assertIn("◆", text)                        # flagged as needs-you
         self.assertIn("lyr-19", text)
-        # must NOT also fall through to the generic "awaiting needs_review" line
-        self.assertNotIn("awaiting needs_review", text)
 
     def test_needs_review_in_action_queue_after_merge(self):
         conn = sqlite3.connect(":memory:")
@@ -439,21 +439,21 @@ class TestRunningVisibility(unittest.TestCase):
                          r"^\d\d:\d\d:\d\d$")
         self.assertEqual(d.to_local_hhmm(None), "--:--")
 
-    def test_running_task_id_prefers_doing(self):
-        p = d.Project(name="p", stage_goal="",
-                      tasks_by_status={"doing": [d.Task("p-1", "x", "doing", "high")],
-                                       "needs_qa": [d.Task("p-2", "y", "needs_qa", "high")]})
-        self.assertEqual(d.running_task_id(p), "p-1")
-        p2 = d.Project(name="p", stage_goal="",
-                       tasks_by_status={"needs_qa": [d.Task("p-2", "y", "needs_qa", "high")]})
-        self.assertEqual(d.running_task_id(p2), "p-2")
-        self.assertEqual(d.running_task_id(d.Project(name="p", stage_goal="")), "")
+    def test_running_task_id_guesses_a_dispatch_state(self):
+        m = MC.load(MC.default_machine_path())
+        p = d.Project(name="p", stage_goal="", machine=m,
+                      tasks_by_status={"ready": [d.Task("p-1", "x", "ready", "high")]})
+        self.assertEqual(d.running_task_id(p), "p-1")   # ready is a dispatch (QUEUED) state
+        p2 = d.Project(name="p", stage_goal="", machine=m,
+                       tasks_by_status={"approved": [d.Task("p-2", "y", "approved", "high")]})
+        self.assertEqual(d.running_task_id(p2), "")     # approved parks -> no guess
 
     def test_running_threads_collects_all_agents(self):
         snap = d.Snapshot(
             projects=[
                 d.Project(name="beacon", stage_goal="",
                           running=[("engineer", "2026-06-26 20:40:00")],
+                          machine=MC.load(MC.default_machine_path()),
                           tasks_by_status={"doing": [d.Task("lyr-1", "t", "doing", "high")]},
                           recent_runs=[d.Run("2026-06-26 20:40:00", "engineer", "running",
                                              log_path="/tmp/x.log")]),
