@@ -53,15 +53,17 @@ STATUSES_CANON="backlog ready doing needs_qa changes_requested ready_to_merge ne
 # status declared in the project's roles)
 valid_status(){
   case " $STATUSES_CANON " in *" $2 "*) return 0;; esac
-  local mach; mach="$(pcfg "$1" machine 2>/dev/null)"
-  if [ -n "$mach" ]; then
-    python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;m=M.load(M.default_machine_path('$DAIS_ROOT','$mach'));sys.exit(0 if '$2' in m.get('states',{}) else 1)" 2>/dev/null && return 0
+  local mp; mp="$(machine_path "$1")"
+  if [ -n "$mp" ]; then
+    python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;m=M.load('$mp');sys.exit(0 if '$2' in m.get('states',{}) else 1)" 2>/dev/null && return 0
   fi
   local f="$DAIS_HOME/projects/$1/roles"
   [ -f "$f" ] && awk -v s="$2" '!/^#/ && $4!="-"{n=split($4,h,",");for(i=1;i<=n;i++)if(h[i]==s)k=1}END{exit !k}' "$f"
 }
-# machine_path <project> -> the resolved machine file, or empty if the project has none
+# machine_path <project> -> the resolved machine file (project-local machine.json wins), or empty
 machine_path(){
+  local local_m="$DAIS_HOME/projects/$1/machine.json"
+  [ -f "$local_m" ] && { printf '%s' "$local_m"; return 0; }
   local mach; mach="$(pcfg "$1" machine 2>/dev/null)"; [ -n "$mach" ] || return 0
   python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(M.default_machine_path('$DAIS_ROOT','$mach'))" 2>/dev/null
 }
@@ -404,20 +406,27 @@ MD
     [ "$rc" -eq 0 ] ;;
 
   scaffold)
-    name="${1:?usage: dais scaffold <project>}"
+    # bootstrap a project from a WORKFLOW TEMPLATE (coding | marketing | …). The template seeds the
+    # roles, personas, project.yaml, CONTEXT.md AND the project's own editable machine.json — so a
+    # scaffolded project runs on its state machine with no `machine:` gate to set.
+    name="${1:?usage: dais scaffold <project> [--template coding]}"; shift 2>/dev/null || true
+    tmpl="coding"
+    while [ $# -gt 0 ]; do case "$1" in --template) tmpl="$2"; shift 2;; *) shift;; esac; done
     [[ "$name" =~ ^[a-z0-9._-]+$ ]] || { echo "scaffold: name must be a slug (a-z 0-9 . _ -)"; exit 1; }
-    mkdir -p "$DAIS_HOME/projects"          # ensure the workspace projects/ dir exists (fresh DAIS_HOME)
+    src="$DAIS_ROOT/harness/templates/$tmpl"      # templates are TOOL CODE -> stay on DAIS_ROOT
+    [ -d "$src" ] || { echo "scaffold: unknown template '$tmpl' — available: $(ls "$DAIS_ROOT/harness/templates" 2>/dev/null | tr '\n' ' ')"; exit 1; }
+    mkdir -p "$DAIS_HOME/projects"
     dest="$DAIS_HOME/projects/$name"
     [ -e "$dest" ] && { echo "scaffold: projects/$name already exists"; exit 1; }
-    src="$DAIS_ROOT/harness/templates/project"   # template is TOOL CODE -> stays on DAIS_ROOT
-    [ -d "$src" ] || { echo "scaffold: missing template at $src"; exit 1; }
     cp -R "$src" "$dest"
     mkdir -p "$dest/logs"
-    # substitute the project name into the text templates (portable in-place sed)
+    # seed the project's own machine from the template's workflow (a copy it can edit)
+    mfile="$DAIS_ROOT/harness/machines/$tmpl.machine.json"
+    [ -f "$mfile" ] && cp "$mfile" "$dest/machine.json"
     for f in "$dest/project.yaml" "$dest/CONTEXT.md"; do
-      sed "s/__PROJECT__/$name/g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+      [ -f "$f" ] && { sed "s/__PROJECT__/$name/g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"; }
     done
-    echo "scaffolded projects/$name — edit project.yaml (repo/github/stage_goal), then: dais lint $name" ;;
+    echo "scaffolded projects/$name from '$tmpl' (machine.json seeded) — edit project.yaml, then: dais lint $name" ;;
 
   role)
     # role new <project> — Claude designs a new role (persona + routing row) for the project;

@@ -1,0 +1,4 @@
+# name       access  trigger   handles  prec   (dispatch comes from the machine; handles unused)
+editor       review  reactive  -        10
+writer       edit    reactive  -        20
+strategist   draft   every:24h -        30

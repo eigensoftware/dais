@@ -222,13 +222,15 @@ def stage_goal(root, name):
 
 
 def _load_machine(root, name):
-    """The project's authored state machine (dict) if project.yaml declares `machine:`, else None.
-    Lets the TUI derive its bands/actions from the machine instead of hardcoded statuses."""
+    """The project's authored state machine (dict), or None (legacy). Primary signal is the project's
+    own machine.json (seeded from a workflow template); a `machine:` selector still works. Lets the
+    TUI derive its bands/actions from the machine instead of hardcoded statuses."""
+    local = os.path.join(root, "projects", name, "machine.json")
     ref = project_field(root, name, "machine")
-    if not ref:
+    if not os.path.exists(local) and not ref:
         return None
     try:
-        return MC.load(MC.default_machine_path(root, ref))
+        return MC.load(MC.project_machine_path(root, name, ref))
     except Exception:
         return None
 

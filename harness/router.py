@@ -53,17 +53,19 @@ _UNBLOCKED = ("AND NOT (t.blocked_on IS NOT NULL AND t.blocked_on<>'' AND EXISTS
 
 
 def _machine_for(root, project):
-    """The machine file for a project if project.yaml declares `machine:`, else None (legacy status
-    routing). Machine mode is opt-in per project — existing projects are unaffected."""
-    projyaml = os.path.join(root, "projects", project, "project.yaml")
-    if not os.path.exists(projyaml):
-        return None
-    with open(projyaml) as fh:
-        mm = re.search(r"(?m)^machine:[ \t]*(\S+)", fh.read())
-    if not mm:
-        return None
+    """The machine a project runs, or None (legacy status routing). A project's own machine.json
+    (seeded from a workflow template) is the primary signal — scaffolded projects are machine-driven
+    with no gate. A `machine:` selector in project.yaml still works. Absent both -> legacy."""
     import machine as MC
-    return MC.default_machine_path(root, mm.group(1))
+    if os.path.exists(os.path.join(root, "projects", project, "machine.json")):
+        return MC.project_machine_path(root, project)
+    projyaml = os.path.join(root, "projects", project, "project.yaml")
+    if os.path.exists(projyaml):
+        with open(projyaml) as fh:
+            mm = re.search(r"(?m)^machine:[ \t]*(\S+)", fh.read())
+        if mm:
+            return MC.default_machine_path(root, mm.group(1))
+    return None
 
 
 def decide(root, project):

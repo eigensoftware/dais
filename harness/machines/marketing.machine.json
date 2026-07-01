@@ -1,0 +1,39 @@
+{
+  "name": "marketing",
+  "entry": "proposed",
+  "roles": {
+    "founder":    {"human": true},
+    "strategist": {"access": "draft"},
+    "writer":     {"access": "edit"},
+    "editor":     {"access": "review"}
+  },
+  "states": {
+    "proposed":         {"initial": true},
+    "brief_review":     {},
+    "writing":          {},
+    "brand_review":     {},
+    "awaiting_publish": {},
+    "publishing":       {},
+    "done":             {"terminal": true},
+    "cancelled":        {"terminal": true}
+  },
+  "edges": [
+    {"from": "proposed",     "to": "brief_review", "by": "strategist", "verb": "submit"},
+    {"from": "brief_review", "to": "done",         "by": "founder", "verb": "approve",
+       "guards": ["confirm", "verify:brief_ready"],
+       "effect": {"spawn": {"template": "content", "initial": "writing", "by": "writer", "rel": "from_proposal"}}},
+    {"from": "brief_review", "to": "proposed",     "by": "founder", "verb": "request_changes"},
+    {"from": "proposed",     "to": "cancelled",    "by": "founder", "verb": "reject", "guards": ["confirm"]},
+
+    {"from": "writing",      "to": "brand_review", "by": "writer",  "verb": "submit_draft"},
+    {"from": "brand_review", "to": "awaiting_publish", "by": "editor", "verb": "approve",
+       "guards": ["verify:brand_ok"]},
+    {"from": "brand_review", "to": "writing",      "by": "editor",  "verb": "request_changes"},
+
+    {"from": "awaiting_publish", "to": "publishing", "by": "founder", "verb": "schedule",
+       "guards": ["typed_confirm"]},
+    {"from": "awaiting_publish", "to": "cancelled",  "by": "founder", "verb": "drop", "guards": ["confirm"]},
+    {"from": "publishing",   "to": "done",          "by": "writer",  "verb": "published",
+       "effect": {"script": {"name": "publish", "outward": true}}}
+  ]
+}

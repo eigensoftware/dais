@@ -43,6 +43,16 @@ def default_machine_path(root=None, project_machine=None):
     return os.path.join(builtin, "coding.machine.json")
 
 
+def project_machine_path(home, project, ref=None):
+    """The machine a project runs: its OWN projects/<project>/machine.json (seeded from a workflow
+    template at scaffold, editable per project), else a named/default built-in. This is why a
+    scaffolded project is machine-driven with no `machine:` gate — it just has its machine file."""
+    local = os.path.join(home, "projects", project, "machine.json")
+    if os.path.exists(local):
+        return local
+    return default_machine_path(None, ref)
+
+
 # --------------------------------------------------------------------------- #
 # lint — coherence only (errors block); policy/safety is advisory (warns)
 # --------------------------------------------------------------------------- #
