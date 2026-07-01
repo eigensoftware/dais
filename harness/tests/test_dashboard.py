@@ -187,57 +187,6 @@ class TestLogColor(unittest.TestCase):
         self.assertEqual(self.attr("  some raw passthrough line"), 0)
 
 
-class TestLogScroll(unittest.TestCase):
-    """The live log scrolls: follow the tail, scroll back to line one, re-pin."""
-
-    def test_following_pins_to_bottom(self):
-        self.assertEqual(d.log_window(100, 20, 0, True), (80, 80, True, 80))
-
-    def test_scrolled_up_shows_history(self):
-        start, _top, follow, mx = d.log_window(100, 20, 10, False)
-        self.assertEqual((start, follow, mx), (10, False, 80))
-
-    def test_home_shows_first_line(self):
-        start, _top, follow, _mx = d.log_window(100, 20, 0, False)
-        self.assertEqual(start, 0)          # line 1 visible
-        self.assertFalse(follow)
-
-    def test_scroll_past_end_repins_to_live(self):
-        _s, _t, follow, _m = d.log_window(100, 20, 999, False)
-        self.assertTrue(follow)             # past the bottom → re-attach the tail
-
-    def test_short_log_has_no_scroll(self):
-        start, _top, _follow, mx = d.log_window(5, 20, 0, False)
-        self.assertEqual((start, mx), (0, 0))
-
-
-class TestLogReading(unittest.TestCase):
-    """log_lines reads from line one so scrolling back shows the whole run."""
-
-    def _write(self, lines):
-        f = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
-        f.write("\n".join(lines) + "\n")
-        f.close()
-        self.addCleanup(os.unlink, f.name)
-        return f.name
-
-    def test_reads_from_first_line(self):
-        p = self._write([f"line {i}" for i in range(500)])
-        out = d.log_lines(p)
-        self.assertEqual(out[0], "line 0")      # the very first line, not just the tail
-        self.assertEqual(out[-1], "line 499")
-
-    def test_missing_file_is_empty(self):
-        self.assertEqual(d.log_lines("/no/such/file.log"), [])
-
-    def test_huge_log_is_capped_and_flagged(self):
-        p = self._write([f"line {i}" for i in range(30000)])
-        out = d.log_lines(p, max_lines=1000)
-        self.assertEqual(len(out), 1001)        # 1000 kept + the trim marker
-        self.assertTrue(out[0].startswith("…"))
-        self.assertEqual(out[-1], "line 29999")
-
-
 class TestDataLayer(unittest.TestCase):
     def test_running_agents_live_only(self):
         with tempfile.TemporaryDirectory() as dirp:
@@ -445,24 +394,15 @@ class TestRunningVisibility(unittest.TestCase):
         self.assertEqual(eng["secs"], 300)
         self.assertEqual(eng["log_path"], "/tmp/x.log")
 
-    def test_tail_and_last_log_line(self):
+    def test_tail_lines(self):
         with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
             fh.write("line one\nline two\n\nline three\n")
             path = fh.name
         try:
             self.assertEqual(d.tail_lines(path, 2), ["", "line three"])
-            self.assertEqual(d.last_log_line(path), "line three")
-            self.assertEqual(d.last_log_line("/no/such/file"), "")
+            self.assertEqual(d.tail_lines("/no/such/file"), [])
         finally:
             os.unlink(path)
-
-    def test_project_badges(self):
-        p = d.Project(name="p", stage_goal="", tasks_by_status={
-            "ready_to_merge": [d.Task("a", "", "ready_to_merge", "high")],
-            "ready": [d.Task("b", "", "ready", "high"), d.Task("c", "", "ready", "high")],
-            "changes_requested": [d.Task("e", "", "changes_requested", "high")],
-            "done": [d.Task("z", "", "done", "low")]})
-        self.assertEqual(d.project_badges(p), "M1 E3")  # E = ready + changes_requested
 
     def test_find_task(self):
         snap = d.Snapshot(projects=[d.Project(name="p", stage_goal="",
@@ -471,10 +411,6 @@ class TestRunningVisibility(unittest.TestCase):
         self.assertEqual(d.find_task(snap, "p", "p-1").title, "title one")
         self.assertIsNone(d.find_task(snap, "p", "nope"))
         self.assertIsNone(d.find_task(snap, "p", ""))
-
-    def test_scroll_indicator(self):
-        self.assertEqual(d.scroll_indicator(0, 20, 10), "")     # fits
-        self.assertEqual(d.scroll_indicator(11, 20, 63), "12-31/63")
 
     def test_project_roles_reads_file(self):
         with tempfile.TemporaryDirectory() as root:

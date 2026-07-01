@@ -441,9 +441,13 @@ def render_plain(snap, color=None):
             ids = _ids(bs[st])
             if ids:
                 P(f"  {c['CC']}• {st.replace('_', ' ')}:{c['C0']}  {collapse_ids(ids, 12)}")
-        dn, cn = _ids(bs.get("done", [])), _ids(bs.get("cancelled", []))
-        if dn or cn:
-            P(f"  {c['CG']}✅ done: {len(dn)}{c['C0']}  ·  {c['CD']}cancelled: {len(cn)}{c['C0']}")
+        # archive summary — the machine's TERMINAL states (not hardcoded done/cancelled, so a
+        # machine whose terminal is e.g. `published` still shows its finished work)
+        term_segs = [f"{st.replace('_', ' ')}: {len(bs.get(st, []))}"
+                     for st, meta in states.items() if meta.get("terminal") and bs.get(st)]
+        if term_segs:
+            P(f"  {c['CG']}✅ {term_segs[0]}{c['C0']}"
+              + "".join(f"  ·  {c['CD']}{s}{c['C0']}" for s in term_segs[1:]))
         P()
     P(f"  {c['CB']}recent runs{c['C0']} {c['CD']}"
       f"(newest first · time · agent · result · dur · what it did){c['C0']}")
@@ -478,10 +482,9 @@ PRIORITIES = ("low", "medium", "high", "critical")
 # action id. Falls back to the engine's full label for anything not listed.
 BAR_LABEL = {
     "approve": "approve", "reject": "reject", "accept": "accept",
-    "request_changes": "request-changes", "ship": "ship", "start": "start",
-    "promote": "promote", "undefer": "un-defer", "unblock": "unblock",
+    "request_changes": "request-changes", "start": "start",
+    "undefer": "un-defer", "unblock": "unblock",
     "defer": "defer", "cancel": "cancel", "cancel_run": "cancel-run",
-    "open_pr": "PR",
 }
 
 
@@ -580,25 +583,6 @@ def short_summary(summary, limit=1):
 # --------------------------------------------------------------------------- #
 # running-visibility + list-clarity helpers (pure)
 # --------------------------------------------------------------------------- #
-# In-flight task heuristic: a builder parks its task in 'doing' while working; a
-# reviewer works its queue in place. First non-empty wins (one agent per project).
-_INFLIGHT_ORDER = ["doing", "needs_qa", "changes_requested", "needs_review"]
-
-
-def _agent_handles(root, project, agent):
-    """The statuses a role handles, from the project's roles file. Returns [] for a role with no
-    handles, or None when the agent isn't a role at all (e.g. 'deploy') so the caller treats it as
-    task-less. Guides the running-task guess so an engineer run isn't labeled as QA's/the lead's task."""
-    try:
-        roles, _ = router.parse_roles(os.path.join(root, "projects", project, "roles"))
-    except Exception:
-        return None
-    for r in roles:
-        if r["name"] == agent:
-            return r["handles"]
-    return None
-
-
 def running_task_id(project):
     """Fallback guess at the task a running agent is on (the run's recorded claim in run_tasks is the
     real signal; this only covers the window before it records one): the first task in a state the
@@ -660,15 +644,6 @@ def tail_lines(path, n=15, maxbytes=65536):
     return data.splitlines()[-n:]
 
 
-def last_log_line(path, width=58):
-    """Last non-empty log line (trimmed) — the 'what is it doing right now' signal."""
-    for ln in reversed(tail_lines(path, 40)):
-        s = ln.strip()
-        if s:
-            return s[:width]
-    return ""
-
-
 def file_sig(path):
     """(size, mtime) of a file, or None — a cheap change-token for caching."""
     try:
@@ -676,67 +651,6 @@ def file_sig(path):
         return (st.st_size, st.st_mtime)
     except OSError:
         return None
-
-
-def log_lines(path, max_lines=20000, maxbytes=8_000_000):
-    """ALL lines of a log so it can be scrolled back to the first line. Reads the
-    whole file at normal sizes; only a pathologically huge log is clipped to its
-    last maxbytes (and last max_lines), in which case line 1 here isn't the run's
-    real first line — the scroll indicator flags that with a leading '…'."""
-    if not path or not os.path.exists(path):
-        return []
-    try:
-        size = os.path.getsize(path)
-        with open(path, "rb") as fh:
-            truncated = size > maxbytes
-            if truncated:
-                fh.seek(size - maxbytes)
-                fh.readline()             # drop the partial first line
-            lines = fh.read().decode("utf-8", "replace").splitlines()
-    except OSError:
-        return []
-    if len(lines) > max_lines:
-        lines = lines[-max_lines:]
-        truncated = True
-    if truncated and lines:
-        lines = ["… (earlier output trimmed) …"] + lines
-    return lines
-
-
-def log_window(total, height, top, follow):
-    """Resolve the visible slice of a scrollable log.
-
-    Returns (start, top, follow, max_top). `follow` keeps the view pinned to the
-    live tail; scrolling down past the end re-pins it. `top` is the first visible
-    display line when not following; `max_top` is the furthest-back top (so Home
-    jumps to 0 and the indicator can show position)."""
-    height = max(1, height)
-    max_top = max(0, total - height)
-    if follow or top >= max_top:
-        return (max_top, max_top, True, max_top)
-    return (max(0, top), max(0, min(top, max_top)), False, max_top)
-
-
-# left-pane per-project shape badges: M=merge-ready R=review P=proposed B=blocked Q=qa E=eng-queue
-_BADGES = [("M", ("ready_to_merge",)), ("R", ("needs_review",)), ("P", ("proposed",)),
-           ("B", ("blocked",)), ("Q", ("needs_qa",)), ("E", ("ready", "changes_requested"))]
-
-
-def project_badges(project):
-    bs = project.tasks_by_status
-    parts = []
-    for letter, statuses in _BADGES:
-        n = sum(len(bs.get(s, [])) for s in statuses)
-        if n:
-            parts.append(f"{letter}{n}")
-    return " ".join(parts)
-
-
-def scroll_indicator(base, shown, total):
-    """'12-20/63' when the list overflows the viewport, else ''."""
-    if total <= shown or shown <= 0:
-        return ""
-    return f"{base + 1}-{min(base + shown, total)}/{total}"
 
 
 # --------------------------------------------------------------------------- #
@@ -893,45 +807,14 @@ class App:
         self.root = root
         self.conn = conn or connect()
         self.snap = None
-        self.mode = "queue"            # "queue" = the cockpit (default) | "project" = the board
-        self.expanded = set()           # project names expanded in project mode
-        self.show_parked = False        # reveal backlog+deferred rows (toggled by `b`)
-        self.focus = "left"            # "left" | "right"
         self.sel_id = None              # selection tracked by id across refreshes
         self.detail_scroll = 0
-        # live-log scrolling: follow the tail by default; scroll up to read history
-        self.log_follow = True
-        self.log_top = 0                # first visible display line when not following
-        self._log_h = 1                 # last log viewport height (for PgUp/Dn in handle)
-        self._log_total = 0             # last total display lines (for End/indicator)
-        self._log_cache_key = None      # (path, file_sig, dw) → cached wrapped+coloured lines
-        self._log_cache = []
         self.filter = ""
         self.filtering = False
         self._flash_msg = ""
         self._flash_until = 0.0
         self.last_fetch = 0.0
         self.has_color = False
-
-    def _reset_log_scroll(self):
-        self.log_follow = True
-        self.log_top = 0
-
-    def _log_disp(self, path, dw):
-        """Wrapped + colour-tagged display lines for a log, cached on (path, size,
-        mtime, width) so we only re-read/re-wrap when the file grows or the pane
-        resizes — not on every 250ms repaint."""
-        key = (path, file_sig(path), dw)
-        if key != self._log_cache_key:
-            disp = []
-            for ln in log_lines(path):
-                attr = self._log_attr(ln)
-                lead = len(ln) - len(ln.lstrip(" "))
-                cont = " " * min(lead + 3, 9)
-                for piece in wrap_cols(ln, dw, subsequent_indent=cont):
-                    disp.append((piece, attr))
-            self._log_cache, self._log_cache_key = disp, key
-        return self._log_cache
 
     @property
     def flash(self):
@@ -992,10 +875,6 @@ class App:
         except sqlite3.Error as e:
             self.flash = f"db busy: {e}"      # keep last snapshot (flash auto-expires)
         self.last_fetch = time.monotonic()
-
-    def _header_row(self, label, status):
-        return dict(id=f"__hdr::{label}", kind="header", project=None, task=None,
-                    status=status, running=False, sel=False, label=label)
 
     def _selectable(self, rows):
         return [i for i, r in enumerate(rows) if r.get("sel", True)]
@@ -1096,7 +975,7 @@ class App:
         curses.doupdate()
 
     def launch_pr(self, row):
-        url = row and row["task"] and row["task"].pr_url
+        url = row and row.get("task") and row["task"].pr_url
         if not url:
             self.flash = "no PR url for this item"
             return
@@ -1341,33 +1220,6 @@ class App:
             self.flash = f"start failed: {e}"
             return False
 
-    def _ship_pr(self, row, cmd):
-        """ship is a real merge that streams output → drop out of curses, run it,
-        pause for the founder to read, then restore. The curses/`input` dance only
-        runs on a real tty (so the dispatch is unit-testable headless)."""
-        tid = (self._task_of(row) or {}).get("id")
-        live = sys.stdout.isatty()
-        if live:
-            try:
-                curses.def_prog_mode()
-                curses.endwin()
-            except curses.error:
-                pass
-            print(f"\n=== dais {' '.join(str(c) for c in cmd)}  ({tid}) ===\n", flush=True)
-        rc = self._dispatch(cmd)
-        if live:
-            try:
-                input(f"\n[ship exited {rc}] press enter to return to dais top… ")
-            except (EOFError, KeyboardInterrupt):
-                pass
-            try:
-                curses.reset_prog_mode()
-            except curses.error:
-                pass
-            self.scr.clear()
-            self.scr.refresh()
-        return rc
-
     def do_action(self, action_id, row):
         """The shared dispatcher behind shortcuts and the Enter menu: build the argv
         from the engine, honor `Action.confirm`, run it (or route an interactive id),
@@ -1556,59 +1408,21 @@ class App:
             return True
         if ch in (ord("q"),):
             return False
-        on_log = self.focus == "right" and bool(sel_row and sel_row.get("kind") == "running")
-        page = max(1, self._log_h - 1)
         if ch in (ord("j"), curses.KEY_DOWN):
-            if on_log:
-                self.log_top += 1                # draw() re-pins to the live tail past the end
-            elif self.focus == "right":
-                self.detail_scroll += 1
-            elif rows:
+            if rows:
                 self.sel_id = self._move_sel(rows, sel_i, +1)
                 self.detail_scroll = 0
-                self._reset_log_scroll()
         elif ch in (ord("k"), curses.KEY_UP):
-            if on_log:
-                self.log_follow = False
-                self.log_top = max(0, self.log_top - 1)
-            elif self.focus == "right":
-                self.detail_scroll = max(0, self.detail_scroll - 1)
-            elif rows:
+            if rows:
                 self.sel_id = self._move_sel(rows, sel_i, -1)
                 self.detail_scroll = 0
-                self._reset_log_scroll()
-        elif ch == curses.KEY_NPAGE:         # PageDown
-            if on_log:
-                self.log_top += page
-            elif self.focus == "right":
-                self.detail_scroll += page
-        elif ch == curses.KEY_PPAGE:         # PageUp
-            if on_log:
-                self.log_follow = False
-                self.log_top = max(0, self.log_top - page)
-            elif self.focus == "right":
-                self.detail_scroll = max(0, self.detail_scroll - page)
-        elif ch == curses.KEY_HOME:          # jump to first line
-            if on_log:
-                self.log_follow, self.log_top = False, 0
-            elif self.focus == "right":
-                self.detail_scroll = 0
-        elif ch == curses.KEY_END:           # snap back to the live tail
-            if on_log:
-                self._reset_log_scroll()
-        elif ch in (9,):                 # tab
-            self.focus = "right" if self.focus == "left" else "left"
-        elif ch in (10, 13):             # enter — expand a project, else the action menu
-            if sel_row and sel_row["kind"] == "project":
-                self.expanded ^= {sel_row["project"]}
-            elif sel_row:
+        elif ch in (10, 13):             # enter — the action menu for the selection
+            if sel_row:
                 self._action_menu(sel_row)
-        elif ch == ord("g"):
-            self.mode = "queue" if self.mode == "project" else "project"
-            self.detail_scroll = 0
-            self._reset_log_scroll()
         elif ch == ord("l"):
             self.launch_logs(sel_row)
+        elif ch == ord("o"):             # open the selection's PR in a browser
+            self.launch_pr(sel_row)
         elif ch == ord("w"):
             self.start_or_stop_watch()
         elif ch == ord("p"):
@@ -1621,22 +1435,16 @@ class App:
             self.cancel_run(sel_row["project"] if sel_row else None)
         elif 32 <= ch < 127 and (act := next(
                 (a for a in self._row_actions(sel_row) if a.key == chr(ch)), None)):
-            self.do_action(act.id, sel_row)  # any contextual action by its key (a/x/o/s/h/e …)
+            self.do_action(act.id, sel_row)  # any contextual action by its key (a/x/e …)
         elif ch in (ord("+"), ord("=")):     # raise priority ('=' is the unshifted '+')
             self._bump_priority(sel_row, +1)
         elif ch == ord("-"):                 # lower priority
             self._bump_priority(sel_row, -1)
         elif ch == ord("n"):                 # new task in the row's project
             self.do_action("new", sel_row)
-        elif ch == ord("b"):                 # reveal/hide founder-parked rows
-            self.show_parked = not self.show_parked
-            self.flash = ("showing parked (backlog+deferred)" if self.show_parked
-                          else "hiding parked")
         elif ch == ord("/"):
             self.filtering = True
             self.filter = ""
-        elif ch == ord("r"):
-            self.refresh()
         return True
 
     def run(self):

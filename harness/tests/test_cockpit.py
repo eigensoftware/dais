@@ -87,7 +87,7 @@ def project_row(name="acme"):
 
 
 def running_row(project="acme", task_id="cou-1"):
-    return dict(id=f"run::{project}", kind="running", project=project, agent="engineer",
+    return dict(id=f"run::{project}/engineer", kind="running", project=project, agent="engineer",
                 since="2026-06-26 20:40:00", log_path="/tmp/x.log", task_id=task_id,
                 task=None, status="doing", running=True, sel=True, label="  run")
 
@@ -235,10 +235,6 @@ class TestKeyWiring(unittest.TestCase):
         self._press(ord("a"), project_row())
         self.sub.call.assert_not_called()
 
-    def test_b_toggles_show_parked(self):
-        self.assertFalse(self.app.show_parked)
-        self._press(ord("b"), task_row())
-        self.assertTrue(self.app.show_parked)
 
 
 class TestEnterMenu(unittest.TestCase):

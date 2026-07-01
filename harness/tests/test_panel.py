@@ -291,12 +291,10 @@ class TestPanelApp(unittest.TestCase):
         self.assertTrue(app.handle(ord("q"), app.left_rows(), 0, None))
 
     def test_b_is_a_no_op_here(self):
-        # 'b' is the classic show/hide-parked toggle; the panel has its own backlog +
-        # deferred bands, so it's swallowed — stays alive, never flips the inherited flag.
+        # 'b' was the classic show/hide-parked toggle; the panel's bands are first-class,
+        # so it's swallowed — the app stays alive and nothing changes.
         app = self._app([("lyr-1", "beacon", "x", "ready", "high", None)])
-        self.assertFalse(app.show_parked)
         self.assertTrue(app.handle(ord("b"), app.left_rows(), 0, None))   # alive
-        self.assertFalse(app.show_parked)                                 # not toggled
 
     def test_dispatch_captures_never_inherits_terminal(self):
         # a quick action's output (e.g. "updated win-105") must be CAPTURED, not printed over curses
@@ -591,7 +589,7 @@ class TestRolePalette(unittest.TestCase):
         threads = [{"project": "zeta", "agent": "eng", "task": "z-1",
                     "since": "2026-06-29 00:00:00", "log_path": None}]
         with mock.patch.object(d, "running_threads", return_value=threads):
-            papp.sel_id = "run::zeta"
+            papp.sel_id = "run::zeta/eng"
             scr = FakeScr(40, 200)
             pn.render_work(scr, pn.Rect(1, 0, 30, 100), papp, focused=True)
         run_row = next(c for c in scr.calls if "RUN" in c[2] and "eng" in c[2])
@@ -658,7 +656,7 @@ class TestRolePalette(unittest.TestCase):
         self.assertEqual(self._row_attr_rail(scr, names[0]), 0)
         self.assertEqual(self._row_attr_rail(scr, names[1]), 0)
         # mark the first project running -> only it turns green (cp 1) — the live role
-        papp.snap.projects[0].running = True
+        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]
         scr2 = FakeScr(40, 200)
         pn.render_rail(scr2, pn.Rect(1, 0, 20, 20), papp, focused=False)
         self.assertEqual(self._row_attr_rail(scr2, names[0]) & 1000, 1000)
@@ -1227,7 +1225,7 @@ class TestMissionControlDots(unittest.TestCase):
 
     def test_rail_running_project_shows_the_run_dot(self):
         papp = self._papp([("a-1", "alpha", "x", "ready", "med", None)])
-        papp.snap.projects[0].running = True
+        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]
         scr = FakeScr(40, 200)
         pn.render_rail(scr, pn.Rect(1, 0, 20, 30), papp, focused=False)
         row = next(c for c in scr.calls if "alpha" in c[2])
@@ -1683,3 +1681,57 @@ class TestKeyStandardization(unittest.TestCase):
             self.assertFalse(papp.handle(ord("q"), [], 0, None), view)
 
 
+
+
+class TestPanelHonesty(unittest.TestCase):
+    """The three panes must agree: a task being RUN is counted once (RUNNING), never also in
+    its state's band; concurrent agents are distinct selectable rows; the inspector scroll
+    clamps so `k` responds immediately after over-scrolling."""
+
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-hon-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.refresh()
+        return papp
+
+    def test_rail_does_not_double_count_a_running_task(self):
+        papp = self._papp([("a-1", "alpha", "x", "ready", "medium", None)])
+        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]
+        threads = [{"project": "alpha", "agent": "engineer", "task": "a-1",
+                    "since": "2026-06-29 00:00:00", "log_path": None}]
+        with mock.patch.object(d, "running_threads", return_value=threads):
+            run, you, que, wait, done = pn._rail_counts(papp, "alpha")
+        self.assertEqual((run, que), (1, 0))     # in RUN only — not also queued
+
+    def test_concurrent_agents_are_distinct_selectable_rows(self):
+        papp = self._papp([("z-1", "zeta", "t", "ready", "medium", None)])
+        threads = [{"project": "zeta", "agent": "engineer", "task": "z-1",
+                    "since": "2026-06-29 00:00:00", "log_path": None},
+                   {"project": "zeta", "agent": "qa", "task": None,
+                    "since": "2026-06-29 00:00:00", "log_path": None}]
+        with mock.patch.object(d, "running_threads", return_value=threads):
+            rows = papp.left_rows()
+            running = [r for r in rows if r["kind"] == "running"]
+            self.assertEqual(len({r["id"] for r in running}), 2)   # unique ids
+            # selection can MOVE from the first running row to the second
+            papp.sel_id = running[0]["id"]
+            i, _ = papp._selected(rows)
+            papp.sel_id = papp._move_sel(rows, i, +1)
+            self.assertEqual(papp.sel_id, running[1]["id"])
+
+    def test_inspector_scroll_clamps_back(self):
+        papp = self._papp([("z-1", "zeta", "t", "ready", "medium", None)])
+        papp.sel_id = "z-1"
+        papp.pane_focus = "inspector"
+        papp.detail_scroll = 500                            # wildly over-scrolled
+        scr = FakeScr(40, 200)
+        pn.render_inspector(scr, pn.Rect(1, 0, 20, 60), papp, focused=True)
+        rows = papp.left_rows()
+        i, sel = papp._selected(rows)
+        self.assertLess(papp.detail_scroll, 500)            # clamped by the draw
+        before = papp.detail_scroll
+        papp.handle(ord("k"), rows, i, sel)
+        self.assertEqual(papp.detail_scroll, before - 1)    # k responds immediately

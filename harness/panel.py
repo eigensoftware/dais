@@ -238,7 +238,7 @@ def _inspector_attr(app, line):
     if any(s.startswith(h) for h in _SUBHEADS):            # a known proposal sub-head pops as structure
         return app._cp(_STRUCTURE) | curses.A_BOLD
     if s.startswith("assignee ") and " · prio " in low:     # the generated meta line, matched precisely
-        return app._cp(_NEEDS_YOU) if ("· prio high" in low or "· prio urgent" in low) else curses.A_DIM
+        return app._cp(_NEEDS_YOU) if ("· prio high" in low or "· prio critical" in low) else curses.A_DIM
     return 0                                                # title + note body: plain
 
 
@@ -377,6 +377,9 @@ def render_inspector(scr, rect, app, focused):
             sub = " " * (lead + (2 if stripped.startswith("- ") else 0))   # align continuation
             wrapped.extend(textwrap.wrap(ln, inner.w, subsequent_indent=sub) or [""])
     start = max(0, min(app.detail_scroll, max(0, len(wrapped) - 1)))
+    app.detail_scroll = start          # write the clamp back so `k` responds immediately
+                                       # (matching the running-log path) instead of unwinding
+                                       # dozens of phantom over-scrolled steps first
     # first wrapped line is the "<id>  <status>" header — color it by the selection's status
     head_attr = 0
     if sel_row and sel_row.get("status"):
@@ -438,17 +441,21 @@ _RAIL_MIN_NAME_W = 12                            # below this the table sheds co
 def _rail_counts(app, name):
     """(running, needs_you, queued, waiting, done) for one project — or summed for ALL. A compact
     aggregate of the machine bands (band_of): the WORK list shows every phase, the rail rolls them
-    up. A project with no machine falls back to a legacy status→band mapping."""
+    up. Tasks currently being RUN are counted in `run` ONLY — excluded from their state's band,
+    exactly like the WORK list's RUNNING overlay and the vitals gate count, so the rail always
+    agrees with the other panes."""
     if not app.snap:
         return (0, 0, 0, 0, 0)
     projs = (app.snap.projects if name == "ALL"
              else [p for p in app.snap.projects if p.name == name])
-    run = sum(1 for p in projs if p.running)            # one agent per project, so 0/1 each
+    threads = d.running_threads(app.snap, "9999-12-31 00:00:00", app.root)
+    running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
+    run = sum(1 for p in projs for _ in p.running)
     you = que = wait = done = 0
     for p in projs:
         for st, ts in p.tasks_by_status.items():
             band = MC.band_of(p.machine, st)
-            n = len(ts)
+            n = sum(1 for t in ts if (p.name, t.id) not in running_ids)
             if band == "NEEDS YOU":  you += n
             elif band == "QUEUED":   que += n
             elif band == "WAITING":  wait += n
@@ -955,7 +962,9 @@ def _machine_work_rows(snap, projects, project, expanded, root):
     running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
     add_band("RUNNING", len(threads))
     for t in threads:
-        rows.append({"kind": "running", "id": f"run::{t['project']}",
+        # id carries the AGENT too — two concurrent agents in one project must be two
+        # distinct selectable rows, or selection can never move past the first.
+        rows.append({"kind": "running", "id": f"run::{t['project']}/{t['agent']}",
                      "project": t["project"], "task_id": t["task"], "task": None,
                      "status": "doing", "sel": True, "agent": t["agent"],
                      "since": t["since"], "log_path": t["log_path"]})
