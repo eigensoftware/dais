@@ -2,7 +2,7 @@
 -- recursively. This records task<->task edges produced by transition EFFECTS (spawn/aggregate):
 --   spawned_from  — child was spawned by parent (a proposal's impl tasks; a QA fail's fix task)
 --   blocks_parent — child must reach a terminal before parent's `unblocked` guard passes
---   encompasses   — parent batches child (a release task over the awaiting_release set)
+--   encompasses   — parent batches child (a release task over the approved set)
 --   part_of       — generic aggregation
 -- Kept separate from tasks.blocked_on (migration 0001, single-predecessor): a task can be blocked by
 -- or encompass MANY. Added as a migration so existing dais.db files pick it up via `dais migrate`.

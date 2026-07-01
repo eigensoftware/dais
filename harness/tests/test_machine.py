@@ -78,7 +78,7 @@ class TestNextRole(unittest.TestCase):
         self.assertEqual(M.next_role(self.conn, self.m, "proj"), "engineer")
 
     def test_parked_and_gate_states_do_not_dispatch(self):
-        for st in ("blocked", "awaiting_release", "proposal_review", "deferred", "done"):
+        for st in ("blocked", "approved", "proposal_review", "deferred", "done"):
             c = _db()
             c.execute("INSERT INTO tasks(id,project,title,status) VALUES('t','proj','x',?)", (st,))
             self.assertEqual(M.next_role(c, self.m, "proj"), "",
@@ -96,7 +96,7 @@ class TestBandsAndActions(unittest.TestCase):
         self.assertEqual(M.band_of(self.m, "proposal_review"), "NEEDS YOU")  # founder, no dispatch
         self.assertEqual(M.band_of(self.m, "release_review"), "NEEDS YOU")
         self.assertEqual(M.band_of(self.m, "blocked"), "WAITING")          # system-only
-        self.assertEqual(M.band_of(self.m, "awaiting_release"), "WAITING")
+        self.assertEqual(M.band_of(self.m, "approved"), "WAITING")
         self.assertEqual(M.band_of(self.m, "deferred"), "WAITING")         # explicit override
         self.assertEqual(M.band_of(self.m, "done"), "ARCHIVE")
         self.assertEqual(M.band_of(self.m, "cancelled"), "ARCHIVE")
@@ -169,11 +169,11 @@ class TestFlow(unittest.TestCase):
         M.fire(self.conn, self.m, fix, "claim", "engineer")
         M.fire(self.conn, self.m, fix, "complete", "engineer")
         M.fire(self.conn, self.m, fix, "pass", "qa", {"verifiers": {"tests_pass": True}})
-        # fix now in awaiting_release (a terminal-enough state? no — must be done/cancelled to clear)
+        # fix now in approved (a terminal-enough state? no — must be done/cancelled to clear)
         # so it isn't cleared yet:
         self.assertEqual(M.advance_unblocked(self.conn, self.m), [])
         # release the fix to done via a release task, then parent clears
-        rel = M.create_task(self.conn, self.m, "proj", "release", state="release_ready", assignee="engineer")
+        rel = M.create_task(self.conn, self.m, "proj", "release", state="release_open", assignee="engineer")
         M.fire(self.conn, self.m, rel, "assemble", "engineer")
         M.fire(self.conn, self.m, rel, "greenlight", "founder",
                {"typed": rel, "attest": {"migrations_applied": True}})
@@ -183,16 +183,16 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(_status(self.conn, impl), "qa_review")
 
     def test_release_batches_and_closes_encompassed(self):
-        # two impl tasks reach awaiting_release
+        # two impl tasks reach approved
         impls = []
         for i in range(2):
             t = M.create_task(self.conn, self.m, "proj", f"feat{i}", state="ready", assignee="engineer")
             M.fire(self.conn, self.m, t, "claim", "engineer")
             M.fire(self.conn, self.m, t, "complete", "engineer")
             M.fire(self.conn, self.m, t, "pass", "qa", {"verifiers": {"tests_pass": True}})
-            self.assertEqual(_status(self.conn, t), "awaiting_release")
+            self.assertEqual(_status(self.conn, t), "approved")
             impls.append(t)
-        rel = M.create_task(self.conn, self.m, "proj", "release", state="release_ready", assignee="engineer")
+        rel = M.create_task(self.conn, self.m, "proj", "release", state="release_open", assignee="engineer")
         agg = M.fire(self.conn, self.m, rel, "assemble", "engineer")
         self.assertCountEqual(agg["encompassed"], impls)             # batched both
         # deploy needs the strong human guards
@@ -206,7 +206,7 @@ class TestFlow(unittest.TestCase):
             self.assertEqual(_status(self.conn, t), "done")
 
     def test_release_failure_spawns_rollback(self):
-        rel = M.create_task(self.conn, self.m, "proj", "release", state="release_ready", assignee="engineer")
+        rel = M.create_task(self.conn, self.m, "proj", "release", state="release_open", assignee="engineer")
         M.fire(self.conn, self.m, rel, "assemble", "engineer")
         M.fire(self.conn, self.m, rel, "greenlight", "founder",
                {"typed": rel, "attest": {"migrations_applied": True}})

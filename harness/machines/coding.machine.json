@@ -14,8 +14,8 @@
     "doing":            {},
     "qa_review":        {},
     "blocked":          {},
-    "awaiting_release": {},
-    "release_ready":    {"initial": true},
+    "approved": {},
+    "release_open":    {"initial": true},
     "release_review":   {},
     "releasing":        {},
     "release_failed":   {},
@@ -38,26 +38,26 @@
     {"from": "doing",           "to": "qa_review",       "by": "engineer", "verb": "complete"},
     {"from": "doing",           "to": "ready",           "by": "system",   "verb": "interrupt"},
 
-    {"from": "qa_review",       "to": "awaiting_release", "by": "qa",       "verb": "pass",
+    {"from": "qa_review",       "to": "approved", "by": "qa",       "verb": "pass",
        "guards": ["verify:tests_pass"]},
     {"from": "qa_review",       "to": "blocked",         "by": "qa",       "verb": "fail",
        "effect": {"spawn": {"template": "fix", "initial": "ready", "by": "engineer", "rel": "blocks_parent"}}},
     {"from": "blocked",         "to": "qa_review",       "by": "system",   "verb": "unblocked",
        "guards": ["unblocked"]},
 
-    {"from": "awaiting_release", "to": "done",           "by": "system",   "verb": "released",
+    {"from": "approved", "to": "done",           "by": "system",   "verb": "released",
        "note": "fired by a release task's effect over its encompassed set"},
 
-    {"from": "release_ready",   "to": "release_review",  "by": "engineer", "verb": "assemble",
-       "effect": {"aggregate": {"select": "state=awaiting_release"}}},
+    {"from": "release_open",   "to": "release_review",  "by": "engineer", "verb": "assemble",
+       "effect": {"aggregate": {"select": "state=approved"}}},
     {"from": "release_review",  "to": "releasing",       "by": "founder",  "verb": "greenlight",
        "guards": ["typed_confirm", "attest:migrations_applied when changed(migrations/**)"]},
     {"from": "release_review",  "to": "cancelled",       "by": "founder",  "verb": "abort", "guards": ["confirm"]},
     {"from": "releasing",       "to": "done",            "by": "engineer", "verb": "shipped",
-       "effect": {"script": {"name": "release", "outward": true}, "then": "encompassed:awaiting_release->done"}},
+       "effect": {"script": {"name": "release", "outward": true}, "then": "encompassed:approved->done"}},
     {"from": "releasing",       "to": "release_failed",  "by": "system",   "verb": "release_error",
        "effect": {"spawn": {"template": "rollback", "initial": "ready", "by": "engineer", "rel": "blocks_parent"}}},
-    {"from": "release_failed",  "to": "release_ready",   "by": "founder",  "verb": "retry"},
+    {"from": "release_failed",  "to": "release_open",   "by": "founder",  "verb": "retry"},
     {"from": "release_failed",  "to": "cancelled",       "by": "founder",  "verb": "give_up", "guards": ["confirm"]}
   ]
 }

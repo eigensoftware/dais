@@ -61,8 +61,8 @@ class TestMachineDispatch(unittest.TestCase):
         self.assertEqual(router.decide(_ws([("a", "qa_review")]), "p"), "qa")
 
     def test_parked_state_does_not_dispatch(self):
-        # awaiting_release/blocked have no dispatch role → nothing to run, no cadence → idle.
-        self.assertIsNone(router.decide(_ws([("a", "awaiting_release")]), "p"))
+        # approved/blocked have no dispatch role → nothing to run, no cadence → idle.
+        self.assertIsNone(router.decide(_ws([("a", "approved")]), "p"))
 
     def test_higher_priority_task_wins(self):
         # dispatch is priority-ordered (not role-precedence): a HIGH ready outranks a medium proposal.
@@ -72,9 +72,9 @@ class TestMachineDispatch(unittest.TestCase):
 
 class TestDependencySkip(unittest.TestCase):
     def test_blocked_task_is_not_scheduled(self):
-        # a (ready) waits on b (awaiting_release → not done); it's the only dispatchable task, so
+        # a (ready) waits on b (approved → not done); it's the only dispatchable task, so
         # decide idles instead of running on the blocked task.
-        self.assertIsNone(router.decide(_ws([("a", "ready", "b"), ("b", "awaiting_release")]), "p"))
+        self.assertIsNone(router.decide(_ws([("a", "ready", "b"), ("b", "approved")]), "p"))
 
     def test_unblocked_when_predecessor_done(self):
         self.assertEqual(router.decide(_ws([("a", "ready", "b"), ("b", "done")]), "p"), "engineer")
@@ -94,12 +94,12 @@ class TestDependencySkip(unittest.TestCase):
 class TestCadence(unittest.TestCase):
     def test_lead_cadence_runs_for_discovery_when_idle(self):
         # no dispatchable reactive work → the lead still runs on its cadence (first run, never-run).
-        self.assertEqual(router.decide(_ws([("a", "awaiting_release")], roles=ROLES_WITH_LEAD), "p"), "lead")
+        self.assertEqual(router.decide(_ws([("a", "approved")], roles=ROLES_WITH_LEAD), "p"), "lead")
 
     def test_blocked_work_falls_through_to_cadence_not_reactive(self):
         # a proposed task blocked on an open predecessor is NOT reactive; with no cadence lead it idles
         # (proving the blocked task itself didn't trigger a dispatch).
-        self.assertIsNone(router.decide(_ws([("a", "proposed", "b"), ("b", "awaiting_release")]), "p"))
+        self.assertIsNone(router.decide(_ws([("a", "proposed", "b"), ("b", "approved")]), "p"))
 
 
 if __name__ == "__main__":
