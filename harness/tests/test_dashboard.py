@@ -394,6 +394,44 @@ class TestRunningVisibility(unittest.TestCase):
         self.assertEqual(eng["secs"], 300)
         self.assertEqual(eng["log_path"], "/tmp/x.log")
 
+    def test_running_thread_log_survives_a_newer_finished_run(self):
+        # engineer started first and is STILL running; qa ran after it and finished, so the
+        # project's newest run isn't 'running'. The engineer thread must still tail ITS OWN log
+        # (found by agent), not show '(waiting for output…)' because recent_runs[0] finished.
+        snap = d.Snapshot(
+            projects=[d.Project(name="wb", stage_goal="",
+                                running=[("engineer", "2026-07-01 16:24:00")],
+                                machine=MC.load(MC.default_machine_path()),
+                                tasks_by_status={},
+                                recent_runs=[
+                                    d.Run("2026-07-01 16:25:00", "qa", "succeeded",
+                                          log_path="/tmp/qa.log"),
+                                    d.Run("2026-07-01 16:24:00", "engineer", "running",
+                                          log_path="/tmp/eng.log"),
+                                ])],
+            recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
+        threads = d.running_threads(snap, now="2026-07-01 16:30:00")
+        self.assertEqual(len(threads), 1)
+        self.assertEqual(threads[0]["log_path"], "/tmp/eng.log")
+
+    def test_concurrent_threads_each_get_their_own_log(self):
+        snap = d.Snapshot(
+            projects=[d.Project(name="wb", stage_goal="",
+                                running=[("engineer", "2026-07-01 16:24:00"),
+                                         ("qa", "2026-07-01 16:25:00")],
+                                machine=MC.load(MC.default_machine_path()),
+                                tasks_by_status={},
+                                recent_runs=[
+                                    d.Run("2026-07-01 16:25:00", "qa", "running",
+                                          log_path="/tmp/qa.log"),
+                                    d.Run("2026-07-01 16:24:00", "engineer", "running",
+                                          log_path="/tmp/eng.log"),
+                                ])],
+            recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
+        logs = {t["agent"]: t["log_path"]
+                for t in d.running_threads(snap, now="2026-07-01 16:30:00")}
+        self.assertEqual(logs, {"engineer": "/tmp/eng.log", "qa": "/tmp/qa.log"})
+
     def test_tail_lines(self):
         with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
             fh.write("line one\nline two\n\nline three\n")

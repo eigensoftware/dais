@@ -620,8 +620,9 @@ def running_threads(snap, now=None, root=HOME):
     now = now or utc_now()
     out = []
     for p in snap.projects:
-        live_log = (p.recent_runs[0].log_path
-                    if p.recent_runs and p.recent_runs[0].status == "running" else None)
+        # fallback log: the newest RUNNING run's — NOT recent_runs[0], which may be a newer run
+        # that already finished (e.g. qa completed after the engineer started, still running)
+        live_log = next((r.log_path for r in p.recent_runs if r.status == "running"), None)
         for agent, since in p.running:
             # Authoritative first: the task THIS running agent recorded via run_tasks — its claim, else
             # the first task it touched. Fall back to the machine-derived guess only before it records.
@@ -632,7 +633,8 @@ def running_threads(snap, now=None, root=HOME):
                 task = running_task_id(p)
             out.append(dict(project=p.name, agent=agent, since=since,
                             secs=seconds_between(since, now),
-                            task=task, log_path=live_log))
+                            task=task,
+                            log_path=(rr.log_path if rr and rr.log_path else live_log)))
     return out
 
 
