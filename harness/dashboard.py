@@ -423,52 +423,29 @@ def render_plain(snap, color=None):
         if snap.cap_state:
             P(f"  {c['CY']}⏸ cooling down — recent cap "
               f"(resumes when the window frees){c['C0']}")
-        rtm = _ids(bs.get("ready_to_merge", []))
-        if rtm:
-            P(f"  {c['CG']}{c['CB']}⏳ MERGE{c['C0']} "
-              f"{c['CG']}— QA-approved, your call:{c['C0']} "
-              f"{c['CB']}{collapse_ids(rtm, 12)}{c['C0']}")
-        nr = _ids(bs.get("needs_review", []))
-        if nr:
-            P(f"  {c['CW']}{c['CB']}📋 REVIEW{c['C0']} "
-              f"{c['CW']}— deliverable ready (no PR), your call:{c['C0']} "
-              f"{c['CB']}{collapse_ids(nr, 12)}{c['C0']}")
-        prop = _ids(bs.get("proposed", []))
-        if prop:
-            P(f"  {c['CM']}{c['CB']}🧭 PROPOSED{c['C0']} "
-              f"{c['CM']}— Lead initiative awaiting your approve before build "
-              f"(dais approve <id>):{c['C0']} "
-              f"{c['CB']}{collapse_ids(prop, 12)}{c['C0']}")
-        blk = _ids(bs.get("blocked", []))
-        if blk:
-            P(f"  {c['CR']}⛔ BLOCKED on you:{c['C0']}  {collapse_ids(blk, 12)}")
-        nq = _ids(bs.get("needs_qa", []))
-        if nq:
-            P(f"  {c['CC']}🔍 awaiting QA:{c['C0']}  {collapse_ids(nq, 12)}")
-        eng = _ids(bs.get("ready", []) + bs.get("changes_requested", []))
-        if eng:
-            P(f"  {c['CY']}🔧 queued for Engineer:{c['C0']}  {collapse_ids(eng, 12)}")
-        for st in sorted(bs):
-            if st in _CANON_NAMED:
+        # phases in the machine's declared (flow) order; ◆ marks founder-gate phases (NEEDS YOU).
+        m = p.machine or {}
+        states = m.get("states", {})
+        gate = {s for s, meta in states.items()
+                if not meta.get("terminal") and MC.band_of(m, s) == "NEEDS YOU"}
+        for st, meta in states.items():
+            if meta.get("terminal"):
                 continue
-            ids = _ids(bs[st])
+            ids = _ids(bs.get(st, []))
             if not ids:
                 continue
-            if st == "needs_legal":
-                lbl, oc = "⚖️  awaiting legal review", c['CM']
-            else:
-                lbl, oc = f"• awaiting {st}", c['CC']
-            P(f"  {oc}{lbl}:{c['C0']}  {collapse_ids(ids, 12)}")
-        dn = _ids(bs.get("done", []))
-        if dn:
-            P(f"  {c['CG']}✅ DONE ({len(dn)}):{c['C0']}  "
-              f"{c['CD']}{collapse_ids(dn, 8)}{c['C0']}")
-        df = _ids(bs.get("deferred", []))
-        if df:
-            P(f"  {c['CM']}🔒 deferred (founder-parked):{c['C0']}  "
-              f"{c['CD']}{collapse_ids(df, 8)}{c['C0']}")
-        P(f"  {c['CD']}📦 backlog: {len(bs.get('backlog', []))}  ·  "
-          f"cancelled: {len(bs.get('cancelled', []))}{c['C0']}")
+            oc = (c['CW'] + c['CB']) if st in gate else c['CY']
+            mark = "◆ " if st in gate else ""
+            P(f"  {oc}{mark}{st.replace('_', ' ')}:{c['C0']}  {collapse_ids(ids, 12)}")
+        for st in sorted(bs):                       # any populated state the machine doesn't declare
+            if st in states:
+                continue
+            ids = _ids(bs[st])
+            if ids:
+                P(f"  {c['CC']}• {st.replace('_', ' ')}:{c['C0']}  {collapse_ids(ids, 12)}")
+        dn, cn = _ids(bs.get("done", [])), _ids(bs.get("cancelled", []))
+        if dn or cn:
+            P(f"  {c['CG']}✅ done: {len(dn)}{c['C0']}  ·  {c['CD']}cancelled: {len(cn)}{c['C0']}")
         P()
     P(f"  {c['CB']}recent runs{c['C0']} {c['CD']}"
       f"(newest first · time · agent · result · dur · what it did){c['C0']}")
@@ -677,18 +654,12 @@ def _agent_handles(root, project, agent):
     return None
 
 
-def running_task_id(project, statuses=None):
-    """Best guess at the task a running agent is working, or '' (the live log is the real signal).
-    With `statuses` (the running role's handled statuses), guess only among 'doing' + those — so an
-    engineer run shows its doing/ready task, never QA's needs_qa or the lead's needs_scoping. With
-    `statuses=None`, fall back to the generic in-flight → ready → needs_scoping order."""
-    if statuses is None:
-        order = _INFLIGHT_ORDER + ["ready", "needs_scoping"]
-    else:
-        order = ["doing"] + [s for s in statuses if s != "doing"]
-    for st in order:
-        tasks = project.tasks_by_status.get(st)
-        if tasks:
+def running_task_id(project):
+    """Fallback guess at the task a running agent is on (the run's recorded claim in run_tasks is the
+    real signal; this only covers the window before it records one): the first task in a state the
+    machine auto-dispatches (band QUEUED), else ''."""
+    for st, tasks in project.tasks_by_status.items():
+        if tasks and MC.band_of(project.machine, st) == "QUEUED":
             return tasks[0].id
     return ""
 
@@ -702,22 +673,14 @@ def running_threads(snap, now=None, root=HOME):
     for p in snap.projects:
         live_log = (p.recent_runs[0].log_path
                     if p.recent_runs and p.recent_runs[0].status == "running" else None)
-        roles_exist = os.path.exists(os.path.join(root, "projects", p.name, "roles"))
         for agent, since in p.running:
             # Authoritative first: the task THIS running agent recorded via run_tasks — its claim, else
-            # the first task it has touched so far. Only when the run has recorded nothing yet (before
-            # it claims) or predates the feature do we fall through to the heuristic guess below.
+            # the first task it touched. Fall back to the machine-derived guess only before it records.
             rr = next((x for x in p.recent_runs
                        if x.status == "running" and x.agent == agent), None)
             task = (rr.claim or (rr.task_ids[0] if rr.task_ids else "")) if rr else ""
             if not task:
-                handles = _agent_handles(root, p.name, agent)
-                if handles is not None:              # a known role → agent-aware guess
-                    task = running_task_id(p, handles)
-                elif roles_exist:                    # roles file present, agent absent → non-role (deploy) → task-less
-                    task = ""
-                else:                                # no roles file at all → generic fallback guess
-                    task = running_task_id(p)
+                task = running_task_id(p)
             out.append(dict(project=p.name, agent=agent, since=since,
                             secs=seconds_between(since, now),
                             task=task, log_path=live_log))
@@ -1113,99 +1076,6 @@ class App:
         return dict(id=f"__hdr::{label}", kind="header", project=None, task=None,
                     status=status, running=False, sel=False, label=label)
 
-    def left_rows(self):
-        """Rows: dicts {id, kind, label, project, task, status, running, sel}.
-        kind in {running, project, task, header}; headers aren't selectable (sel=False).
-        Live threads lead as a '▶ running' group (select one to watch its log); the rest
-        is grouped by status with counts and project shape-badges (M/R/B/Q/E)."""
-        rows = []
-        if not self.snap:
-            return rows
-        now = self._now()
-        order = QUEUE_ORDER + PARKED_ORDER if self.show_parked else QUEUE_ORDER
-        threads = running_threads(self.snap, now, self.root)
-        running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
-        if threads:
-            rows.append(self._header_row(f"▶ running ({len(threads)})", "ready_to_merge"))
-            for t in threads:
-                tid = t["task"] or "—"
-                rows.append(dict(id=f"run::{t['project']}", kind="running",
-                                 project=t["project"], agent=t["agent"], since=t["since"],
-                                 log_path=t["log_path"], task_id=t["task"], task=None,
-                                 status="doing", running=True, sel=True,
-                                 label=f"  {tid:<7} {t['project'][:9]:<9} "
-                                       f"{t['agent']} {fmt_elapsed(t['secs'])}"))
-
-        def keep(proj, task):                 # don't repeat a thread's task in its status group
-            return (proj, task.id) not in running_ids
-
-        if self.mode == "queue":
-            byst = {}
-            for (proj, task, st) in action_queue(self.snap, order):
-                if keep(proj, task):
-                    byst.setdefault(st, []).append((proj, task))
-
-            def emit_group(label, st, items):
-                rows.append(self._header_row(label, st))
-                for (proj, task) in items:
-                    title = truncate_words(task.title, 40)
-                    rows.append(dict(id=task.id, kind="task", project=proj, task=task,
-                                     status=st, running=False, sel=True,
-                                     label=f"  {task.id:<7} {proj[:9]:<9} {title}"))
-
-            # Band B — ⚡ NEEDS YOU (the four founder gates), or the all-clear line.
-            gate_items = [(st, byst.get(st, [])) for st in GATE_ORDER]
-            if any(items for _st, items in gate_items):
-                rows.append(self._header_row(
-                    f"⚡ NEEDS YOU ({gate_count(self.snap, running_ids)})", "ready_to_merge"))
-                for st, items in gate_items:
-                    if items:
-                        emit_group(f"{GATE_ICON[st]} {st} ({len(items)})", st, items)
-            else:
-                rows.append(self._header_row(allclear_line(len(threads)), "ready"))
-
-            # Band C — ⚙ the loop (collapsed; its tasks are summarised, never listed).
-            summary = loop_summary(self.snap, running_ids)
-            if summary:
-                rows.append(self._header_row(summary, "ready"))
-
-            # Founder-parked work (backlog/deferred) — revealed only by `b`, as rows.
-            if self.show_parked:
-                for st in PARKED_ORDER:
-                    items = byst.get(st, [])
-                    if items:
-                        emit_group(f"{st} ({len(items)})", st, items)
-        else:
-            for p in self.snap.projects:
-                run = ""
-                if p.running:
-                    a, since = p.running[0]
-                    run = f"  ▶ {fmt_elapsed(seconds_between(since, now))}"
-                badges = project_badges(p)
-                bl = f"   {badges}" if badges else ""
-                rows.append(dict(id=p.name, kind="project", project=p.name, task=None,
-                                 status=None, running=bool(p.running), sel=True,
-                                 label=f"{p.name}{run}{bl}"))
-                if p.name in self.expanded:
-                    byst = {}
-                    for (proj, task, st) in action_queue(self.snap, order):
-                        if proj == p.name and keep(proj, task):
-                            byst.setdefault(st, []).append(task)
-                    for st in order:
-                        items = byst.get(st)
-                        if not items:
-                            continue
-                        rows.append(self._header_row(f"  {st} ({len(items)})", st))
-                        for task in items:
-                            title = truncate_words(task.title, 44)
-                            rows.append(dict(id=task.id, kind="task", project=p.name,
-                                             task=task, status=st, running=False, sel=True,
-                                             label=f"    {task.id:<7} {title}"))
-        if self.filter:                       # filtering flattens to matching task rows
-            rows = [r for r in rows if r["kind"] in ("task", "running")]
-            rows = filter_rows(rows, self.filter, key=lambda r: r["label"])
-        return rows
-
     def _selectable(self, rows):
         return [i for i, r in enumerate(rows) if r.get("sel", True)]
 
@@ -1285,111 +1155,6 @@ class App:
         return head
 
     # ---- draw ----
-    def draw(self):
-        scr = self.scr
-        scr.erase()
-        h, w = scr.getmaxyx()
-        now = self._now()
-        cap = " · ⏸ COOLING" if (self.snap and self.snap.cap_state) else ""
-        clk = to_local_hhmm(self.snap.ts, with_secs=True) if self.snap else ""
-        wstate, wint, wpar = watch_state(self.root)
-        if wstate == "running":
-            badge = f"● watch {wint or '?'}s ×{wpar or '?'}"
-        elif wstate == "paused":
-            badge = "⏸ PAUSED"
-        else:
-            badge = "○ watch stopped"
-        threads = running_threads(self.snap, now, self.root) if self.snap else []
-        run = f" · ▶ {len(threads)} running" if threads else ""
-        running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
-        ng = gate_count(self.snap, running_ids) if self.snap else 0
-        gates = f" · ⚡{ng}" if ng else ""
-        ws = self.snap.workspace if self.snap else None
-        ident = f"DAIS · {ws} · LIVE" if ws else "DAIS · LIVE"   # show where you are
-        head = f" {ident}  {clk} · ↻{self.interval:g}s · {badge}{run}{gates}{cap}"
-        if self.filtering:
-            head += f"   /{self.filter}_"
-        elif self.flash and time.monotonic() < self._flash_until:
-            head += f"   — {self.flash}"
-        head_attr = (self._cp(7) | curses.A_BOLD) if self.has_color else curses.A_REVERSE
-        _add(scr, 0, 0, pad_cols(head, w - 1), w, head_attr)
-
-        rows = self.left_rows()
-        sel_i, sel_row = self._selected(rows)
-        self.sel_id = sel_row["id"] if sel_row else None
-        body_top = 1
-        body_h = max(1, h - body_top - 2)
-        wide = w >= 80
-        split = max(30, w * 2 // 5) if wide else w
-        # left pane (scrolls with selection)
-        base = max(0, sel_i - body_h + 1) if rows else 0
-        view = rows[base:][:body_h] if rows else []
-        for idx, r in enumerate(view):
-            attr = self._row_attr(r)
-            if (base + idx) == sel_i and self.focus == "left" and r.get("sel", True):
-                attr |= curses.A_REVERSE
-            _add(scr, body_top + idx, 0, pad_cols(r["label"], split - 1), split, attr)
-        # right pane (detail)
-        if wide:
-            dw = w - split - 2
-            for y in range(body_top, body_top + body_h):
-                _add(scr, y, split - 1, "│", w, curses.A_DIM)
-            if sel_row and sel_row.get("kind") == "running":
-                # fixed header + a divider/scroll-indicator row, then the live log:
-                # follows the newest line by default; scroll up (tab to the pane,
-                # then j/k · PgUp/Dn · Home/End) to read history back to line one.
-                yy = body_top
-                for ln in self.running_header(sel_row, now):
-                    if yy >= body_top + body_h:
-                        break
-                    _add(scr, yy, split + 1, ln, w, self._cp(1) | curses.A_BOLD)
-                    yy += 1
-                log_h = max(0, body_top + body_h - yy - 1)   # reserve a row for the divider
-                disp = self._log_disp(sel_row.get("log_path"), dw)
-                total = len(disp)
-                start, self.log_top, self.log_follow, max_top = log_window(
-                    total, log_h, self.log_top, self.log_follow)
-                self._log_h, self._log_total = log_h, total
-                hot = (self.focus == "right")               # is this pane taking scroll keys?
-                if total == 0:
-                    bar = "── live log ── (no output yet)"
-                elif self.log_follow:
-                    bar = "── live log ── following" + ("  ·  k to scroll back" if hot else "")
-                else:
-                    bar = (f"── log {start + 1}-{min(start + log_h, total)}/{total} ── "
-                           + ("j/k·PgUp/Dn·Home·End=live" if hot else "tab to scroll"))
-                _add(scr, yy, split + 1, bar, w, self._cp(3) | curses.A_BOLD)
-                yy += 1
-                for piece, attr in disp[start:start + log_h]:
-                    _add(scr, yy, split + 1, piece, w, attr)
-                    yy += 1
-            else:
-                wrapped = []
-                for ln in self.detail_lines(sel_row):
-                    if len(ln) <= dw:
-                        wrapped.append(ln)
-                        continue
-                    indent = " " * (len(ln) - len(ln.lstrip()))
-                    wrapped.extend(textwrap.wrap(ln, dw, subsequent_indent=indent) or [""])
-                self.detail_scroll = max(0, min(self.detail_scroll, max(0, len(wrapped) - 1)))
-                shown = wrapped[self.detail_scroll:self.detail_scroll + body_h]
-                for idx, ln in enumerate(shown):
-                    attr = self._line_attr(ln)
-                    if self.focus == "right" and idx == 0:
-                        attr |= curses.A_REVERSE
-                    _add(scr, body_top + idx, split + 1, ln, w, attr)
-        sind = scroll_indicator(base, len(view), len(rows))
-        parked = " · b hide-parked" if self.show_parked else " · b parked"
-        nav = f" j/k move · tab pane · g group · / filter{parked} · l log · q quit"
-        if sind:
-            nav += f"   {sind}"
-        # second footer line: the contextual action bar for the selected row
-        bar = " " + self.action_bar(sel_row)
-        _add(scr, h - 2, 0, pad_cols(nav, w - 1), w, curses.A_REVERSE)
-        _add(scr, h - 1, 0, pad_cols(bar, w - 1), w, curses.A_REVERSE | curses.A_BOLD)
-        scr.refresh()
-
-    # ---- input ----
     def launch_logs(self, row):
         if not row or not self.snap:
             return
@@ -1986,11 +1751,8 @@ def main(argv):
             print("dais top needs an interactive terminal; use `dais status`.",
                   file=sys.stderr)
             return 2
-        if os.environ.get("DAIS_CLASSIC"):       # opt back into the classic single-pane UI
-            curses.wrapper(lambda scr: App(scr, args.interval).run())
-        else:                                    # the control panel is the default `dais top`
-            import panel
-            curses.wrapper(lambda scr: panel.PanelApp(scr, args.interval).run())
+        import panel
+        curses.wrapper(lambda scr: panel.PanelApp(scr, args.interval).run())
         return 0
     with connect() as conn:
         print(render_plain(load_snapshot(conn)))
