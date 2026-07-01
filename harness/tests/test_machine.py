@@ -317,6 +317,24 @@ class TestLintGaps(unittest.TestCase):
         self.assertEqual(M.dispatch_role(self.m, "ready"), "engineer")  # declared before qa
 
 
+class TestReleaseLane(unittest.TestCase):
+    """release_lane(m) -> (open_state, pool_state, lane_states): where a release starts, which
+    state its assemble aggregates, and every non-terminal state of the lane — so a UI can offer
+    'cut a release' and refuse a second one while one is in flight."""
+
+    def test_coding_machine_lane(self):
+        m = M.load(M.default_machine_path())
+        open_state, pool, lane = M.release_lane(m)
+        self.assertEqual(open_state, "release_open")
+        self.assertEqual(pool, "approved")
+        self.assertEqual(lane, {"release_open", "release_review", "releasing", "release_failed"})
+
+    def test_machine_without_release_lane(self):
+        m = {"states": {"a": {}, "done": {"terminal": True}},
+             "edges": [{"from": "a", "verb": "finish", "by": "x", "to": "done"}]}
+        self.assertEqual(M.release_lane(m), (None, None, set()))
+
+
 class TestSystemSweeps(unittest.TestCase):
     """The dispatcher's machine hooks: `advance` (system `unblocked` edges, each tick) and
     `recover` (system `interrupt` edges, orphan-reconcile) — both scoped to ONE project so a

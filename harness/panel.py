@@ -737,6 +737,7 @@ _HELP_LINES = [
     "  + / -             raise / lower priority",
     "  o                 open the PR in a browser",
     "  n                 new task",
+    "  C                 cut a release — assembles everything approved, then your greenlight",
     "  enter             action menu for the selection",
     "  / filter          filter; type, enter to keep, esc to clear",
     "  g expand          show every phase (incl. empty) + the full archive (else compact)",
@@ -854,6 +855,39 @@ class PanelApp(d.App):
             rows = d.filter_rows(rows, self.filter, key=_row_search_text)
         return rows
 
+    def _cut_release(self, row):
+        """C — cut a release for the selected row's project: create the release task at the
+        machine's release-open state (priority high so it dispatches promptly). The engineer's
+        next run fires `assemble`, sweeping everything in the pool state (approved) under it;
+        then release_review waits on the founder's greenlight. Refuses an empty pool and a
+        second in-flight release."""
+        proj = (row.get("project") if row else None) or self.project_filter
+        p = next((x for x in (self.snap.projects if self.snap else []) if x.name == proj), None)
+        if not p:
+            self.flash = "pick a project row first (a release is per-project)"
+            return
+        open_state, pool, lane = MC.release_lane(p.machine)
+        if not open_state:
+            self.flash = f"{proj}'s machine has no release lane"
+            return
+        in_flight = [t for st, ts in p.tasks_by_status.items() if st in lane for t in ts]
+        if in_flight:
+            t = in_flight[0]
+            self.flash = f"release {t.id} already in flight ({t.status}) — finish or abort it first"
+            return
+        n = len(p.tasks_by_status.get(pool, []))
+        if not n:
+            self.flash = f"nothing in {pool} — there's no QA-passed work to ship"
+            return
+        if not self._confirm(f"cut a release in {proj}? assemble will sweep {n} {pool} task(s)"):
+            return
+        title = f"Release: {proj} — {n} {pool} task(s)"
+        rc = self._dispatch(["task", "add", proj, title, "--status", open_state,
+                             "--priority", "high"])
+        self.refresh()
+        self.flash = (f"release cut in {proj} — the engineer assembles next"
+                      if rc == 0 else f"release add failed (exit {rc})")
+
     def _capture(self, cmd):
         """Run a non-interactive `dais …` command capturing its output. Returns (rc, text)."""
         r = d.subprocess.run([self._dais()] + [str(c) for c in cmd],
@@ -964,6 +998,9 @@ class PanelApp(d.App):
                 self._runs = d.load_runs(self.conn)
             except d.sqlite3.Error:
                 self._runs = []
+            return True
+        if ch == ord("C"):                      # cut a release for the selected row's project
+            self._cut_release(sel_row)
             return True
         # global panel keys first
         if ch == ord("q"):

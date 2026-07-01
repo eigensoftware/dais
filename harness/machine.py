@@ -181,6 +181,33 @@ def edges_from(m, state):
     return [e for e in (m or {}).get("edges", []) if e.get("from") == state]
 
 
+
+def release_lane(m):
+    """(open_state, pool_state, lane_states) for the machine's release lane — the from-state of
+    the first edge carrying an `aggregate` effect, the state its select clause pools (what
+    assemble sweeps), and every non-terminal state reachable from open_state (the lane itself,
+    for is-a-release-in-flight checks). (None, None, set()) when the machine has no lane."""
+    for e in (m or {}).get("edges", []):
+        eff = e.get("effect") or {}
+        for x in (eff if isinstance(eff, list) else [eff]):
+            if isinstance(x, dict) and "aggregate" in x:
+                sel = (x["aggregate"] or {}).get("select", "")
+                pool = sel.split("=", 1)[1].strip() if "=" in sel else "approved"
+                start = e["from"]
+                lane, todo = set(), [start]
+                while todo:
+                    st = todo.pop()
+                    if st in lane:
+                        continue
+                    lane.add(st)
+                    for e2 in edges_from(m, st):
+                        to = e2.get("to")
+                        if to and not m.get("states", {}).get(to, {}).get("terminal"):
+                            todo.append(to)
+                return start, pool, lane
+    return None, None, set()
+
+
 def dispatch_role(m, state):
     """The agent role the scheduler launches for a task in `state`, or None (parks for a human /
     awaits a system edge). One agent actor → that role. Multiple actors is an E3 lint error UNLESS

@@ -1123,6 +1123,58 @@ class TestSplitBands(unittest.TestCase):
             self.assertEqual(ys[i], ys[i - 1] + hs[i - 1])
 
 
+class TestCutRelease(unittest.TestCase):
+    """C cuts a release for the selected row's project: creates the release task at the machine's
+    release-open state so the engineer's next run assembles everything approved. Refuses when
+    nothing is approved or when a release is already in flight."""
+
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-cutrel-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def test_cut_release_dispatches_task_add_at_release_open(self):
+        papp = self._papp([("a-1", "p", "shipped work", "approved", "high", None)])
+        sent = []
+        with mock.patch.object(papp, "_confirm", return_value=True), \
+             mock.patch.object(papp, "_dispatch", side_effect=lambda c: sent.append(c) or 0):
+            papp._cut_release({"project": "p"})
+        self.assertEqual(len(sent), 1)
+        cmd = sent[0]
+        self.assertEqual(cmd[:3], ["task", "add", "p"])
+        self.assertIn("--status", cmd); self.assertEqual(cmd[cmd.index("--status") + 1], "release_open")
+
+    def test_refuses_when_nothing_approved(self):
+        papp = self._papp([("a-1", "p", "queued", "ready", "high", None)])
+        sent = []
+        with mock.patch.object(papp, "_confirm", return_value=True), \
+             mock.patch.object(papp, "_dispatch", side_effect=lambda c: sent.append(c) or 0):
+            papp._cut_release({"project": "p"})
+        self.assertEqual(sent, [])
+        self.assertIn("nothing", papp.flash)
+
+    def test_refuses_when_a_release_is_in_flight(self):
+        papp = self._papp([("a-1", "p", "shipped work", "approved", "high", None),
+                           ("rel-1", "p", "Release", "release_review", "high", None)])
+        sent = []
+        with mock.patch.object(papp, "_confirm", return_value=True), \
+             mock.patch.object(papp, "_dispatch", side_effect=lambda c: sent.append(c) or 0):
+            papp._cut_release({"project": "p"})
+        self.assertEqual(sent, [])
+        self.assertIn("rel-1", papp.flash)
+
+    def test_C_key_routes_to_cut_release(self):
+        papp = self._papp([("a-1", "p", "x", "approved", "high", None)])
+        with mock.patch.object(papp, "_cut_release") as cr:
+            papp.handle(ord("C"), [], 0, {"project": "p"})
+        cr.assert_called_once()
+
+
 class TestRailSelectionUniformBar(unittest.TestCase):
     """The rail CURSOR is ONE uniform bright bar (the WORK-list convention: selection is the bar,
     not the row's hue) — no yellow needs-you patch, no green live hue, no dim zero-dots inside the
