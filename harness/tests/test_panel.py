@@ -1123,6 +1123,43 @@ class TestSplitBands(unittest.TestCase):
             self.assertEqual(ys[i], ys[i - 1] + hs[i - 1])
 
 
+class TestRailSelectionUniformBar(unittest.TestCase):
+    """The rail CURSOR is ONE uniform bright bar (the WORK-list convention: selection is the bar,
+    not the row's hue) — no yellow needs-you patch, no green live hue, no dim zero-dots inside the
+    selection. All hues resume the moment the cursor moves off the row."""
+
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-railsel-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("a-1", "alpha", "gate", "proposal_review", "high", None),
+                                     ("a-2", "alpha", "work", "ready", "med", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]  # live -> green hue
+        papp._cp = lambda n: n * 1000
+        papp._rail_i = 1                                    # cursor on 'alpha' (0 = ALL)
+        return papp
+
+    def test_selected_row_is_one_uniform_bar(self):
+        papp = self._papp()
+        scr = FakeScr(40, 80)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 30), papp, focused=True)
+        row_y = next(c[0] for c in scr.calls if "alpha" in c[2])
+        bar = curses.A_REVERSE | curses.A_BOLD
+        for c in scr.calls:
+            if c[0] == row_y and c[2].strip():
+                self.assertEqual(c[3], bar,
+                                 "cell %r attr %r != the uniform selection bar" % (c[2], c[3]))
+
+    def test_unselected_rows_keep_their_hues(self):
+        papp = self._papp()
+        scr = FakeScr(40, 80)
+        pn.render_rail(scr, pn.Rect(1, 0, 20, 30), papp, focused=False)   # no cursor anywhere
+        cells = [c[3] for c in scr.calls if c[2].strip() == "1"]
+        self.assertIn(4000 | curses.A_BOLD, cells)          # the yellow needs-you pop is back
+
+
 class TestRailNeedsYouChip(unittest.TestCase):
     def _papp(self):
         import tempfile

@@ -573,8 +573,14 @@ def render_rail(scr, rect, app, focused):
         rev = curses.A_REVERSE if (focused and idx == ri) else 0
         run, you, que, wait, done = _rail_counts(app, name)
         live = run > 0 and name != "ALL"                # ALL is an aggregate, never "the live one"
-        rowattr = (app._cp(_LIVE) if live else 0) \
-            | (curses.A_BOLD if (active and name != "ALL") else 0) | rev
+        # the cursor is ONE uniform bright bar (the WORK-list convention: selection is the bar,
+        # not the row's hue) — the yellow needs-you pop, green live hue and dim zeros all resume
+        # the moment the cursor moves off the row.
+        if rev:
+            rowattr = curses.A_REVERSE | curses.A_BOLD
+        else:
+            rowattr = (app._cp(_LIVE) if live else 0) \
+                | (curses.A_BOLD if (active and name != "ALL") else 0)
         mark = "\xbb" if active else " "                    # »
         dot = _DOT_RUN if live else " "                 # ● marks the live project (shared with vitals)
         label = f"{mark}{dot} {name}"                    # mark · dot · a space so the ● isn't jammed to the name
@@ -582,12 +588,14 @@ def render_rail(scr, rect, app, focused):
              inner.x + inner.w, rowattr)                # paint the row full-width so the cursor spans it
         for ci, v in enumerate((run, you, que, wait, done)[:n_cols]):
             cell = f"{v:>{_RAIL_COL_W}}" if v else f"{'·':>{_RAIL_COL_W}}"
-            if v and ci == 1:                           # needs-you (founder gate) pops bold yellow
-                cattr = app._cp(_NEEDS_YOU) | curses.A_BOLD | rev
+            if rev:
+                cattr = rowattr                         # inside the selection bar: uniform, no hues
+            elif v and ci == 1:                         # needs-you (founder gate) pops bold yellow
+                cattr = app._cp(_NEEDS_YOU) | curses.A_BOLD
             elif v:
-                cattr = rowattr if live else rev
+                cattr = rowattr if live else 0
             else:
-                cattr = curses.A_DIM | rev              # a zero is a faint · — present, not shouting
+                cattr = curses.A_DIM                    # a zero is a faint · — present, not shouting
             _add(scr, y, cols_x + ci * _RAIL_COL_W, cell, inner.x + inner.w, cattr)
 
 
