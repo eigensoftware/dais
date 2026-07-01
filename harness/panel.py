@@ -1002,16 +1002,19 @@ def _task_row(proj, task, tag):
             "status": task.status, "tag": tag, "sel": True}
 
 
+_PRIO_TAG = {"critical": "CRIT", "high": "HIGH", "medium": "MED", "low": "LOW"}
+
+
 def _machine_work_rows(snap, projects, project, expanded, root):
-    """WORK list for machine-driven projects — bands DERIVED from each project's machine
-    (machine.band_of), so changing the model needs no panel edits. RUNNING is the live-run overlay;
-    the rest come straight from the machine's state->band mapping (NEEDS YOU/QUEUED/WAITING/ARCHIVE,
-    plus any founder-defined custom bands). Empty NEEDS YOU/QUEUED collapse to a dim header; WAITING
-    only shows when non-empty; ARCHIVE is capped unless expanded."""
+    """WORK list for a machine-driven board: one band PER machine state, in the machine's declared
+    (flow) order — so the board mirrors the AUTHORED workflow, not fixed buckets. RUNNING is the
+    live-run overlay; terminal states collapse into ARCHIVE; a founder-gate phase is flagged ◆.
+    Empty phases show as compact dim headers (no spacer), so the whole workflow skeleton is visible
+    without noise. Row tags are priority (the phase is already the band)."""
     rows = []
 
     def add_band(name, count):
-        if rows:
+        if rows and count > 0:            # spacer only above a populated band — empties stay compact
             rows.append({"kind": "spacer", "id": f"__sp::{name}", "sel": False, "label": ""})
         rows.append(_band(name, count))
 
@@ -1026,31 +1029,37 @@ def _machine_work_rows(snap, projects, project, expanded, root):
                      "status": "doing", "sel": True, "agent": t["agent"],
                      "since": t["since"], "log_path": t["log_path"]})
 
-    # bucket every non-running task into its machine-derived band
-    bucket = {}
+    by_state = {}
     for p in projects:
         for st, ts in p.tasks_by_status.items():
-            band = MC.band_of(p.machine, st)
             for t in ts:
-                if (p.name, t.id) in running_ids:
-                    continue
-                bucket.setdefault(band, []).append((p.name, t))
+                if (p.name, t.id) not in running_ids:
+                    by_state.setdefault(st, []).append((p.name, t))
 
-    def emit(name, items, cap=None):
-        add_band(name, len(items))
-        show = items if (cap is None or expanded) else items[:cap]
-        for proj, t in show:
-            rows.append(_task_row(proj, t, _short_tag(t.status)))
+    # bands = the machine's states in declared (flow) order; terminals -> ARCHIVE; NEEDS-YOU flagged.
+    order, seen, terminal, gate = [], set(), set(), set()
+    for p in projects:
+        m = p.machine or {}
+        for st, meta in m.get("states", {}).items():
+            if meta.get("terminal"):
+                terminal.add(st)
+            elif st not in seen:
+                order.append(st); seen.add(st)
+                if MC.band_of(m, st) == "NEEDS YOU":
+                    gate.add(st)
+    for st in by_state:                       # populated states no in-scope machine declares (stale)
+        if st not in seen and st not in terminal:
+            order.append(st); seen.add(st)
 
-    emit("NEEDS YOU", bucket.pop("NEEDS YOU", []))            # always shown (collapses when empty)
-    emit("QUEUED", bucket.pop("QUEUED", []))
-    waiting = bucket.pop("WAITING", [])
-    if waiting:                                               # only when non-empty
-        emit("WAITING", waiting)
-    for name in sorted(b for b in bucket if b not in ("ARCHIVE",)):   # founder-defined custom bands
-        if bucket[name]:
-            emit(name, bucket[name])
-    emit("ARCHIVE", bucket.pop("ARCHIVE", []), cap=_ARCHIVE_CAP)
+    def emit(label, items, cap=None):
+        add_band(label, len(items))
+        for proj, t in (items if (cap is None or expanded) else items[:cap]):
+            rows.append(_task_row(proj, t, _PRIO_TAG.get(t.priority, "MED")))
+
+    for st in order:
+        emit(st.replace("_", " ").upper() + ("  ◆ you" if st in gate else ""), by_state.get(st, []))
+    emit("ARCHIVE", [it for st, items in by_state.items() if st in terminal for it in items],
+         cap=_ARCHIVE_CAP)
     return rows
 
 
