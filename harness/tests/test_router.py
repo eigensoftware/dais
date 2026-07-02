@@ -108,6 +108,28 @@ class TestTriggerNone(unittest.TestCase):
         self.assertEqual(router.decide(_ws([("a", "proposed")], roles=roles), "p"), "lead")
 
 
+class TestExcludedRoles(unittest.TestCase):
+    """decide(root, project, excluded={...}) skips tasks whose dispatch role is excluded and keeps
+    scanning — so a throttled lead doesn't starve the engineer's ready work behind it. Cadence
+    honors the exclusion too."""
+
+    def test_excluded_top_role_falls_through_to_next_task(self):
+        # proposed (high -> lead) outranks ready (med -> engineer); excluding lead surfaces engineer
+        root = _ws([("a", "proposed", None, "high"), ("b", "ready", None, "medium")])
+        self.assertEqual(router.decide(root, "p"), "lead")
+        self.assertEqual(router.decide(root, "p", excluded={"lead"}), "engineer")
+
+    def test_excluded_only_role_idles(self):
+        root = _ws([("a", "proposed")])
+        self.assertIsNone(router.decide(root, "p", excluded={"lead"}))
+
+    def test_cadence_honors_exclusion(self):
+        # no reactive work; the cadence lead would run — unless excluded
+        root = _ws([("a", "approved")], roles=ROLES_WITH_LEAD)
+        self.assertEqual(router.decide(root, "p"), "lead")
+        self.assertIsNone(router.decide(root, "p", excluded={"lead"}))
+
+
 class TestCadence(unittest.TestCase):
     def test_lead_cadence_runs_for_discovery_when_idle(self):
         # no dispatchable reactive work → the lead still runs on its cadence (first run, never-run).

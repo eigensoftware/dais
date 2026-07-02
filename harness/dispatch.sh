@@ -110,25 +110,28 @@ for proj in "${projects[@]}"; do
   done
   [ "$busy" = 1 ] && continue   # already running its one agent — counted in `running` above
 
-  # who runs next is decided by the project's roles config (see harness/router.py) — no
-  # role names hardcoded here. The router returns a role name to run, or nothing (idle).
-  agent="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" 2>/dev/null)"
+  # who runs next is decided by the project's roles config (see harness/router.py) — no role
+  # names hardcoded here. The router returns a role to run, or nothing (idle). A role whose LAST
+  # run succeeded recently but touched no tasks (run_tasks, the authoritative trail) is THROTTLED
+  # — it already said "nothing actionable"; re-dispatching it every tick hot-loops (a lead burned
+  # ~12 runs/20min on a proposal it wouldn't submit). Throttling skips the ROLE, not the project:
+  # we re-ask the router with that role excluded, so ready work behind a cooled lead still runs.
+  agent=""; excl=""
+  while :; do
+    cand="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" "$excl" 2>/dev/null)"
+    [ -z "$cand" ] && break
+    last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes'))
+                         || '|' || (SELECT COUNT(*) FROM run_tasks rt WHERE rt.run_id=r.id)
+                FROM runs r WHERE r.project='$(sqlesc "$proj")' AND r.agent='$(sqlesc "$cand")'
+                ORDER BY r.id DESC LIMIT 1;" 2>/dev/null)"
+    if [ "$last" = "succeeded|1|0" ]; then
+      tlog "throttle $proj/$cand — last run was a recent no-op; cooling 45m (trying next role)"
+      excl="${excl:+$excl,}$cand"
+      continue
+    fi
+    agent="$cand"; break
+  done
   [ -z "$agent" ] && continue
-
-  # no-progress throttle: if this role's LAST run succeeded recently but touched no tasks
-  # (run_tasks is the authoritative trail), don't re-dispatch it — it already said "nothing
-  # actionable", and a machine state that keeps naming a role which keeps declining to act
-  # would otherwise hot-loop it every tick (a lead burned ~12 runs/20min on a proposed task
-  # it wouldn't submit). An older no-op, a run that acted, or a failed/interrupted run
-  # dispatches normally; pre-migration DBs (no run_tasks) skip the check.
-  last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes'))
-                       || '|' || (SELECT COUNT(*) FROM run_tasks rt WHERE rt.run_id=r.id)
-              FROM runs r WHERE r.project='$(sqlesc "$proj")' AND r.agent='$(sqlesc "$agent")'
-              ORDER BY r.id DESC LIMIT 1;" 2>/dev/null)"
-  if [ "$last" = "succeeded|1|0" ]; then
-    tlog "throttle $proj/$agent — last run was a recent no-op; cooling 45m"
-    continue
-  fi
 
   prio="$(pcfg "$proj" priority)"; [[ "$prio" =~ ^[0-9]+$ ]] || prio=100
   lastrun="$(db "SELECT COALESCE(MAX(started_at),'') FROM runs WHERE project='$(sqlesc "$proj")';")"

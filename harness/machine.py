@@ -254,12 +254,14 @@ def _dep_open(conn, tid):
     return bool(pred) and pred[0] not in ("done", "cancelled")
 
 
-def next_role(conn, m, project):
+def next_role(conn, m, project, excluded=frozenset()):
     """Reactive dispatch (the scheduler): the role to launch next for this project — the dispatch
     role of the highest-priority pending task sitting in a state that auto-dispatches. '' when
     nothing is dispatchable (the caller then considers cadence roles). Blocked/parked/gate states
     have no dispatch role, so they're naturally skipped; a task waiting on an open dependency
-    (tasks.blocked_on) is skipped too."""
+    (tasks.blocked_on) is skipped too. `excluded` roles are skipped WHILE SCANNING (the next
+    dispatchable task of a different role still surfaces) — how the dispatcher's no-progress
+    throttle avoids starving a whole project on one cooled role."""
     rows = conn.execute("SELECT id, status, COALESCE(priority,'medium') FROM tasks "
                         "WHERE project=? AND status NOT IN ('done','cancelled')", (project,)).fetchall()
     best = None
@@ -267,7 +269,7 @@ def next_role(conn, m, project):
         rid = r["id"] if hasattr(r, "keys") else r[0]
         status = r["status"] if hasattr(r, "keys") else r[1]
         role = dispatch_role(m, status)
-        if not role or _dep_open(conn, rid):
+        if not role or role in excluded or _dep_open(conn, rid):
             continue
         prio = (r["COALESCE(priority,'medium')"] if hasattr(r, "keys") else r[2])
         key = (_PRIORITY_RANK.get(prio, 2), rid)

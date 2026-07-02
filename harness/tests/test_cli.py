@@ -97,6 +97,17 @@ class TestNoopThrottle(CliTest):
         r = dais(self.root, "tick", "demo", "--dry-run")
         self.assertIn("WOULD run lead", r.stdout)
 
+    def test_throttled_role_does_not_starve_the_project(self):
+        # the lead is throttled (recent no-op) but READY work exists for the engineer — the tick
+        # must fall through to the engineer, not skip the whole project for the cooldown.
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "An initiative", "--id", "d-1")            # proposed -> lead
+        dais(self.root, "task", "add", "demo", "Build it", "--id", "d-2", "--status", "ready")
+        self._seed_run(5)
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run engineer", r.stdout)
+        self.assertNotIn("WOULD run lead", r.stdout)
+
     def test_run_that_touched_tasks_does_not_throttle(self):
         dais(self.root, "scaffold", "demo")
         dais(self.root, "task", "add", "demo", "An initiative", "--id", "d-1")

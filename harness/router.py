@@ -51,8 +51,11 @@ def _machine_for(root, project):
     return MC.project_machine_path(root, project, ref)
 
 
-def decide(root, project):
-    """Which role should run next for this project (or None = idle)."""
+def decide(root, project, excluded=None):
+    """Which role should run next for this project (or None = idle). `excluded` roles (the
+    dispatcher's no-progress throttle) are skipped in BOTH reactive dispatch and cadence, but
+    other roles' work still surfaces — a cooled lead must not starve the engineer behind it."""
+    excluded = excluded or set()
     roles, _ = parse_roles(os.path.join(root, "projects", project, "roles"))
     if not roles:
         return None
@@ -65,12 +68,15 @@ def decide(root, project):
     #    trigger=none is DORMANCY and outranks the machine: a shelved role (e.g. a parked project's
     #    lead) is never scheduled even when an edge would dispatch it — none means never scheduled.
     import machine as MC
-    role = MC.next_role(db, MC.load(_machine_for(root, project)), project)
-    if role and not any(r["name"] == role and r["trigger"] == "none" for r in roles):
+    dormant = {r["name"] for r in roles if r["trigger"] == "none"}
+    role = MC.next_role(db, MC.load(_machine_for(root, project)), project,
+                        excluded=excluded | dormant)
+    if role:
         return role
 
     # 2) cadence: a role whose interval has elapsed (only when no reactive work)
-    for r in sorted([r for r in roles if r["trigger"].startswith("every:")],
+    for r in sorted([r for r in roles if r["trigger"].startswith("every:")
+                     and r["name"] not in excluded],
                     key=lambda r: r["prec"]):
         m = re.match(r"every:(\d+)h$", r["trigger"])
         if not m:
@@ -216,7 +222,8 @@ if __name__ == "__main__":
         project = sys.argv[3] if len(sys.argv) > 3 else ""
         sys.exit(lint(root, project))
     try:
-        name = decide(sys.argv[1], sys.argv[2])
+        excl = set(sys.argv[3].split(",")) - {""} if len(sys.argv) > 3 else set()
+        name = decide(sys.argv[1], sys.argv[2], excluded=excl)
         if name:
             print(name)
     except Exception:
