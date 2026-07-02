@@ -36,6 +36,7 @@ dais — your agent company control panel
   dais migrate                        apply pending DB migrations (run with watch paused)
   dais scaffold <project> [--template coding|marketing]  bootstrap a project (roles + machine) from a workflow template
   dais role new <project> [--desc "..."] [--yes]  Claude designs a new role (persona + routing); you confirm
+  dais version                        which build this machine runs (git tag/commit of the tool checkout)
 U
 }
 
@@ -90,6 +91,16 @@ MD
 
   migrate)
     db_init; echo "migrations applied (recorded in schema_version). tip: run with 'dais watch' paused." ;;
+
+  version|--version|-V)
+    # who is running what: the tool checkout's tag/commit (+ -dirty if locally modified),
+    # so two machines can compare builds at a glance. The workspace is stated too, since
+    # one tool can drive many workspaces.
+    desc="$(git -C "$DAIS_ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+    when="$(git -C "$DAIS_ROOT" log -1 --format=%cd --date=short 2>/dev/null || true)"
+    echo "dais $desc${when:+ ($when)}"
+    echo "  tool:      $DAIS_ROOT"
+    echo "  workspace: $DAIS_HOME" ;;
 
   status)
     # one-shot dashboard — data layer + renderer live in harness/dashboard.py,
