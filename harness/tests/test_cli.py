@@ -64,6 +64,47 @@ class TestStatusAndTitle(CliTest):
         self.assertEqual(q(self.root, "SELECT title FROM tasks WHERE id='d-2'")[0], "New title")
 
 
+class TestNoopThrottle(CliTest):
+    """A role whose LAST run succeeded recently but touched no tasks is NOT re-dispatched — the
+    reactive no-progress throttle. Without it the machine hot-loops a role that keeps declining
+    to act (a lead dispatched every tick for a proposed task it won't submit burned ~12 runs in
+    20 minutes). An older no-op, or a run that touched tasks, dispatches normally."""
+
+    def _seed_run(self, mins_ago, touched=None):
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status) "
+                     "VALUES('demo','lead',datetime('now','-%d minutes'),"
+                     "datetime('now','-%d minutes'),'succeeded')" % (mins_ago, mins_ago))
+        if touched:
+            rid = conn.execute("SELECT MAX(id) FROM runs").fetchone()[0]
+            conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(?,?,?)",
+                         (rid, touched, "touch"))
+        conn.commit(); conn.close()
+
+    def test_recent_noop_suppresses_redispatch(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "An initiative", "--id", "d-1")   # proposed -> lead
+        self._seed_run(5)
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run lead", r.stdout)
+        self.assertIn("nothing eligible", r.stdout)
+
+    def test_old_noop_dispatches_again(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "An initiative", "--id", "d-1")
+        self._seed_run(120)
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run lead", r.stdout)
+
+    def test_run_that_touched_tasks_does_not_throttle(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "An initiative", "--id", "d-1")
+        self._seed_run(5, touched="d-1")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run lead", r.stdout)
+
+
 class TestDbLifecycle(unittest.TestCase):
     def setUp(self):
         self.root = make_sandbox()

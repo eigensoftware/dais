@@ -115,6 +115,21 @@ for proj in "${projects[@]}"; do
   agent="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" 2>/dev/null)"
   [ -z "$agent" ] && continue
 
+  # no-progress throttle: if this role's LAST run succeeded recently but touched no tasks
+  # (run_tasks is the authoritative trail), don't re-dispatch it — it already said "nothing
+  # actionable", and a machine state that keeps naming a role which keeps declining to act
+  # would otherwise hot-loop it every tick (a lead burned ~12 runs/20min on a proposed task
+  # it wouldn't submit). An older no-op, a run that acted, or a failed/interrupted run
+  # dispatches normally; pre-migration DBs (no run_tasks) skip the check.
+  last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes'))
+                       || '|' || (SELECT COUNT(*) FROM run_tasks rt WHERE rt.run_id=r.id)
+              FROM runs r WHERE r.project='$(sqlesc "$proj")' AND r.agent='$(sqlesc "$agent")'
+              ORDER BY r.id DESC LIMIT 1;" 2>/dev/null)"
+  if [ "$last" = "succeeded|1|0" ]; then
+    tlog "throttle $proj/$agent — last run was a recent no-op; cooling 45m"
+    continue
+  fi
+
   prio="$(pcfg "$proj" priority)"; [[ "$prio" =~ ^[0-9]+$ ]] || prio=100
   lastrun="$(db "SELECT COALESCE(MAX(started_at),'') FROM runs WHERE project='$(sqlesc "$proj")';")"
   eligible+=("$prio|$lastrun|$proj|$agent")
