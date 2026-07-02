@@ -441,19 +441,22 @@ def render_inspector(scr, rect, app, focused):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     proj_head = False
+    rail_proj = None
     if app.pane_focus == "rail":
         items = _rail_items(app)
         name = items[app._rail_i] if 0 <= app._rail_i < len(items) else "ALL"
         if name != "ALL":                       # ALL is the totals row — nothing to explain
-            lines = d.render_project(app.root, name, color=False).splitlines()
-            while lines and not lines[0].strip():
-                lines.pop(0)                    # the CLI view leads with a blank; the pane title covers it
-            proj_head = True
-        else:
-            lines = _panel_detail_lines(app, sel_row)
+            rail_proj = name
+    if rail_proj:
+        lines = d.render_project(app.root, rail_proj, color=False).splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)                        # the CLI view leads with a blank; the pane title covers it
+        proj_head = True
     else:
         # A running selection streams its LIVE LOG right here (no need to pop the `l` pager or `L`
         # wall) — a short agent header, then the log tail, re-read each draw so it streams live.
+        # This MUST cover the rail-on-ALL case too: a running row has task=None, and the task
+        # formatter would crash on it (the bug that shipped with the first rail view).
         if sel_row and sel_row.get("kind") == "running":
             render_inspector_live_log(scr, inner, app, sel_row)
             return

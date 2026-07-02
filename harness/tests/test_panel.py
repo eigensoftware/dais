@@ -208,6 +208,21 @@ class TestPaneRenderers(unittest.TestCase):
         pn.render_inspector(scr2, rect, app, focused=False)
         self.assertIn("lyr-1", "\n".join(c[2] for c in scr2.calls))
 
+    def test_inspector_rail_all_with_running_selection_streams_log(self):
+        """Rail on ALL + a RUNNING selection must take the live-log path, not the task
+        formatter (task=None there — it crashed top until this was pinned)."""
+        app = self._app([("lyr-1", "beacon", "impl", "qa_review", "high", None)])
+        app.pane_focus = "rail"
+        app._rail_i = len(pn._rail_items(app)) - 1   # ALL
+        run_row = {"kind": "running", "id": "run::beacon/engineer", "project": "beacon",
+                   "task_id": "lyr-1", "task": None, "status": "doing", "sel": True,
+                   "agent": "engineer", "since": "2026-07-02 21:00:00", "log_path": None}
+        app.left_rows = lambda: [run_row]
+        scr = FakeScr(40, 200)
+        pn.render_inspector(scr, pn.Rect(2, 70, 30, 80), app, focused=False)   # must not raise
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("engineer", text)              # the live-log agent header drew
+
     def test_inspector_scroll_offsets_visible_window(self):
         """I1: detail_scroll must advance the visible window in render_inspector."""
         long_notes = "  ".join(f"note-line-{i}" for i in range(30))
