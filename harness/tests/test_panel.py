@@ -1191,7 +1191,7 @@ class TestRailSelectionUniformBar(unittest.TestCase):
         papp.snap = d.load_snapshot(conn, root=root)
         papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]  # live -> green hue
         papp._cp = lambda n: n * 1000
-        papp._rail_i = 1                                    # cursor on 'alpha' (0 = ALL)
+        papp._rail_i = 0                                    # cursor on 'alpha' (ALL is last now)
         return papp
 
     def test_selected_row_is_one_uniform_bar(self):
@@ -1344,13 +1344,13 @@ class TestRailScroll(unittest.TestCase):
 
     def test_cursor_stays_visible_when_selected_past_the_window(self):
         papp = self._papp(15)
-        items = pn._rail_items(papp)             # "ALL" + 15 projects = 16 rail items
-        papp._rail_i = len(items) - 1            # select the very last project
+        items = pn._rail_items(papp)             # 15 projects + "ALL" (totals row, last) = 16
+        papp._rail_i = len(items) - 1            # select the very last row (ALL)
         scr = FakeScr(40, 200)
         pn.render_rail(scr, pn.Rect(1, 0, 6, 30), papp, focused=True)   # body_h = 4 (title+header)
         text = "\n".join(c[2] for c in scr.calls)
-        self.assertIn(items[-1], text)           # the tail project is now on-screen (was truncated)
-        self.assertNotIn("ALL", text)            # the top scrolled off to make room
+        self.assertIn("ALL", text)               # the tail row (ALL) is now on-screen
+        self.assertNotIn(items[0], text)         # the top scrolled off to make room
         cursor = [c for c in scr.calls if (c[3] & curses.A_REVERSE) and items[-1] in c[2]]
         self.assertTrue(cursor)                  # the reverse cursor lands on the selected row
 

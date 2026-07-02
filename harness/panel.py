@@ -527,8 +527,10 @@ def render_vitals(scr, rect, app):
 
 
 def _rail_items(app):
+    """Projects first, ALL last — ALL is the table's TOTALS row (spreadsheet convention), and the
+    cursor's home position lands on a real project, which is what you usually pick."""
     names = [p.name for p in app.snap.projects] if app.snap else []
-    return ["ALL"] + names
+    return names + ["ALL"]
 
 
 _RAIL_COL_W = 5                                  # width of each numeric column (≤4-char header + a pad)
