@@ -17,6 +17,7 @@ dais — your agent company control panel
 
   dais status                         everything at a glance (tasks + recent runs)
   dais top [secs]                     live TUI dashboard (read-only; default 2s refresh)
+  dais project <name>                 a project's setup: cast + models, machine dispatch map, config
   dais tasks <project> [--assignee A] [--status S]
   dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."]
   dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."]
@@ -108,6 +109,12 @@ MD
     # auto-init so a fresh workspace (new DAIS_HOME) renders an empty board, not a crash.
     [ -f "$DB" ] || db_init >/dev/null 2>&1
     python3 "$DAIS_ROOT/harness/dashboard.py" ;;
+
+  project)
+    # one project's SETUP on a page — cast (resolved model/effort), machine dispatch map,
+    # config header. The files' view; tasks live in `dais status` / `dais top`.
+    name="${1:-}"; [ -n "$name" ] || { echo "usage: dais project <name>"; exit 1; }
+    python3 "$DAIS_ROOT/harness/dashboard.py" --project "$name" ;;
 
   top)
     # the responsive multi-pane control panel (harness/panel.py)
