@@ -91,6 +91,23 @@ class TestDependencySkip(unittest.TestCase):
         self.assertEqual(router.decide(_ws([("a", "ready")], with_dep_col=False), "p"), "engineer")
 
 
+class TestTriggerNone(unittest.TestCase):
+    def test_trigger_none_gates_machine_dispatch(self):
+        # a DORMANT role (trigger=none, e.g. a shelved project's lead) must never be scheduled,
+        # even when the machine's edges would dispatch it — none means never scheduled.
+        roles = ("engineer  edit  reactive  -  2\nlead  draft  none  -  3\n")
+        self.assertIsNone(router.decide(_ws([("a", "proposed")], roles=roles), "p"))
+
+    def test_reactive_role_still_dispatches(self):
+        roles = ("engineer  edit  reactive  -  2\nlead  draft  reactive  -  3\n")
+        self.assertEqual(router.decide(_ws([("a", "proposed")], roles=roles), "p"), "lead")
+
+    def test_cadence_role_is_still_reactively_dispatchable(self):
+        # every:Nh marks cadence, not dormancy — the machine may still dispatch it reactively
+        roles = ("engineer  edit  reactive  -  2\nlead  draft  every:5h  -  3\n")
+        self.assertEqual(router.decide(_ws([("a", "proposed")], roles=roles), "p"), "lead")
+
+
 class TestCadence(unittest.TestCase):
     def test_lead_cadence_runs_for_discovery_when_idle(self):
         # no dispatchable reactive work → the lead still runs on its cadence (first run, never-run).

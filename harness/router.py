@@ -62,9 +62,11 @@ def decide(root, project):
     # 1) reactive dispatch — ALWAYS via the project's machine: the dispatch role of the top pending
     #    task (the machine's edges own state->role; next_role skips blocked/parked states and open
     #    dependencies). Cadence roles (2) still run on their clock for periodic discovery.
+    #    trigger=none is DORMANCY and outranks the machine: a shelved role (e.g. a parked project's
+    #    lead) is never scheduled even when an edge would dispatch it — none means never scheduled.
     import machine as MC
     role = MC.next_role(db, MC.load(_machine_for(root, project)), project)
-    if role:
+    if role and not any(r["name"] == role and r["trigger"] == "none" for r in roles):
         return role
 
     # 2) cadence: a role whose interval has elapsed (only when no reactive work)
