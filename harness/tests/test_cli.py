@@ -91,6 +91,41 @@ class TestAgentStateSurgery(CliTest):
         self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='d-1'")[0], "ready")
 
 
+class TestFireLinksRun(CliTest):
+    """A successful `dais fire` under an agent run (DAIS_RUN_ID) records a run_tasks row with the
+    FIRED VERB — the authoritative trail the migration doc promised ('claim' etc). Without it,
+    fire-only runs look like no-ops to the no-progress throttle and get wrongly cooldown'd."""
+
+    def _run_row(self):
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,started_at,status) "
+                     "VALUES('demo','engineer',datetime('now'),'running')")
+        conn.commit()
+        rid = conn.execute("SELECT MAX(id) FROM runs").fetchone()[0]
+        conn.close()
+        return rid
+
+    def test_fire_records_the_verb(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--status", "ready")
+        rid = self._run_row()
+        r = dais(self.root, "fire", "d-1", "claim",
+                 env={"DAIS_RUN_ID": str(rid), "DAIS_ACTOR": "engineer"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = q(self.root, "SELECT verb FROM run_tasks WHERE run_id=%d AND task_id='d-1'" % rid)
+        self.assertIn("claim", rows)
+
+    def test_failed_fire_records_nothing(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1")   # proposed — claim invalid
+        rid = self._run_row()
+        r = dais(self.root, "fire", "d-1", "claim",
+                 env={"DAIS_RUN_ID": str(rid), "DAIS_ACTOR": "engineer"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(q(self.root, "SELECT COUNT(*) FROM run_tasks WHERE run_id=%d" % rid), (0,))
+
+
 class TestDepBlockedFire(CliTest):
     """An agent can't fire an edge on a dep-blocked task (blocked_on open) — the chain must bind
     the AGENT, not just the dispatcher (win-131/cou-19 were built early through this hole). The

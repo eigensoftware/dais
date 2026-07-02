@@ -463,7 +463,9 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         if cas.rowcount != 1:                       # someone else moved it between read and write
             raise GuardFailure(f"task {tid} left state {task['status']!r} concurrently — "
                                f"re-check with: dais edges {tid}")
-        _link_run(conn, tid, "claim" if verb == "claim" else "touch")
+        # record the ACTUAL verb: run<->task attribution ('claim' marks pickup) AND the
+        # dispatcher's no-progress throttle both read this — a fire IS progress, 'touch' is not.
+        _link_run(conn, tid, verb)
         result = {"task": tid, "from": task["status"], "to": edge["to"], "verb": verb, "spawned": [], "encompassed": []}
         _apply_effect(conn, m, task, edge, result, ctx)
     except BaseException:
