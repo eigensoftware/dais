@@ -39,6 +39,11 @@ At `releasing` (after the greenlight):
 - VERIFY prod afterward: the deployed revision matches what you shipped and the app answers (the
   runbook's checks). Only then fire `shipped` — firing it is your attestation that it is live and
   verified, and it closes every task the release encompasses.
+- CLEAN UP the shipped branches: after prod verifies, delete each merged PR's remote branch
+  (`git push origin --delete <branch>`; merging with `gh pr merge --delete-branch` does it up
+  front). GUARD: never delete a branch an OPEN PR is based on — deleting a base branch
+  auto-closes the child PR. Check with `gh pr list --state open --json baseRefName` first.
+  Leave local branches/worktrees alone — another agent may be running in them.
 - If ANY step fails: do NOT fire `shipped`, do NOT improvise beyond the runbook. Record exactly
   what happened and where it stopped in the notes; the task stays in `releasing` for the founder
   (a failed release spawns the rollback/fix path).
