@@ -254,10 +254,20 @@ MD
     # resolution the scheduler uses — machine.dispatch_role). A state with no dispatch role
     # explains itself by its band: a founder gate waits on you, a waiting state on a system
     # event, a terminal has nothing to run.
-    id="${1:?usage: dais start <id>}"
+    id="${1:?usage: dais start <id>}"; shift 2>/dev/null || true
+    force=0; [ "${1:-}" = "--force" ] && force=1
     row="$(db -separator '|' "SELECT status,project FROM tasks WHERE id='$(sqlesc "$id")';")"
     [ -n "$row" ] || { echo "no such task: $id"; exit 1; }
     st="${row%%|*}"; proj="${row##*|}"
+    # honor the dependency chain — the scheduler skips dep-blocked tasks, and a manual start
+    # must not silently jump the queue (that's how a review ran against a moving target once).
+    dep="$(db "SELECT t.blocked_on FROM tasks t JOIN tasks p ON p.id=t.blocked_on
+               WHERE t.id='$(sqlesc "$id")' AND p.status NOT IN ('done','cancelled');")"
+    if [ -n "$dep" ] && [ "$force" != "1" ]; then
+      echo "start: $id is ⛓ blocked on $dep (still open) — the scheduler won't run it either."
+      echo "       run it anyway (against the not-yet-landed state): dais start $id --force"
+      exit 1
+    fi
     MP="$(machine_path "$proj")"
     info="$(DAIS_MP="$MP" DAIS_ST="$st" python3 -c "
 import os, sys; sys.path.insert(0, '$DAIS_ROOT/harness'); import machine as M
