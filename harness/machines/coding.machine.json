@@ -30,6 +30,7 @@
        "effect": {"spawn": {"template": "impl", "initial": "ready", "by": "engineer", "rel": "from_proposal"}}},
     {"from": "proposal_review", "to": "proposed",        "by": "founder",  "verb": "request_changes"},
     {"from": "proposed",        "to": "cancelled",       "by": "founder",  "verb": "reject", "guards": ["confirm"]},
+    {"from": "proposed",        "to": "deferred",        "by": "founder",  "verb": "defer"},
 
     {"from": "ready",           "to": "doing",           "by": "engineer", "verb": "claim"},
     {"from": "ready",           "to": "deferred",        "by": "founder",  "verb": "defer"},
