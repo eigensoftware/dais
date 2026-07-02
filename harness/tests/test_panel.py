@@ -201,16 +201,18 @@ class TestPaneRenderers(unittest.TestCase):
         self.assertIn("cast", text)
         self.assertIn("m-eng-override", text)        # the RESOLVED per-role model, not the default
         self.assertNotIn("qa_review", text)          # not the task detail
-        # ALL (the last rail item) falls back to the classic selection detail
+        # ALL (the last rail item) shows the workspace summary
         app._rail_i = len(pn._rail_items(app)) - 1
         scr2 = FakeScr(40, 200)
-        app.sel_id = "lyr-1"
         pn.render_inspector(scr2, rect, app, focused=False)
-        self.assertIn("lyr-1", "\n".join(c[2] for c in scr2.calls))
+        text2 = "\n".join(c[2] for c in scr2.calls)
+        self.assertIn("ALL", text2)
+        self.assertIn("beacon", text2)              # one line per project
+        self.assertIn("cast", text2)
 
-    def test_inspector_rail_all_with_running_selection_streams_log(self):
-        """Rail on ALL + a RUNNING selection must take the live-log path, not the task
-        formatter (task=None there — it crashed top until this was pinned)."""
+    def test_inspector_rail_all_with_running_selection_no_crash(self):
+        """Rail on ALL + a RUNNING selection (task=None) must render the workspace summary —
+        the task formatter crashed on that row once (the first rail-view regression)."""
         app = self._app([("lyr-1", "beacon", "impl", "qa_review", "high", None)])
         app.pane_focus = "rail"
         app._rail_i = len(pn._rail_items(app)) - 1   # ALL
@@ -221,7 +223,7 @@ class TestPaneRenderers(unittest.TestCase):
         scr = FakeScr(40, 200)
         pn.render_inspector(scr, pn.Rect(2, 70, 30, 80), app, focused=False)   # must not raise
         text = "\n".join(c[2] for c in scr.calls)
-        self.assertIn("engineer", text)              # the live-log agent header drew
+        self.assertIn("watch", text)                 # the workspace header drew
 
     def test_inspector_scroll_offsets_visible_window(self):
         """I1: detail_scroll must advance the visible window in render_inspector."""

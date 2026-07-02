@@ -432,6 +432,36 @@ def render_inspector_live_log(scr, inner, app, sel_row):
         _add(scr, y + i, inner.x, clip_cols(txt, inner.w), inner.x + inner.w, a)
 
 
+def _workspace_lines(app):
+    """Inspector content for the rail's ALL row — the company at a glance: tool version + loop
+    state, then one line per project (running agent, founder gates, queue depth, cast + the
+    distinct models it actually runs). Complements the rail's numeric totals with WHO/WHAT."""
+    snap = app.snap
+    if not snap:
+        return ["(no snapshot)"]
+    state, interval, _par = d.watch_state(app.root)
+    loop = state + (f" ({int(interval)}s)" if state == "running" and interval else "")
+    out = [f"▌ ALL — {snap.workspace or 'workspace'}",
+           f"dais {d.tool_version()} · watch {loop}", ""]
+    for p in snap.projects:
+        run, you, que, wait, done = _rail_counts(app, p.name)
+        act = "▶ " + "+".join(a for a, _ in p.running) if p.running else "idle"
+        roles = [r for r in d.project_roles(app.root, p.name) if r != "founder"]
+        models = []
+        for r in roles:                                  # distinct, in cast order, de-prefixed
+            m, _e = d.agent_model(app.root, p.name, r)
+            m = m.removeprefix("claude-")
+            if m not in models:
+                models.append(m)
+        gates = f" · ◆ {you} you" if you else ""
+        queue = f" · que {que}" if que else ""
+        out.append(f"{p.name:<12} {act}{gates}{queue}")
+        out.append(f"             cast {len(roles)} — {', '.join(models) or '-'}")
+    out.append("")
+    out.append("(j/k picks a project — its setup shows here)")
+    return out
+
+
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
     Running selections stream their live log (render_inspector_live_log) instead of task detail.
@@ -441,22 +471,23 @@ def render_inspector(scr, rect, app, focused):
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     proj_head = False
-    rail_proj = None
+    rail_name = None
     if app.pane_focus == "rail":
         items = _rail_items(app)
-        name = items[app._rail_i] if 0 <= app._rail_i < len(items) else "ALL"
-        if name != "ALL":                       # ALL is the totals row — nothing to explain
-            rail_proj = name
-    if rail_proj:
-        lines = d.render_project(app.root, rail_proj, color=False).splitlines()
+        rail_name = items[app._rail_i] if 0 <= app._rail_i < len(items) else "ALL"
+    if rail_name == "ALL":                      # the totals row explains the WORKSPACE
+        lines = _workspace_lines(app)
+        proj_head = True
+    elif rail_name:                             # a real project — its setup
+        lines = d.render_project(app.root, rail_name, color=False).splitlines()
         while lines and not lines[0].strip():
             lines.pop(0)                        # the CLI view leads with a blank; the pane title covers it
         proj_head = True
     else:
         # A running selection streams its LIVE LOG right here (no need to pop the `l` pager or `L`
         # wall) — a short agent header, then the log tail, re-read each draw so it streams live.
-        # This MUST cover the rail-on-ALL case too: a running row has task=None, and the task
-        # formatter would crash on it (the bug that shipped with the first rail view).
+        # NOTE a running row has task=None — it must never reach the task formatter below (that
+        # crash shipped once, with the first rail view).
         if sel_row and sel_row.get("kind") == "running":
             render_inspector_live_log(scr, inner, app, sel_row)
             return

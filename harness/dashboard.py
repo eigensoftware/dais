@@ -1510,6 +1510,24 @@ class App:
 # --------------------------------------------------------------------------- #
 # entrypoint
 # --------------------------------------------------------------------------- #
+_TOOL_VERSION = None
+
+
+def tool_version():
+    """The tool checkout's `git describe` (what `dais version` prints), computed once per
+    process — the TUI shows it every frame, so no shelling out per draw."""
+    global _TOOL_VERSION
+    if _TOOL_VERSION is None:
+        try:
+            _TOOL_VERSION = subprocess.run(
+                ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+                 "describe", "--tags", "--always", "--dirty"],
+                capture_output=True, text=True, timeout=5).stdout.strip() or "unknown"
+        except Exception:
+            _TOOL_VERSION = "unknown"
+    return _TOOL_VERSION
+
+
 def render_project(root, name, color=None):
     """One project's SETUP on a page — the cast (with the model/effort a run would actually
     use), the machine's dispatch map, and the config header. `dais project <name>`. This is
