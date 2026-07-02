@@ -43,7 +43,17 @@ At `releasing` (after the greenlight):
   (`git push origin --delete <branch>`; merging with `gh pr merge --delete-branch` does it up
   front). GUARD: never delete a branch an OPEN PR is based on — deleting a base branch
   auto-closes the child PR. Check with `gh pr list --state open --json baseRefName` first.
-  Leave local branches/worktrees alone — another agent may be running in them.
+- CLEAN UP the local checkout too (squash-merge means git can never see these branches as merged,
+  so they'd pile up forever). Delete ONLY branches whose upstream is gone — that is the proof of
+  merge; an unpushed WIP branch has no upstream so it can never match, and git itself refuses to
+  delete a branch checked out in the repo or any worktree, so a running agent's tree is never
+  yanked:
+    git fetch --prune
+    git worktree prune
+    git branch -vv | awk '!/^\*/ && /\[[^]]*: gone\]/ {print $1}' | xargs -r git branch -D
+  Also remove any throwaway audit worktree YOU created at assemble (`git worktree remove <path>`) —
+  never someone else's. Cleanup is best-effort housekeeping: if any of it fails, note it and stop —
+  the release is already shipped, so never un-fire or re-fire anything over a cleanup error.
 - If ANY step fails: do NOT fire `shipped`, do NOT improvise beyond the runbook. Record exactly
   what happened and where it stopped in the notes; the task stays in `releasing` for the founder
   (a failed release spawns the rollback/fix path).
