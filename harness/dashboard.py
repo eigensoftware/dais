@@ -1230,6 +1230,13 @@ class App:
         subprocess seam the cockpit tests mock."""
         return subprocess.call([self._dais()] + [str(c) for c in cmd])
 
+    def _dispatch_out(self, cmd):
+        """Like _dispatch but capture output — for actions whose FAILURE REASON the founder must
+        see (a gate that didn't fire must say why, not just 'exit 1')."""
+        r = subprocess.run([self._dais()] + [str(c) for c in cmd],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+
     def _spawn_agent(self, cmd):
         """Launch a STREAMING-agent command (e.g. `start`) DETACHED, with its output to the run log —
         never inline. A foreground `claude -p` stream inherits this terminal and corrupts the curses
@@ -1310,14 +1317,14 @@ class App:
             if g == "typed_confirm":
                 typed = self._prompt(f"{verb} {t['id']} — type the task id to confirm")
                 if typed != t["id"]:
-                    self.flash = f"{verb} cancelled (typed confirmation mismatch)"
+                    self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — typed confirmation mismatch"
                     return
                 cmd += ["--typed", t["id"]]; prompted = True
             elif g.startswith("attest:"):
                 fact = g.split(":", 1)[1].split(" ")[0]
                 typed = self._prompt(f"attest '{fact}' — type the fact name to assert it")
                 if typed != fact:
-                    self.flash = f"{verb} cancelled (attestation not given)"
+                    self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — attestation not given"
                     return
                 cmd += ["--attest", fact]; prompted = True
         if "confirm" in guards:
@@ -1325,9 +1332,14 @@ class App:
             if not prompted and not self._confirm(f"{verb} {t['id']}?"):
                 return
             cmd.append("--confirm")
-        rc = self._dispatch(cmd)
+        rc, out = self._dispatch_out(cmd)
         self.refresh()
-        self.flash = f"{verb} {t['id']}" if rc == 0 else f"{verb} failed (exit {rc})"
+        if rc == 0:
+            # state the TRANSITION, not just the verb — "did my greenlight take?" answers itself
+            self.flash = f"✓ {verb} {t['id']} — now {edge.get('to', '?').replace('_', ' ')}"
+        else:
+            err = next((ln.strip() for ln in out.splitlines() if ln.strip()), f"exit {rc}")
+            self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — {err[:110]}"
 
     def _action_menu(self, row):
         """Open the Enter menu and dispatch the chosen action. Shows each action's KEY (mirroring the

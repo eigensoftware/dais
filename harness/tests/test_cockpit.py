@@ -147,18 +147,25 @@ class TestDoAction(unittest.TestCase):
         self.p = mock.patch.object(d, "subprocess")
         self.sub = self.p.start()
         self.sub.call.return_value = 0
+        self.sub.run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
         self.addCleanup(self.p.stop)
+
+    def _fired(self, argv):
+        # machine fires go through the CAPTURING seam (_dispatch_out) so a failed gate can
+        # say WHY — assert on subprocess.run, not .call
+        self.sub.run.assert_called_once_with(argv, capture_output=True, text=True,
+                                             stdin=self.sub.DEVNULL)
 
     def test_advance_on_proposal_review_approves(self):
         # NO auto --verify: the panel never self-asserts a verify guard (approve's gate is
         # the founder's own confirm).
         self.app.do_action("approve", task_row(status="proposal_review"))
-        self.sub.call.assert_called_once_with(
+        self._fired(
             ["dais", "fire", "cou-1", "approve", "--by", "founder", "--confirm"])
 
     def test_reverse_on_ready_defers(self):
         self.app.do_action("defer", task_row(status="ready"))
-        self.sub.call.assert_called_once_with(
+        self._fired(
             ["dais", "fire", "cou-1", "defer", "--by", "founder"])
 
     def test_strong_guards_prompt_in_panel_and_fire(self):
@@ -167,22 +174,22 @@ class TestDoAction(unittest.TestCase):
         answers = iter(["cou-1", "migrations_applied"])
         self.app._prompt = lambda *a, **k: next(answers)
         self.app.do_action("greenlight", task_row(status="release_review"))
-        self.sub.call.assert_called_once_with(
+        self._fired(
             ["dais", "fire", "cou-1", "greenlight", "--by", "founder",
              "--typed", "cou-1", "--attest", "migrations_applied"])
 
     def test_typed_mismatch_cancels_without_firing(self):
         self.app._prompt = lambda *a, **k: "wrong-id"
         self.app.do_action("greenlight", task_row(status="release_review"))
-        self.sub.call.assert_not_called()
-        self.assertIn("cancelled", self.app.flash)
+        self.sub.run.assert_not_called()
+        self.assertIn("DID NOT FIRE", self.app.flash)
 
     def test_attest_not_given_cancels_without_firing(self):
         answers = iter(["cou-1", "nope"])          # typed ok, attestation refused
         self.app._prompt = lambda *a, **k: next(answers)
         self.app.do_action("greenlight", task_row(status="release_review"))
-        self.sub.call.assert_not_called()
-        self.assertIn("cancelled", self.app.flash)
+        self.sub.run.assert_not_called()
+        self.assertIn("DID NOT FIRE", self.app.flash)
 
     def test_unchecked_verify_surfaces_the_command(self):
         # qa `pass` carries verify:tests_pass with no declared checker — the panel must NOT
@@ -199,7 +206,7 @@ class TestDoAction(unittest.TestCase):
 
     def test_confirm_yes_runs_reject(self):
         self.app.do_action("reject", task_row(status="proposed"))
-        self.sub.call.assert_called_once_with(
+        self._fired(
             ["dais", "fire", "cou-1", "reject", "--by", "founder", "--confirm"])
 
     def test_running_reverse_cancels_the_run(self):
@@ -238,19 +245,26 @@ class TestKeyWiring(unittest.TestCase):
         self.p = mock.patch.object(d, "subprocess")
         self.sub = self.p.start()
         self.sub.call.return_value = 0
+        self.sub.run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
         self.addCleanup(self.p.stop)
+
+    def _fired(self, argv):
+        # machine fires go through the CAPTURING seam (_dispatch_out) so a failed gate can
+        # say WHY — assert on subprocess.run, not .call
+        self.sub.run.assert_called_once_with(argv, capture_output=True, text=True,
+                                             stdin=self.sub.DEVNULL)
 
     def _press(self, ch, row):
         self.app.handle(ch, [row], 0, row)
 
     def test_a_advances_proposal_review(self):
         self._press(ord("a"), task_row(status="proposal_review"))
-        self.sub.call.assert_called_once_with(
+        self._fired(
             ["dais", "fire", "cou-1", "approve", "--by", "founder", "--confirm"])
 
     def test_x_reverses_ready(self):
         self._press(ord("x"), task_row(status="ready"))
-        self.sub.call.assert_called_once_with(
+        self._fired(
             ["dais", "fire", "cou-1", "defer", "--by", "founder"])
 
     def test_plus_raises_priority(self):

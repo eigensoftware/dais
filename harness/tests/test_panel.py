@@ -182,6 +182,17 @@ class TestPaneRenderers(unittest.TestCase):
             self.assertGreaterEqual(x, rect.x)
             self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)
 
+    def test_inspector_gate_state_shows_waiting_on_you(self):
+        """A founder-gate selection carries a persistent '◆ waiting on YOU … since' line —
+        the definitive 'did my fire take?' signal (it exists only while the gate is open)."""
+        app = self._app([("lyr-1", "beacon", "impl", "proposal_review", "high", None)])
+        app.sel_id = "lyr-1"
+        scr = FakeScr(40, 200)
+        pn.render_inspector(scr, pn.Rect(2, 70, 20, 60), app, focused=False)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("waiting on YOU", text)
+        self.assertIn("since", text)
+
     def test_inspector_rail_focus_shows_project_setup(self):
         """Rail focused on a project -> the inspector explains the PROJECT (cast + resolved
         models + dispatch map), not the work selection. ALL keeps the classic detail."""

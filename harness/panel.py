@@ -329,6 +329,11 @@ def _panel_detail_lines(app, sel_row):
     if role:
         model, eff = d.agent_model(app.root, p.name, role)
         out.append(f"runs as {role} · {model}" + (f" · effort {eff}" if eff else ""))
+    elif MC.band_of(p.machine, task.status) == "NEEDS YOU":
+        # a founder gate answers "did my fire take?" persistently: this line exists ONLY while
+        # the gate is still open — the moment an edge lands, status moves and it disappears.
+        since = d.to_local_hhmm(task.updated_at) if task.updated_at else "?"
+        out.append(f"◆ waiting on YOU — in {task.status.replace('_', ' ')} since {since}; no edge has fired")
     if getattr(task, "blocked", False):                 # waiting on an unfinished predecessor
         out.append(f"⛓ blocked on {task.blocked_on} — won't run until it's done")
     out.append("")
