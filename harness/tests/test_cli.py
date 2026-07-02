@@ -64,13 +64,72 @@ class TestStatusAndTitle(CliTest):
         self.assertEqual(q(self.root, "SELECT title FROM tasks WHERE id='d-2'")[0], "New title")
 
 
+class TestAgentStateSurgery(CliTest):
+    """Agents (runs carrying DAIS_RUN_ID) may NOT set --status — state changes go through edges
+    (dais fire), which is how the cou-21 incident happened: an agent raw-set a founder-semantic
+    state. Metadata (--notes/--pr/...) stays allowed; the founder's shell (no run id) is unaffected."""
+
+    def test_agent_status_set_is_refused(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1")
+        r = dais(self.root, "task", "set", "d-1", "--status", "ready", env={"DAIS_RUN_ID": "7"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("fire", r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='d-1'")[0], "proposed")
+
+    def test_agent_notes_still_allowed(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1")
+        r = dais(self.root, "task", "set", "d-1", "--notes", "hello", env={"DAIS_RUN_ID": "7"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_founder_status_set_still_works(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1")
+        r = dais(self.root, "task", "set", "d-1", "--status", "ready")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='d-1'")[0], "ready")
+
+
+class TestDepBlockedFire(CliTest):
+    """An agent can't fire an edge on a dep-blocked task (blocked_on open) — the chain must bind
+    the AGENT, not just the dispatcher (win-131/cou-19 were built early through this hole). The
+    founder can still act (defer, cancel — surgery stays)."""
+
+    def _two(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "pred", "--id", "b-1")
+        dais(self.root, "task", "add", "demo", "work", "--id", "a-1", "--status", "ready")
+        dais(self.root, "task", "set", "a-1", "--depends-on", "b-1")
+
+    def test_agent_claim_on_blocked_task_refused(self):
+        self._two()
+        r = dais(self.root, "fire", "a-1", "claim", env={"DAIS_ACTOR": "engineer"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("block", (r.stdout + r.stderr).lower())
+        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='a-1'")[0], "ready")
+
+    def test_founder_can_still_act_on_blocked_task(self):
+        self._two()
+        r = dais(self.root, "fire", "a-1", "defer")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='a-1'")[0], "deferred")
+
+    def test_agent_claim_allowed_once_dependency_done(self):
+        self._two()
+        dais(self.root, "task", "set", "b-1", "--status", "done")
+        r = dais(self.root, "fire", "a-1", "claim", env={"DAIS_ACTOR": "engineer"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='a-1'")[0], "doing")
+
+
 class TestNoopThrottle(CliTest):
     """A role whose LAST run succeeded recently but touched no tasks is NOT re-dispatched — the
     reactive no-progress throttle. Without it the machine hot-loops a role that keeps declining
     to act (a lead dispatched every tick for a proposed task it won't submit burned ~12 runs in
     20 minutes). An older no-op, or a run that touched tasks, dispatches normally."""
 
-    def _seed_run(self, mins_ago, touched=None):
+    def _seed_run(self, mins_ago, touched=None, verb="touch"):
         import sqlite3
         conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
         conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status) "
@@ -79,7 +138,7 @@ class TestNoopThrottle(CliTest):
         if touched:
             rid = conn.execute("SELECT MAX(id) FROM runs").fetchone()[0]
             conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(?,?,?)",
-                         (rid, touched, "touch"))
+                         (rid, touched, verb))
         conn.commit(); conn.close()
 
     def test_recent_noop_suppresses_redispatch(self):
@@ -108,12 +167,22 @@ class TestNoopThrottle(CliTest):
         self.assertIn("WOULD run engineer", r.stdout)
         self.assertNotIn("WOULD run lead", r.stdout)
 
-    def test_run_that_touched_tasks_does_not_throttle(self):
+    def test_run_that_acted_does_not_throttle(self):
+        # a real state change (verb=claim/submit/…) is progress — re-dispatch normally
         dais(self.root, "scaffold", "demo")
         dais(self.root, "task", "add", "demo", "An initiative", "--id", "d-1")
-        self._seed_run(5, touched="d-1")
+        self._seed_run(5, touched="d-1", verb="submit")
         r = dais(self.root, "tick", "demo", "--dry-run")
         self.assertIn("WOULD run lead", r.stdout)
+
+    def test_notes_only_run_still_throttles(self):
+        # 'touch' (metadata-only: notes/pr) is NOT progress — four HOLD audits that each wrote
+        # notes defeated the throttle in the cou-21 incident. Metadata must not reset it.
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "An initiative", "--id", "d-1")
+        self._seed_run(5, touched="d-1", verb="touch")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run lead", r.stdout)
 
 
 class TestDbLifecycle(unittest.TestCase):

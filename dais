@@ -190,6 +190,12 @@ MD
           --depends-on) dep="$2"; depset=1                       # '' clears the dependency
                         sets="$sets, blocked_on=$([ -n "$2" ] && echo "'$(sqlesc "$2")'" || echo NULL)"; shift 2;;
           *) shift;; esac; done
+        # Agents (DAIS_RUN_ID set by run-agent.sh) never set status — state changes fire edges.
+        # Founder shells carry no run id, so founder surgery is untouched.
+        if [ -n "$newst" ] && [[ "${DAIS_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
+          echo "task set: agents don't set --status — fire an edge instead: dais fire $id <verb>   (see: dais edges $id)"
+          exit 1
+        fi
         if [ "$depset" = 1 ]; then
           has_blocked_on || { echo "task set: dependencies need a schema upgrade — run 'dais migrate' first"; exit 1; }
           if [ -n "$dep" ]; then

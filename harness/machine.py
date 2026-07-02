@@ -444,6 +444,13 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         task = _task(conn, tid)
         if not task:
             raise ValueError(f"no such task: {tid}")
+        # The dependency chain binds AGENTS, not just the dispatcher: an agent may not fire any
+        # edge on a task whose blocked_on predecessor is still open (that hole let chained work
+        # get built early). The founder and system edges still act (defer/cancel/unblock = surgery).
+        if actor not in ("founder", "system") and _dep_open(conn, tid):
+            raise GuardFailure(f"{tid} is blocked on an open dependency — agents can't fire it "
+                               f"until the predecessor is done (founder: dais task set {tid} "
+                               f"--depends-on '' to unchain)")
         edge = _find_edge(m, task["status"], verb)
         if not edge:
             raise ValueError(f"no edge {verb!r} from state {task['status']!r} for task {tid}")

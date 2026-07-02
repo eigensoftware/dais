@@ -121,7 +121,8 @@ for proj in "${projects[@]}"; do
     cand="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" "$excl" 2>/dev/null)"
     [ -z "$cand" ] && break
     last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes'))
-                         || '|' || (SELECT COUNT(*) FROM run_tasks rt WHERE rt.run_id=r.id)
+                         || '|' || (SELECT COUNT(*) FROM run_tasks rt
+                                       WHERE rt.run_id=r.id AND rt.verb != 'touch')
                 FROM runs r WHERE r.project='$(sqlesc "$proj")' AND r.agent='$(sqlesc "$cand")'
                 ORDER BY r.id DESC LIMIT 1;" 2>/dev/null)"
     if [ "$last" = "succeeded|1|0" ]; then
