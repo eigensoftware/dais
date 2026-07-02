@@ -760,6 +760,7 @@ _HELP_LINES = [
     "  o                 open the PR in a browser",
     "  n                 new task",
     "  C                 cut a release — assembles everything approved, then your greenlight",
+    "  P                 project setup — cast + models, machine dispatch map, config",
     "  enter             action menu for the selection",
     "  / filter          filter; type, enter to keep, esc to clear",
     "  g expand          show every phase (incl. empty) + the full archive (else compact)",
@@ -918,6 +919,19 @@ class PanelApp(d.App):
         self.flash = (f"release cut in {proj} — the engineer assembles next"
                       if rc == 0 else f"release add failed (exit {rc})")
 
+    def _project_info(self, row):
+        """P — the selected row's project SETUP in a dismissible overlay: cast (resolved
+        model/effort), machine dispatch map, config. Same renderer as `dais project <name>`,
+        color OFF (ANSI codes would corrupt the curses overlay)."""
+        proj = (row.get("project") if row else None) or self.project_filter
+        if not proj:
+            self.flash = "pick a project row first (or filter to one on the rail)"
+            return
+        text = d.render_project(d.HOME, proj, color=False)
+        self._overlay = {"title": f"project {proj}  (any key closes)",
+                         "lines": text.splitlines()}
+        self.show_overlay = True
+
     def _capture(self, cmd):
         """Run a non-interactive `dais …` command capturing its output. Returns (rc, text)."""
         r = d.subprocess.run([self._dais()] + [str(c) for c in cmd],
@@ -1031,6 +1045,9 @@ class PanelApp(d.App):
             return True
         if ch == ord("C"):                      # cut a release for the selected row's project
             self._cut_release(sel_row)
+            return True
+        if ch == ord("P"):                      # project setup for the selected row's project
+            self._project_info(sel_row)
             return True
         # global panel keys first
         if ch == ord("q"):
