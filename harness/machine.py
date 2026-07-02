@@ -80,7 +80,14 @@ def lint(m):
             out[e["from"]].append(e)
         else:
             errors.append(f"E1 {tag}: unknown `from` state {e.get('from')!r}")
-        if e.get("to") not in states:
+        if e.get("to") == "@history":
+            # history return: valid only out of a state that DECLARES history (else there is
+            # nothing recorded to return to), and its fallback must be a real state.
+            if not states.get(e.get("from"), {}).get("history"):
+                errors.append(f"E1 {tag}: '@history' target from a state without \"history\": true")
+            if e.get("default", "ready") not in states:
+                errors.append(f"E1 {tag}: '@history' fallback {e.get('default')!r} is not a state")
+        elif e.get("to") not in states:
             errors.append(f"E1 {tag}: unknown `to` state {e.get('to')!r}")
         if e.get("by") not in roles:
             errors.append(f"E1 {tag}: unknown actor `by` {e.get('by')!r}")
@@ -342,7 +349,12 @@ class GuardFailure(Exception):
 
 
 def _task(conn, tid):
-    return conn.execute("SELECT id,project,status,title,assignee FROM tasks WHERE id=?", (tid,)).fetchone()
+    try:  # parked_from arrives with migration 0004 — degrade gracefully on an unmigrated db
+        return conn.execute("SELECT id,project,status,title,assignee,parked_from "
+                            "FROM tasks WHERE id=?", (tid,)).fetchone()
+    except sqlite3.OperationalError:
+        return conn.execute("SELECT id,project,status,title,assignee FROM tasks WHERE id=?",
+                            (tid,)).fetchone()
 
 
 def _new_id(conn, project):
@@ -458,15 +470,28 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
             raise GuardFailure(f"actor {actor!r} may not fire this edge (owner is {edge.get('by')!r})")
         _check_guards(conn, m, edge, task, ctx)
 
+        # "@history" returns the task to wherever it was PARKED FROM (statechart history): a
+        # deferred proposal goes back to proposed — never skipping the front gate — a deferred
+        # build task back to ready, a design task back to design. Falls back to the edge's
+        # `default` (or 'ready') for legacy rows parked before history existed.
+        to = edge["to"]
+        if to == "@history":
+            parked = task["parked_from"] if "parked_from" in task.keys() else None
+            to = parked if parked in (m or {}).get("states", {}) else edge.get("default", "ready")
         cas = conn.execute("UPDATE tasks SET status=?, updated_at=datetime('now') "
-                           "WHERE id=? AND status=?", (edge["to"], tid, task["status"]))
+                           "WHERE id=? AND status=?", (to, tid, task["status"]))
         if cas.rowcount != 1:                       # someone else moved it between read and write
             raise GuardFailure(f"task {tid} left state {task['status']!r} concurrently — "
                                f"re-check with: dais edges {tid}")
+        if (m or {}).get("states", {}).get(to, {}).get("history"):
+            try:  # entering a history state — remember where from, so @history can return there
+                conn.execute("UPDATE tasks SET parked_from=? WHERE id=?", (task["status"], tid))
+            except sqlite3.OperationalError:
+                pass                                # unmigrated db: @history just falls back
         # record the ACTUAL verb: run<->task attribution ('claim' marks pickup) AND the
         # dispatcher's no-progress throttle both read this — a fire IS progress, 'touch' is not.
         _link_run(conn, tid, verb)
-        result = {"task": tid, "from": task["status"], "to": edge["to"], "verb": verb, "spawned": [], "encompassed": []}
+        result = {"task": tid, "from": task["status"], "to": to, "verb": verb, "spawned": [], "encompassed": []}
         _apply_effect(conn, m, task, edge, result, ctx)
     except BaseException:
         if top:

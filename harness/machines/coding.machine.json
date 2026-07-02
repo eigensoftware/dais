@@ -19,7 +19,7 @@
     "release_review":   {},
     "releasing":        {},
     "release_failed":   {},
-    "deferred":         {"band": "WAITING"},
+    "deferred":         {"band": "WAITING", "history": true},
     "done":             {"terminal": true},
     "cancelled":        {"terminal": true}
   },
@@ -35,7 +35,7 @@
     {"from": "ready",           "to": "doing",           "by": "engineer", "verb": "claim"},
     {"from": "ready",           "to": "deferred",        "by": "founder",  "verb": "defer"},
     {"from": "ready",           "to": "cancelled",       "by": "founder",  "verb": "cancel", "guards": ["confirm"]},
-    {"from": "deferred",        "to": "ready",           "by": "founder",  "verb": "undefer"},
+    {"from": "deferred",        "to": "@history",        "by": "founder",  "verb": "undefer"},
     {"from": "deferred",        "to": "cancelled",       "by": "founder",  "verb": "cancel", "guards": ["confirm"]},
     {"from": "doing",           "to": "qa_review",       "by": "engineer", "verb": "complete"},
     {"from": "doing",           "to": "ready",           "by": "system",   "verb": "interrupt"},

@@ -121,6 +121,50 @@ class TestBandsAndActions(unittest.TestCase):
         self.assertEqual(acts["__start"]["by"], "engineer")
 
 
+class TestHistoryPark(unittest.TestCase):
+    """deferred is a HISTORY state: undefer returns a task to wherever it was parked from —
+    a proposal back to proposed (never skipping the front gate), a build task back to ready."""
+    def setUp(self):
+        self.conn = _db()
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN parked_from TEXT")  # migration 0004
+        self.m = M.load(CODING)
+
+    def test_deferred_proposal_returns_to_proposed(self):
+        p = M.create_task(self.conn, self.m, "proj", "someday idea")
+        M.fire(self.conn, self.m, p, "defer", "founder")
+        self.assertEqual(_status(self.conn, p), "deferred")
+        r = M.fire(self.conn, self.m, p, "undefer", "founder")
+        self.assertEqual(r["to"], "proposed")
+        self.assertEqual(_status(self.conn, p), "proposed")     # scoping still ahead of it
+
+    def test_deferred_ready_task_returns_to_ready(self):
+        p = M.create_task(self.conn, self.m, "proj", "scoped work")
+        self.conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (p,))
+        M.fire(self.conn, self.m, p, "defer", "founder")
+        M.fire(self.conn, self.m, p, "undefer", "founder")
+        self.assertEqual(_status(self.conn, p), "ready")
+
+    def test_legacy_park_falls_back_to_ready(self):
+        # rows deferred BEFORE history existed have no parked_from — undefer keeps old behavior
+        p = M.create_task(self.conn, self.m, "proj", "old parked task")
+        self.conn.execute("UPDATE tasks SET status='deferred', parked_from=NULL WHERE id=?", (p,))
+        M.fire(self.conn, self.m, p, "undefer", "founder")
+        self.assertEqual(_status(self.conn, p), "ready")
+
+    def test_unmigrated_db_degrades_to_fallback(self):
+        conn = _db()                                            # no parked_from column at all
+        p = M.create_task(conn, self.m, "proj", "idea")
+        M.fire(conn, self.m, p, "defer", "founder")             # stash is a no-op, no crash
+        M.fire(conn, self.m, p, "undefer", "founder")
+        self.assertEqual(_status(conn, p), "ready")
+
+    def test_lint_rejects_history_target_without_history_state(self):
+        m = M.load(CODING)
+        m["states"]["deferred"].pop("history")
+        errors, _ = M.lint(m)
+        self.assertTrue(any("@history" in e for e in errors), errors)
+
+
 class TestFlow(unittest.TestCase):
     def setUp(self):
         self.conn = _db()
