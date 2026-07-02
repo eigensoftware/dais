@@ -468,6 +468,22 @@ def render_inspector(scr, rect, app, focused):
         _add(scr, inner.y + idx, inner.x, ln, inner.x + inner.w, attr)
 
 
+def _shippable(app):
+    """(project, n) for every project with QA-passed inventory (tasks sitting in its machine's
+    release pool state) and NOTHING anywhere in its release lane — i.e. exactly when `C` would
+    cut a release. The nudge exists because approved work silently ages against main."""
+    out = []
+    for p in (app.snap.projects if app.snap else []):
+        open_state, pool, lane = MC.release_lane(p.machine)
+        if not open_state:
+            continue
+        n = len(p.tasks_by_status.get(pool, []))
+        in_lane = any(ts for st, ts in p.tasks_by_status.items() if st in lane)
+        if n and not in_lane:
+            out.append((p.name, n))
+    return out
+
+
 def render_vitals(scr, rect, app):
     """The top cockpit readout: identity ▸ HERO(running · need you) · context(watch/proj/cooling) ·
     clock. The two operational numbers are the hero — ● N running goes green when agents are live,
@@ -492,10 +508,12 @@ def render_vitals(scr, rect, app):
     run_dot = _DOT_RUN if threads else _DOT_IDLE
     run_tok = f"{run_dot} {len(threads)} running"
     gate_tok = f"{_DOT_GATE} {ng} NEED YOU" if ng > 0 else f"{_DOT_IDLE} {ng} need you"
+    ship = _shippable(app)
+    ship_tok = ("⬆ ship " + " ".join(f"{n}·{c}" for n, c in ship)) if ship else ""
     pre = ident + "   "
     sep = " · "                                            # between the two hero tokens
     ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}  {clk}"
-    line = pre + run_tok + sep + gate_tok + ctx
+    line = pre + run_tok + sep + gate_tok + (sep + ship_tok if ship_tok else "") + ctx
     bar = app._cp(_VITALS) | curses.A_BOLD                 # the readout's own bar (bold white on blue)
     _add(scr, rect.y, rect.x, pad_cols(line, rect.w), rect.x + rect.w, bar)
     if threads:                                            # the run token glows green while agents are live
@@ -504,6 +522,9 @@ def render_vitals(scr, rect, app):
     if ng > 0:                                             # the gate token is the alarm: yellow hero
         _add(scr, rect.y, rect.x + disp_width(pre + run_tok + sep), gate_tok,
              rect.x + rect.w, app._cp(_NEEDS_YOU) | curses.A_REVERSE | curses.A_BOLD)
+    if ship_tok:                                           # shippable nudge: yellow but NOT the alarm
+        _add(scr, rect.y, rect.x + disp_width(pre + run_tok + sep + gate_tok + sep), ship_tok,
+             rect.x + rect.w, app._cp(_NEEDS_YOU) | curses.A_BOLD)
 
 
 def _rail_items(app):

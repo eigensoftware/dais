@@ -1212,6 +1212,44 @@ class TestRailSelectionUniformBar(unittest.TestCase):
         self.assertIn(4000 | curses.A_BOLD, cells)          # the yellow needs-you pop is back
 
 
+class TestVitalsShippable(unittest.TestCase):
+    """The vitals bar nudges when a project has QA-passed inventory (its machine's release pool)
+    and NOTHING in its release lane — exactly when `C` would cut a release. Hidden while a release
+    is anywhere in flight (the release itself carries the attention then) and when the pool is empty."""
+
+    def _papp(self, rows):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-ship-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, rows)
+        papp = pn.PanelApp(FakeScr(40, 220), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def _bar(self, papp):
+        scr = FakeScr(40, 220)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 220), papp)
+        return scr
+
+    def test_token_shows_when_pool_full_and_lane_empty(self):
+        scr = self._bar(self._papp([("a-1", "p", "x", "approved", "high", None),
+                                    ("a-2", "p", "y", "approved", "med", None)]))
+        toks = [c for c in scr.calls if "⬆ ship" in c[2]]
+        self.assertTrue(toks)
+        self.assertIn("p·2", toks[-1][2])
+        self.assertEqual(toks[-1][3], 4000 | curses.A_BOLD)   # yellow bold, NOT the reverse alarm
+
+    def test_hidden_while_a_release_is_in_flight(self):
+        scr = self._bar(self._papp([("a-1", "p", "x", "approved", "high", None),
+                                    ("r-1", "p", "Release", "release_review", "high", None)]))
+        self.assertFalse([c for c in scr.calls if "⬆ ship" in c[2]])
+
+    def test_hidden_when_pool_empty(self):
+        scr = self._bar(self._papp([("a-1", "p", "x", "ready", "high", None)]))
+        self.assertFalse([c for c in scr.calls if "⬆ ship" in c[2]])
+
+
 class TestRailNeedsYouChip(unittest.TestCase):
     def _papp(self):
         import tempfile
