@@ -1128,8 +1128,13 @@ def _machine_work_rows(snap, projects, project, expanded, root):
 
     def emit(label, items, cap=None):
         # priority-ordered WITHIN the band — matters for ALL, where per-project lists would
-        # otherwise just concatenate (project A's lows above project B's criticals)
-        items = sorted(items, key=lambda pt: (_PRIO_RANK.get(pt[1].priority, 2), pt[1].id))
+        # otherwise just concatenate (project A's lows above project B's criticals).
+        # ARCHIVE is history, not a queue: newest finish first (updated_at is the last status
+        # change, i.e. when the task hit its terminal state), so the cap shows what JUST shipped.
+        if label == "ARCHIVE":
+            items = sorted(items, key=lambda pt: (pt[1].updated_at or "", pt[1].id), reverse=True)
+        else:
+            items = sorted(items, key=lambda pt: (_PRIO_RANK.get(pt[1].priority, 2), pt[1].id))
         add_band(label, len(items))
         for proj, t in (items if (cap is None or expanded) else items[:cap]):
             rows.append(_task_row(proj, t, _PRIO_TAG.get(t.priority, "MED")))
