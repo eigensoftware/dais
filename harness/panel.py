@@ -434,16 +434,30 @@ def render_inspector_live_log(scr, inner, app, sel_row):
 
 def render_inspector(scr, rect, app, focused):
     """Detail of the current selection, wrapped to the pane width. Color-coded by line type.
-    Running selections stream their live log (render_inspector_live_log) instead of task detail."""
+    Running selections stream their live log (render_inspector_live_log) instead of task detail.
+    With the RAIL focused on a project, the inspector shows that project's SETUP instead (the
+    `dais project` / P-overlay content) — the rail highlights a project, the inspector explains it."""
     inner = render_pane_title(scr, rect, "INSPECTOR", focused)
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
-    # A running selection streams its LIVE LOG right here (no need to pop the `l` pager or `L` wall) —
-    # a short agent header, then the log tail, re-read each draw so it streams as the agent works.
-    if sel_row and sel_row.get("kind") == "running":
-        render_inspector_live_log(scr, inner, app, sel_row)
-        return
-    lines = _panel_detail_lines(app, sel_row)
+    proj_head = False
+    if app.pane_focus == "rail":
+        items = _rail_items(app)
+        name = items[app._rail_i] if 0 <= app._rail_i < len(items) else "ALL"
+        if name != "ALL":                       # ALL is the totals row — nothing to explain
+            lines = d.render_project(app.root, name, color=False).splitlines()
+            while lines and not lines[0].strip():
+                lines.pop(0)                    # the CLI view leads with a blank; the pane title covers it
+            proj_head = True
+        else:
+            lines = _panel_detail_lines(app, sel_row)
+    else:
+        # A running selection streams its LIVE LOG right here (no need to pop the `l` pager or `L`
+        # wall) — a short agent header, then the log tail, re-read each draw so it streams live.
+        if sel_row and sel_row.get("kind") == "running":
+            render_inspector_live_log(scr, inner, app, sel_row)
+            return
+        lines = _panel_detail_lines(app, sel_row)
     wrapped = []
     for ln in lines:
         if disp_width(ln) <= inner.w:
@@ -458,8 +472,9 @@ def render_inspector(scr, rect, app, focused):
                                        # (matching the running-log path) instead of unwinding
                                        # dozens of phantom over-scrolled steps first
     # first wrapped line is the "<id>  <status>" header — color it by the selection's status
+    # (or the "▌ <project>" head in the rail's project view)
     head_attr = 0
-    if sel_row and sel_row.get("status"):
+    if proj_head or (sel_row and sel_row.get("status")):
         head_attr = app._cp(_STRUCTURE) | curses.A_BOLD     # the id/status head line is a header
     for idx, ln in enumerate(wrapped[start:start + inner.h]):
         doc_i = start + idx
@@ -1084,6 +1099,7 @@ class PanelApp(d.App):
             self._rail_i = max(0, min(self._rail_i + step, len(items) - 1))
             self.project_filter = None if items[self._rail_i] == "ALL" else items[self._rail_i]
             self.sel_id = None                  # reset work selection to the filtered top
+            self.detail_scroll = 0              # inspector shows this project's setup — from the top
             return True
         if ch == ord("b"):                      # 'b' (classic show/hide-parked) is dead here —
             return True                         # backlog + deferred are first-class sections now

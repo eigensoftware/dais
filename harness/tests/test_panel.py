@@ -182,6 +182,32 @@ class TestPaneRenderers(unittest.TestCase):
             self.assertGreaterEqual(x, rect.x)
             self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)
 
+    def test_inspector_rail_focus_shows_project_setup(self):
+        """Rail focused on a project -> the inspector explains the PROJECT (cast + resolved
+        models + dispatch map), not the work selection. ALL keeps the classic detail."""
+        app = self._app([("lyr-1", "beacon", "impl", "qa_review", "high", None)])
+        pdir = os.path.join(app.root, "projects", "beacon")
+        os.makedirs(os.path.join(pdir, "agents"), exist_ok=True)
+        with open(os.path.join(pdir, "roles"), "w") as fh:
+            fh.write("engineer    edit    reactive  -  1\n")
+        with open(os.path.join(pdir, "project.yaml"), "w") as fh:
+            fh.write("project: beacon\nmodel: m-proj\nmodel_engineer: m-eng-override\n")
+        app.pane_focus = "rail"
+        app._rail_i = 0                              # projects first, ALL last
+        scr = FakeScr(40, 200)
+        rect = pn.Rect(2, 70, 30, 80)
+        pn.render_inspector(scr, rect, app, focused=False)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("cast", text)
+        self.assertIn("m-eng-override", text)        # the RESOLVED per-role model, not the default
+        self.assertNotIn("qa_review", text)          # not the task detail
+        # ALL (the last rail item) falls back to the classic selection detail
+        app._rail_i = len(pn._rail_items(app)) - 1
+        scr2 = FakeScr(40, 200)
+        app.sel_id = "lyr-1"
+        pn.render_inspector(scr2, rect, app, focused=False)
+        self.assertIn("lyr-1", "\n".join(c[2] for c in scr2.calls))
+
     def test_inspector_scroll_offsets_visible_window(self):
         """I1: detail_scroll must advance the visible window in render_inspector."""
         long_notes = "  ".join(f"note-line-{i}" for i in range(30))
