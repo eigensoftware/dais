@@ -424,14 +424,15 @@ class TestInspectorWideColor(unittest.TestCase):
         # the inspector is a generous right column (the founder wanted it wide)
         self.assertGreaterEqual(L["inspector"].w, 80)
 
-    def test_wide_screen_caps_left_column(self):
-        # on a very wide screen the left column stops sprawling; the inspector absorbs the extra
-        L = pn.layout(213, 64, n_rail_items=6)
-        _covers_no_overlap(L, 213, 64)
-        self.assertLessEqual(L["work"].w, pn._LEFT_MAX_W)     # left column no longer unnecessarily wide
-        self.assertLessEqual(L["rail"].w, pn._LEFT_MAX_W)
-        self.assertEqual(L["inspector"].x, L["work"].w)       # inspector starts where the left col ends
-        self.assertGreater(L["inspector"].w, L["work"].w)     # ... and is the wider pane on a 213 screen
+    def test_two_columns_split_50_50(self):
+        # founder decision 2026-07-02: the two columns split evenly — the inspector earned half
+        # the screen (model line, edges, links, live log). No left-column cap.
+        for w, h in ((213, 64), (141, 50), (100, 40)):
+            L = pn.layout(w, h, n_rail_items=6)
+            _covers_no_overlap(L, w, h)
+            self.assertEqual(L["work"].w, w // 2)             # left half (floor)
+            self.assertEqual(L["inspector"].w, w - w // 2)    # right half absorbs the odd column
+            self.assertEqual(L["inspector"].x, L["work"].w)
 
     def test_inspector_colorizes_status_and_sections(self):
         # has_color path: stub _cp to tag lines so we can assert color was applied
