@@ -271,6 +271,50 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(r["spawned"][0]["rel"], "blocks_parent")    # a rollback task
 
 
+class TestConditionalMigrationsAttest(unittest.TestCase):
+    """`attest:migrations_applied when task:touches_migrations` — the release greenlight demands the
+    migrations attestation only when `assemble` recorded that the release touches migration files. An
+    explicit false LIFTS it; true, NULL (unknown), and an unmigrated db all still REQUIRE it — the
+    gate is never skipped by omission (fail-safe)."""
+    def setUp(self):
+        self.conn = _db()
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN parked_from TEXT")            # migration 0004
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN touches_migrations INTEGER")  # migration 0005
+        self.m = M.load(CODING)
+
+    def _assembled_release(self, conn=None):
+        conn = conn or self.conn
+        rel = M.create_task(conn, self.m, "proj", "release", state="release_open", assignee="engineer")
+        M.fire(conn, self.m, rel, "assemble", "engineer")
+        return rel
+
+    def test_false_flag_lifts_the_attest(self):
+        rel = self._assembled_release()
+        self.conn.execute("UPDATE tasks SET touches_migrations=0 WHERE id=?", (rel,))
+        M.fire(self.conn, self.m, rel, "greenlight", "founder", {"typed": rel})  # no --attest needed
+        self.assertEqual(_status(self.conn, rel), "releasing")
+
+    def test_true_flag_requires_the_attest(self):
+        rel = self._assembled_release()
+        self.conn.execute("UPDATE tasks SET touches_migrations=1 WHERE id=?", (rel,))
+        with self.assertRaises(M.GuardFailure):
+            M.fire(self.conn, self.m, rel, "greenlight", "founder", {"typed": rel})
+        M.fire(self.conn, self.m, rel, "greenlight", "founder",
+               {"typed": rel, "attest": {"migrations_applied": True}})
+        self.assertEqual(_status(self.conn, rel), "releasing")
+
+    def test_null_flag_requires_the_attest(self):        # unknown -> still gated
+        rel = self._assembled_release()                  # touches_migrations left NULL
+        with self.assertRaises(M.GuardFailure):
+            M.fire(self.conn, self.m, rel, "greenlight", "founder", {"typed": rel})
+
+    def test_unmigrated_db_requires_the_attest(self):    # column absent -> fail-safe require
+        conn = _db()                                     # no touches_migrations column at all
+        rel = self._assembled_release(conn)
+        with self.assertRaises(M.GuardFailure):
+            M.fire(conn, self.m, rel, "greenlight", "founder", {"typed": rel})
+
+
 class TestAtomicityAndConcurrency(unittest.TestCase):
     """fire() is one transaction: the transition + ALL effects commit together or roll back
     together, and the state change is a compare-and-swap so racing fires can't double-apply."""

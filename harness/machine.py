@@ -349,12 +349,16 @@ class GuardFailure(Exception):
 
 
 def _task(conn, tid):
-    try:  # parked_from arrives with migration 0004 — degrade gracefully on an unmigrated db
-        return conn.execute("SELECT id,project,status,title,assignee,parked_from "
-                            "FROM tasks WHERE id=?", (tid,)).fetchone()
-    except sqlite3.OperationalError:
-        return conn.execute("SELECT id,project,status,title,assignee FROM tasks WHERE id=?",
-                            (tid,)).fetchone()
+    # touches_migrations (0005) and parked_from (0004) arrive by migration — degrade gracefully on an
+    # unmigrated db by peeling the newest columns off the SELECT until one succeeds.
+    for cols in ("id,project,status,title,assignee,parked_from,touches_migrations",
+                 "id,project,status,title,assignee,parked_from",
+                 "id,project,status,title,assignee"):
+        try:
+            return conn.execute(f"SELECT {cols} FROM tasks WHERE id=?", (tid,)).fetchone()
+        except sqlite3.OperationalError:
+            continue
+    return None
 
 
 def _new_id(conn, project):
@@ -420,7 +424,18 @@ def _check_guards(conn, m, edge, task, ctx):
             if _blockers_open(conn, task["id"]):
                 raise GuardFailure("guard `unblocked` unmet (open blocks_parent children remain)")
         elif g.startswith("attest:"):
-            fact = g[len("attest:"):].split(" ")[0]
+            fact, _, cond = g[len("attest:"):].partition(" ")
+            # Optional conditional: `attest:<fact> when task:<flag>`. The attest is required only when
+            # the task's <flag> column is truthy OR unknown (fail-safe); an explicitly-false flag
+            # LIFTS it. The release greenlight uses this: `assemble` records `touches_migrations`, so a
+            # migration-free release doesn't demand a vacuous migrations attestation — but a missing
+            # (NULL) or truthy value still requires it, so the gate can never be skipped by omission.
+            cond = cond.strip()
+            if cond.startswith("when task:"):
+                key = cond[len("when task:"):].strip()
+                val = task[key] if key in task.keys() else None
+                if val is not None and not val:      # column present AND falsy → requirement lifts
+                    continue
             if not (ctx.get("attest") or {}).get(fact):
                 raise GuardFailure(f"guard `attest:{fact}` unmet (needs --attest {fact})")
         elif g.startswith("verify:"):

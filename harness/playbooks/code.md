@@ -10,6 +10,23 @@ just-merged PR is squash-merged and its branch DELETED on the remote, but a stal
 worktree may linger — the dais board is the source of truth for what's merged: if a task is 'done',
 its work IS on origin/main, so build on top of main, never stack on that task's old branch.
 
+## Retiring invalid work (don't loop on a false premise)
+
+If a `ready` task you're dispatched turns out to be built on a WRONG premise — the work is already
+shipped (a duplicate/superseded task), the defect it names doesn't actually exist (verify against the
+source of truth, e.g. the real machine.json — NOT a stale design mirror), or it's otherwise moot —
+do NOT claim and build it, and do NOT just re-verify and leave it in `ready` (the dispatcher re-picks
+it every tick and you burn a run each time). Retire it yourself:
+
+  1. Record WHY in the task notes (`dais task set <id> --notes "…premise wrong because …"`) so the
+     founder can audit the call.
+  2. Fire the engineer edge: `dais fire <id> invalidate --attest invalid` (ready → cancelled).
+
+`invalidate` is the ONLY task you may cancel — and only for a genuinely invalid premise (moot /
+duplicate-already-shipped / defect-doesn't-exist), never work you merely find hard or disagree with.
+The `attest:invalid` guard records your assertion; if you're unsure it's truly invalid, leave it for
+the founder instead.
+
 ## Releases (assemble → founder greenlight → ship)
 
 You may be dispatched on a RELEASE task, not a feature. Your job is to make the release provably
@@ -26,6 +43,12 @@ At `assemble` (release_open → release_review):
 - WIP safety: list the in-flight work OUTSIDE the release (claimed/doing tasks, open non-release
   PRs). Flag anything this release forces to rebase or breaks (an API/schema/contract change under
   someone's feet).
+- RECORD the migrations fact. You already know from the diff whether this release touches DB
+  migration/schema files (Supabase `supabase/migrations/**`, Prisma/Drizzle migration dirs, raw
+  `migrations/**`, …). Set it on the release task so the greenlight only demands the migrations
+  attestation when it's real: `dais task set <release> --touches-migrations true|false`. Only a
+  definite `false` lifts the attestation — when in doubt set `true` (or leave it unset), which keeps
+  the founder attesting: the safe default.
 - Write the verdict INTO the release task's notes before you stop: exact merge order, what you
   verified per PR, the migration plan, WIP impact, and any risk you could NOT verify. The founder
   greenlights from your notes — an unaudited assemble is not an assemble.

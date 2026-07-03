@@ -20,7 +20,7 @@ dais — your agent company control panel
   dais project <name>                 a project's setup: cast + models, machine dispatch map, config
   dais tasks <project> [--assignee A] [--status S]
   dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."]
-  dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."]
+  dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."] [--touches-migrations true|false]
   dais tick [project] [--dry-run]     check the list once: run the most valuable pending task
   dais watch [seconds]                keep checking on an interval (default 900s); Ctrl-C to stop
   dais schedule install|uninstall|status   run the interval in the background (cross-platform)
@@ -205,6 +205,12 @@ MD
           --priority)   sets="$sets, priority='$(sqlesc "$2")'"; shift 2;;
           --notes)      sets="$sets, notes='$(sqlesc "$2")'"; shift 2;;
           --title)      sets="$sets, title='$(sqlesc "$2")'"; shift 2;;
+          --touches-migrations)  # release fact: does the encompassed diff touch DB migration files?
+                        case "$2" in
+                          true|1|yes)  sets="$sets, touches_migrations=1";;
+                          false|0|no)  sets="$sets, touches_migrations=0";;
+                          *) echo "task set: --touches-migrations needs true|false"; exit 1;;
+                        esac; shift 2;;
           --depends-on) dep="$2"; depset=1                       # '' clears the dependency
                         sets="$sets, blocked_on=$([ -n "$2" ] && echo "'$(sqlesc "$2")'" || echo NULL)"; shift 2;;
           *) shift;; esac; done
