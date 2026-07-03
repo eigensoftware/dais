@@ -331,7 +331,7 @@ class TestTuiSupport(unittest.TestCase):
 
     def test_filter_rows(self):
         rows = ["acme", "echo", "beacon"]
-        self.assertEqual(d.filter_rows(rows, "LEG", key=lambda r: r),
+        self.assertEqual(d.filter_rows(rows, "ECH", key=lambda r: r),
                          ["echo"])
 
     def test_short_summary_collapses_multiple(self):
