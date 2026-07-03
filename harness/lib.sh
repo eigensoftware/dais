@@ -89,13 +89,16 @@ machine_path(){
 expand(){ printf '%s' "${1/#\~/$HOME}"; }
 
 # repo_path <project> — absolute path to a project's working repo.
-# absolute -> as-is; ~ -> $HOME; relative -> ${DAIS_AGENT_REPOS:-<parent of DAIS_ROOT>}/<value>
+# absolute -> as-is; ~ -> $HOME; relative -> ${DAIS_AGENT_REPOS:-<parent of DAIS_HOME>}/<value>.
+# The default base is the WORKSPACE's parent (DAIS_HOME), not the install dir (DAIS_ROOT), so a
+# packaged install (e.g. Homebrew, where DAIS_ROOT is the read-only Cellar) still resolves repos
+# next to the workspace; set DAIS_AGENT_REPOS to override.
 repo_path(){
   local r; r="$(pcfg "$1" repo)"
   case "$r" in
     /*) printf '%s' "$r" ;;
     "~"/*|"~") printf '%s' "$(expand "$r")" ;;
-    *)  printf '%s/%s' "${DAIS_AGENT_REPOS:-$(dirname "$DAIS_ROOT")}" "$r" ;;
+    *)  printf '%s/%s' "${DAIS_AGENT_REPOS:-$(dirname "$DAIS_HOME")}" "$r" ;;
   esac
 }
 

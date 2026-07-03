@@ -374,10 +374,14 @@ class TestRepoPath(unittest.TestCase):
         self.assertEqual(self._repo_path("demo", env={"DAIS_AGENT_REPOS": "/work"}),
                          "/work/demo")
 
-    def test_relative_default_base_is_parent_of_root(self):
-        # default base = parent of DAIS_ROOT
+    def test_relative_default_base_is_parent_of_workspace(self):
+        # default base = parent of the WORKSPACE (DAIS_HOME), NOT the install dir (DAIS_ROOT) —
+        # so a packaged install (DAIS_ROOT in a read-only Cellar) still resolves repos next to
+        # the workspace. Prove it by pointing DAIS_ROOT at a Cellar-like path it must ignore.
         expected = os.path.join(os.path.dirname(self.root), "demo")
-        self.assertEqual(self._repo_path("demo"), expected)
+        got = self._repo_path("demo",
+                              env={"DAIS_ROOT": "/opt/homebrew/Cellar/dais/9.9.9/libexec"})
+        self.assertEqual(got, expected)
 
 
 class TestRunAgentRepoPath(CliTest):
