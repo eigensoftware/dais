@@ -97,7 +97,13 @@ MD
     # who is running what: the tool checkout's tag/commit (+ -dirty if locally modified),
     # so two machines can compare builds at a glance. The workspace is stated too, since
     # one tool can drive many workspaces.
-    desc="$(git -C "$DAIS_ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+    # a packaged install (Homebrew/tarball) has no .git — a baked VERSION file wins; a source
+    # checkout falls back to the live git describe.
+    if [ -f "$DAIS_ROOT/VERSION" ]; then
+      desc="$(cat "$DAIS_ROOT/VERSION")"
+    else
+      desc="$(git -C "$DAIS_ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+    fi
     when="$(git -C "$DAIS_ROOT" log -1 --format=%cd --date=short 2>/dev/null || true)"
     echo "dais $desc${when:+ ($when)}"
     echo "  tool:      $DAIS_ROOT"
