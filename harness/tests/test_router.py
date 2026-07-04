@@ -300,6 +300,60 @@ class TestCastFromAgents(unittest.TestCase):
         self.assertEqual(router.cast(self.root, "demo"), [])
 
 
+class TestLintTransitionWarnings(unittest.TestCase):
+    """Transition-period lint: legacy-location warnings (roles file, suffix keys,
+    active_agents), orphan cast members (agents/<x>.md with no machine role), and
+    secret-shaped values in config/persona files. lint_project() must not early-return
+    just because the roles file is absent — it lints the new (frontmatter) world too."""
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="dais-lintw-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.pdir = os.path.join(self.root, "projects", "demo")
+        os.makedirs(os.path.join(self.pdir, "agents"))
+        with open(os.path.join(self.pdir, "project.yaml"), "w") as f:
+            f.write("project: demo\nrepo: demo\nstage_goal: x\n")
+        with open(os.path.join(self.pdir, "machine.json"), "w") as f:
+            f.write('{"name":"t","entry":"ready","roles":{"engineer":{"access":"edit"},'
+                    '"qa":{"access":"review"}},'
+                    '"states":{"ready":{"initial":true},"done":{"terminal":true}},'
+                    '"edges":[{"from":"ready","to":"done","by":"engineer","verb":"finish"}]}')
+
+    def _agent(self, role, fm=""):
+        with open(os.path.join(self.pdir, "agents", role + ".md"), "w") as f:
+            f.write((("---\n%s---\n" % fm) if fm else "") + "You are %s.\n" % role)
+
+    def test_warns_on_legacy_roles_file(self):
+        with open(os.path.join(self.pdir, "roles"), "w") as f:
+            f.write("qa review reactive - 1\n")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("legacy roles file" in w for w in warns))
+
+    def test_warns_on_legacy_suffix_keys_and_active_agents(self):
+        with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
+            f.write("model_qa: claude-haiku-4-5\nactive_agents: qa engineer\n")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("model_qa" in w for w in warns))
+        self.assertTrue(any("active_agents" in w for w in warns))
+
+    def test_warns_on_agent_file_with_no_machine_role(self):
+        self._agent("ghost")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("ghost" in w and "machine" in w for w in warns))
+
+    def test_warns_on_secret_shaped_value(self):
+        self._agent("qa", "model: claude-opus-4-8\n")
+        with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
+            f.write("api_key: sk-ant-abc123def456ghi789\n")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("secret" in w.lower() for w in warns))
+
+    def test_no_roles_file_is_not_an_early_return(self):
+        # trigger/access sanity now runs off the cast, not the roles file
+        self._agent("qa", "trigger: sometimes\n")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("trigger" in w for w in warns))
+
+
 class TestLintEnumeratesWithoutRolesFile(unittest.TestCase):
     """lint() enumerates projects by project.yaml presence — the roles file is legacy and
     optional, so a project.yaml-only project (no roles file) must still be linted, not skipped."""

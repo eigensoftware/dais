@@ -191,14 +191,17 @@ def decide(root, project, excluded=None):
 
 
 def lint_project(root, project):
-    """Return (errors, warnings) for one project's roles file."""
+    """Return (errors, warnings) for one project's config: project.yaml + machine.json +
+    agents/<role>.md cast, plus (during the transition) the legacy roles file if present."""
     errors, warnings = [], []
     rolesf = os.path.join(root, "projects", project, "roles")
-    if not os.path.exists(rolesf):
-        return errors, warnings  # no roles file -> project just never runs; not an error
-    roles, problems = parse_roles(rolesf)
-    for ln, msg, line in problems:
-        warnings.append("L%d: %s -> %r" % (ln, msg, line))
+    roles = []
+    if os.path.exists(rolesf):
+        roles, problems = parse_roles(rolesf)
+        for ln, msg, line in problems:
+            warnings.append("L%d: %s -> %r" % (ln, msg, line))
+        warnings.append("legacy roles file present — run `dais migrate --config %s` "
+                        "(frontmatter in agents/<role>.md is the home now)" % project)
 
     # project.yaml must exist and carry the keys the harness reads
     projyaml = os.path.join(root, "projects", project, "project.yaml")
@@ -215,6 +218,15 @@ def lint_project(root, project):
             warnings.append("project.yaml playbook '%s' has no file (looked in projects/%s/playbooks/ "
                             "and harness/playbooks/); roles fall back to no conventions"
                             % (m.group(1), project))
+        for key in re.findall(r"(?m)^((?:model|effort)_[a-z_]+):", text):
+            warnings.append("legacy per-role key '%s:' in project.yaml — move it into "
+                            "agents/<role>.md frontmatter (dais migrate --config)" % key)
+        if re.search(r"(?m)^active_agents:", text):
+            warnings.append("legacy active_agents: in project.yaml — the agents/ directory "
+                            "is the cast now; delete the key")
+        if re.search(r"\bsk-(ant|proj)?-?[A-Za-z0-9_-]{16,}", text):
+            warnings.append("possible secret in project.yaml — keys belong in the "
+                            "environment (~/.dais/env), never in config files")
     if not os.path.exists(os.path.join(root, "projects", project, "CONTEXT.md")):
         warnings.append("no CONTEXT.md (agents read it first for project memory)")
 
@@ -232,26 +244,39 @@ def lint_project(root, project):
             errors.append("status '%s' is handled by multiple roles %s — a stage must have ONE owner; "
                           "only the lowest-precedence role runs, the rest are silently starved" % (s, names))
 
-    # 2) field sanity (warn, don't fail — the router already degrades safely)
-    for r in roles:
-        if r["access"] not in VALID_ACCESS:
+    # 2) field sanity (warn, don't fail — the router already degrades safely) + transition-period
+    #    checks (orphan cast members, secret-shaped values) — sourced from the resolved cast, not
+    #    the legacy roles-file rows, so it lints frontmatter-only projects too.
+    known_roles = set()
+    try:
+        import machine as MC
+        m = MC.load(_machine_for(root, project))
+        known_roles = set(m.get("roles", {})) | {"founder"}
+    except Exception:
+        m = None
+    for r in cast(root, project):
+        s = agent_setup(root, project, r["name"])
+        if s["access"] not in VALID_ACCESS:
             warnings.append("role '%s': unknown access '%s' (expected %s); treated as read-only"
-                            % (r["name"], r["access"], "|".join(sorted(VALID_ACCESS))))
-        if not (r["trigger"] in ("reactive", "none") or re.match(r"every:\d+h$", r["trigger"])):
+                            % (r["name"], s["access"], "|".join(sorted(VALID_ACCESS))))
+        if not (s["trigger"] in ("reactive", "none") or re.match(r"every:\d+h$", s["trigger"])):
             warnings.append("role '%s': unrecognized trigger '%s' (expected reactive|every:Nh|none); "
-                            "never scheduled" % (r["name"], r["trigger"]))
-        if not r["prec_raw"].lstrip("-").isdigit():
-            warnings.append("role '%s': non-numeric prec '%s'; defaulted to 999"
-                            % (r["name"], r["prec_raw"]))
-        if r["trigger"] != "none":  # a schedulable role needs a persona to run as
-            persona = os.path.join(root, "projects", project, "agents", r["name"] + ".md")
-            if not os.path.exists(persona):
-                warnings.append("role '%s': no persona file at projects/%s/agents/%s.md"
-                                % (r["name"], project, r["name"]))
-        if r["playbook"] and not _playbook_file(root, project, r["playbook"]):
+                            "never scheduled" % (r["name"], s["trigger"]))
+        if s["playbook"] and not s["playbook_file"]:
             warnings.append("role '%s': playbook '%s' has no file (looked in projects/%s/playbooks/ "
                             "and harness/playbooks/); falls back to no conventions"
-                            % (r["name"], r["playbook"], project))
+                            % (r["name"], s["playbook"], project))
+        persona = os.path.join(root, "projects", project, "agents", r["name"] + ".md")
+        if known_roles and r["name"] not in known_roles and os.path.exists(persona):
+            warnings.append("agents/%s.md: role '%s' appears in no machine role — dead cast "
+                            "member (typo, or add it to machine.json roles)" % (r["name"], r["name"]))
+        fmtext = ""
+        if os.path.exists(persona):
+            with open(persona) as fh:
+                fmtext = fh.read(2000)
+        if re.search(r"\bsk-(ant|proj)?-?[A-Za-z0-9_-]{16,}", fmtext):
+            warnings.append("possible secret in agents/%s.md — keys belong in the environment "
+                            "(~/.dais/env), never in config files" % r["name"])
 
     # 3) every role the MACHINE dispatches needs a persona file — the scheduler will launch it,
     #    and run-agent exits before recording a run when the persona is missing (silent stall).
