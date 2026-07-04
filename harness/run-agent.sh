@@ -194,16 +194,24 @@ run_agent_anthropic(){
         | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG"
 }
 
-# codex has no per-tool disallows: edit -> workspace-write; review/draft roles rely on
-# the persona + machine guards (v1 limitation, documented in the spec). DAIS_HOME is
-# added as a writable root so `dais fire` (coordination writes dais.db) always works.
+# codex wraps runs in its own filesystem sandbox, and workspace-write blocks .git/ writes —
+# which breaks an edit role's core job (commit/branch/PR). So edit roles run with the sandbox
+# BYPASSED (founder decision 2026-07-04): trust parity with anthropic's bypassPermissions,
+# where the protection is the machine's guards + the founder gates, not a sandbox. Non-edit
+# roles keep the write sandbox (repo + DAIS_HOME so `dais fire` still works) — codex has no
+# per-tool disallows like claude's --disallowedTools, so the sandbox is their structural guard.
 run_agent_openai(){
-  local sandbox="workspace-write"
+  local sandbox_flags
+  if [ "$ACCESS" = "edit" ]; then
+    sandbox_flags=(--dangerously-bypass-approvals-and-sandbox)
+  else
+    sandbox_flags=(--sandbox workspace-write
+                   -c 'sandbox_workspace_write.writable_roots=["'"$DAIS_HOME"'"]')
+  fi
   codex exec --json --skip-git-repo-check --cd "$REPO" \
         ${MODEL:+-m "$MODEL"} \
         ${EFF:+-c model_reasoning_effort="$EFF"} \
-        --sandbox "$sandbox" \
-        -c 'sandbox_workspace_write.writable_roots=["'"$DAIS_HOME"'"]' \
+        "${sandbox_flags[@]}" \
         "$STANDING
 
 $PERSONA" 2>&1 \

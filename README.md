@@ -212,16 +212,18 @@ one set wins. Never put a key in `project.yaml` or a persona file (`dais lint` w
 secret-shaped values); `dais init` gitignores `.env` for you. `auth: subscription` (the default)
 runs the CLI as already logged in — nothing to configure.
 
-**v1 caveats, honestly:**
-- **codex has no per-tool sandbox like claude's.** A `review` or `draft` access role on
-  `provider: openai` can't be restricted to read-only/no-edit the way an anthropic role can —
-  the persona's instructions plus the machine's own guards are the only guard. Don't rely on
-  the sandbox to enforce a reviewer's read-only-ness under codex.
-- **the codex `workspace-write` sandbox blocks writes under `.git/`.** An `openai`-provider
-  engineer can edit files in the repo but cannot `git commit`, branch, or push from inside the
-  sandbox today. That makes `openai` a good fit for reviewer/QA/content roles right now;
-  code-committing roles (engineer) should stay on `anthropic` until a sandbox path around this
-  lands.
+**How codex roles are sandboxed — and why `edit` roles bypass it:**
+- **`edit` roles run codex with its sandbox disabled** (`--dangerously-bypass-approvals-and-sandbox`).
+  Codex's `workspace-write` sandbox blocks writes under `.git/`, which breaks an engineer's core
+  job — commit, branch, PR. Disabling it is deliberate trust *parity*, not an escalation: an
+  anthropic `edit` role already runs with `--permission-mode bypassPermissions`. On both
+  providers, the protection for an edit role is the machine's guards and the founder gates —
+  nothing outward ships without you — not a filesystem sandbox.
+- **`review`/`draft` roles keep codex's write sandbox** (repo + the workspace, so `dais fire`
+  works). But codex has no per-tool disallows like claude's — a reviewer on `openai` can't be
+  made read-only-on-code the way an anthropic reviewer is (`--disallowedTools Edit Write …`).
+  The sandbox plus the persona plus the machine's guards are the guard. If structurally
+  read-only reviewers matter to you, keep those roles on `anthropic`.
 
 ## The CLI
 
