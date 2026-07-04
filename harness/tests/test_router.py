@@ -353,6 +353,14 @@ class TestLintTransitionWarnings(unittest.TestCase):
         _, warns = router.lint_project(self.root, "demo")
         self.assertTrue(any("trigger" in w for w in warns))
 
+    def test_warns_on_schedulable_cast_member_without_persona(self):
+        # a stale roles-file row (retired role): schedulable, machine doesn't dispatch it,
+        # no agents/<role>.md — decide() could still pick it and stall silently
+        with open(os.path.join(self.pdir, "roles"), "w") as f:
+            f.write("ghostlead  review  every:5h  -  3\n")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("ghostlead" in w and "persona" in w for w in warns))
+
 
 class TestLintEnumeratesWithoutRolesFile(unittest.TestCase):
     """lint() enumerates projects by project.yaml presence — the roles file is legacy and

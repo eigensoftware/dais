@@ -256,17 +256,21 @@ def lint_project(root, project):
         m = None
     for r in cast(root, project):
         s = agent_setup(root, project, r["name"])
+        persona = os.path.join(root, "projects", project, "agents", r["name"] + ".md")
         if s["access"] not in VALID_ACCESS:
             warnings.append("role '%s': unknown access '%s' (expected %s); treated as read-only"
                             % (r["name"], s["access"], "|".join(sorted(VALID_ACCESS))))
         if not (s["trigger"] in ("reactive", "none") or re.match(r"every:\d+h$", s["trigger"])):
             warnings.append("role '%s': unrecognized trigger '%s' (expected reactive|every:Nh|none); "
                             "never scheduled" % (r["name"], s["trigger"]))
+        if s["trigger"] != "none" and not os.path.exists(persona):
+            warnings.append("role '%s': no persona file at projects/%s/agents/%s.md — the "
+                            "scheduler can pick it but the run will stall before recording "
+                            "anything" % (r["name"], project, r["name"]))
         if s["playbook"] and not s["playbook_file"]:
             warnings.append("role '%s': playbook '%s' has no file (looked in projects/%s/playbooks/ "
                             "and harness/playbooks/); falls back to no conventions"
                             % (r["name"], s["playbook"], project))
-        persona = os.path.join(root, "projects", project, "agents", r["name"] + ".md")
         if known_roles and r["name"] not in known_roles and os.path.exists(persona):
             warnings.append("agents/%s.md: role '%s' appears in no machine role — dead cast "
                             "member (typo, or add it to machine.json roles)" % (r["name"], r["name"]))
