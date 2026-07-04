@@ -7,19 +7,19 @@ command line. Agents (lead / engineer / qa / …) run as headless `claude -p` se
 coordinated through a SQLite board. You operate the whole thing with the `dais` CLI and gate
 every outward action (publishing, merging, deploying).
 
-It ships tuned for software teams, but the coordination is **domain-neutral**: a per-role
-*playbook* carries the craft-specific conventions, so the same harness runs legal, research,
-or content work just as well as code (see [Playbooks](#playbooks-running-any-craft)).
+It ships tuned for software teams, but the coordination is **domain-neutral**: each project
+runs an **authored state machine** for its lifecycle and a per-role *playbook* for the
+craft-specific conventions, so the same harness runs legal, research, or content work just as
+well as code (see [Playbooks](#playbooks-running-any-craft)).
 
-- **Source of truth:** one SQLite board (`dais.db`) — `tasks` + per-run `runs` history.
-- **Roles-as-config:** each project declares who exists and how they're scheduled in a plain
-  `roles` file; a status-driven router picks who runs next (reviewers → builders → planners).
-  Adding a role is a persona file + one line — or let `dais role new` design it for you.
-- **Playbooks:** working conventions are bound to the role, not baked into the universal prompt,
-  so one harness spans many domains. The default is `code`.
-- **Founder-gated:** gates frame the loop — `proposed` (front door: what gets built), a back-door
-  deliverable gate (`ready_to_merge` for a QA-approved PR you merge, or `needs_review` for a finished
-  non-code deliverable you close), and — where merge ≠ deploy — a manual **deploy** gate.
+- **Source of truth:** one SQLite board (`dais.db`) — `tasks` + per-run `runs` history + the
+  composition graph (`task_links`: what spawned what, what a release encompasses).
+- **Authored lifecycles:** each project owns a `machine.json` — states, edges, guards. Nothing
+  pokes a status; **every state change fires an edge** (`dais fire <task> <verb>`), and the
+  scheduler dispatches whichever role the machine names for a task's state.
+- **Founder-gated:** guards make outward edges *structurally un-automatable* — a
+  `typed_confirm` or `attest:<fact>` can only be satisfied by a human typing it. Two gates
+  frame the loop: proposal approval (what gets built) and the release greenlight (what ships).
 - **Just shell + SQLite + a little Python.** No heavy frameworks.
 
 ## Concepts: the tool vs. your workspace
@@ -58,178 +58,176 @@ the `~/.dais/config` line — with no config, `DAIS_HOME` falls back to the clon
 Update the tool any time with `git pull` in `~/dais` — the symlink reflects it instantly.
 
 **Requirements:** `sqlite3`, `python3` (stdlib only), and the [Claude Code](https://claude.com/claude-code)
-CLI (`claude`) for the agents. `gh` is needed for `dais ship`. Runs on macOS (bash 3.2+)
-and Linux.
+CLI (`claude`) for the agents (`gh` is recommended — the coding playbook has agents open PRs with it).
+Runs on macOS (bash 3.2+) and Linux.
 
 ## Quickstart
 
 ```sh
-dais scaffold myproject     # create a project from the template (edit its project.yaml + roles)
-dais lint myproject         # validate the project config
+dais scaffold myproject     # create a project from a template (roles + its own machine.json)
+dais lint myproject         # validate the project config + machine coherence
 dais top                    # live control panel — the primary way to operate the workspace
-dais watch                  # run the loop: agents drain the queue, gating outward actions for you
+dais watch                  # run the loop: agents drain the queue, parking at your gates
 ```
+
+## The machine: how work flows
+
+Each project owns its lifecycle as an authored state machine —
+`projects/<name>/machine.json`, seeded from a template by `dais scaffold` and yours to edit.
+States are the board's bands; **edges own every transition**: a verb, the role that may fire
+it (`by`), optional guards, and optional effects. Nothing writes a status directly — every
+change is `dais fire <task> <verb>`, and `dais edges <task>` shows what's fireable from where
+a task sits. (Full model: [`design/machine-model.md`](design/machine-model.md).)
+
+The default **coding** machine:
+
+```
+proposed ──submit──▶ proposal_review ──approve ◆──▶ spawns the build task, ready
+   (lead specs it)      (front-door founder gate;  request_changes bounces it back)
+
+ready ──claim──▶ doing ──complete──▶ qa_review ──pass ✓tests──▶ approved (parked for a release)
+                                         └──fail──▶ blocked + a spawned fix task;
+                                                    auto-returns to qa_review when the fix lands
+
+release_open ──assemble──▶ release_review ──greenlight ◆──▶ releasing ──shipped──▶ done
+  (aggregates every        (back-door founder gate:         (the release and everything
+   approved task)           typed confirm + attests)         it encompasses close together)
+```
+
+Plus founder parking (`defer` / `undefer` returns a task to where it was parked from), an
+engineer self-retire edge (`invalidate`), and a rollback lane (`release_error` spawns a fix,
+founder `retry`s or `give_up`s).
+
+**Guards** are the gate mechanism, declared per edge:
+
+| Guard | Satisfied by |
+|---|---|
+| `confirm` | a click (`--confirm`) — weak |
+| `typed_confirm` | a human typing the task id — **strong human** |
+| `attest:<fact>` | a human asserting an unverifiable fact — **strong human**. Conditional form `attest:<fact> when task:<flag>` is required unless the task's flag is explicitly false (fail-safe: unknown still gates) |
+| `verify:<check>` | the machine's declared `checks.<check>` command passing (or the firing role's explicit `--verify` self-assertion); fails closed |
+
+**Effects** keep composition inside the machine: an edge can `spawn` a task (QA-fail spawns
+the fix), `aggregate` a set (a release pulls in every `approved` task), or `then`-fire edges
+on what it encompasses (shipping a release closes its children) — each nested change still a
+real, guarded edge. `fire` is atomic: a transition and all its effects commit or roll back
+together.
+
+**Dispatch is derived.** The scheduler runs the role the machine names for the top pending
+task's state; cadence roles (e.g. a lead on `every:24h`) also run on their clock for periodic
+discovery. `founder` edges are never dispatched — that work parks in **NEEDS YOU** until you
+act. `dais lint` checks machine coherence (referential integrity, no dead ends, unambiguous
+dispatch, reachability) and warns on outward edges with no strong-human guard on their
+approach.
 
 ## Driving the control panel (`dais top`)
 
-`dais top` is the primary interface — a live, master–detail TUI you watch and act from. It refreshes
-on an interval; nothing it does is destructive without a confirm.
+`dais top` is the primary interface — a live, master–detail TUI you watch and act from.
+Guarded edges prompt **in the panel** with the same strength as the CLI flags (you type the
+task id / the fact name to greenlight a release); nothing outward fires from a bare keypress.
 
 **The panes:**
 
-- **Vitals** (top bar) — `● running · ◆ NEED YOU · watch state · projects · clock`. Calm when nothing
-  needs you; the **NEED YOU** token turns yellow when work is waiting on a founder gate.
-- **PROJECTS** (rail) — a per-project table: `run · you · scp · que · bkl` (running · needs-you ·
-  scoping · queued · backlog), plus an **ALL** row that totals across projects. The live project is
-  green. Select a project to filter the WORK list to it; **ALL** clears the filter.
-- **WORK** — the task list in bands: **RUNNING · NEEDS YOU · SCOPING · QUEUED · BACKLOG · DEFERRED ·
-  ARCHIVE** (empty bands collapse to a dim header). A task blocked on an unfinished dependency shows
-  `⛓` and dims. Any custom status auto-surfaces as its own band.
-- **INSPECTOR** — detail of the selection: title, notes/spec, recent runs. Select a **running** agent
-  and it streams that agent's **live log** here (wraps long lines; `j`/`k` scroll up into history).
+- **Vitals** (top bar) — `● running · ◆ NEED YOU · watch state · projects · clock`. Calm when
+  nothing needs you; **NEED YOU** lights up when work waits on a founder gate.
+- **PROJECTS** (rail) — per-project counts, plus an **ALL** row summarizing the workspace.
+  Select a project to filter the WORK list; **ALL** clears the filter.
+- **WORK** — tasks in machine-derived bands: **RUNNING · NEEDS YOU · QUEUED · WAITING ·
+  ARCHIVE**. A task blocked on an unfinished dependency shows `⛓` and dims.
+- **INSPECTOR** — the selection's detail: title, notes, recent runs, `next:` (its fireable
+  edges + guards ◆) and `links:` (spawned-from / blockers / what a release encompasses).
+  Select a **running** agent and it streams that agent's live log.
 - **FEED** — a one-line ticker of the most recent runs.
 
-**Keys** — the bottom bar always shows the actions valid for the current selection, each with its
-key; `?` opens the full map. Case is literal: a **capital** letter means Shift (e.g. `R`/`L`, because
-`r`/`l` are already the runs view / log pager).
+**Keys** — the bottom bar shows the actions valid for the current selection (derived from the
+machine's edges), each with its key; `?` opens the full map. Highlights: `tab` switch pane ·
+`j`/`k` move/scroll · `/` filter · `↵` action menu · `n` new task · `e` edit title · `+`/`-`
+priority · `o` open PR · `w` start/stop watch · `p` pause/resume · `t` tick · `R` run a role
+now · `c` cancel the running agent · `C` cut a release · `P` project setup · `r` runs history ·
+`l` log pager · `L` live log wall · `q` quits (with confirm) · `esc` backs out one level.
 
-- **Navigate:** `tab` switch pane · `j`/`k` move selection or scroll · `g` expand backlog+archive ·
-  `/` filter · `rail + j/k` pick a project.
-- **Act on the selected task** (only the valid ones show): `a` advance (promote / start / approve /
-  ship …) · `x` reverse (defer / cancel / reject …) · `s` scope · `h` handoff · `e` edit title ·
-  `+`/`-` priority · `o` open PR · `n` new task · `↵` action menu (the same keys, listed).
-- **Loop / run** (act on the selected row's project): `w` start/stop watch · `R` run a role now ·
-  `t` tick once · `p` pause/resume · `c` cancel the running agent · `D` deploy (confirms) · `F` file
-  a fix task for a failed deploy.
-- **Views:** `r` runs history (every completed run, incl. task-less — `j`/`k` to a run, `l`/`↵` opens
-  its saved log) · `l` log pager · `L` live log wall (all running agents).
-- **Everywhere:** `q` quits (asks to confirm) from any screen; `esc` backs out of a view/overlay one
-  level. `q` never just closes a screen — it always quits.
-
-**Manual vs. the loop.** `dais watch` is the continuous auto-dispatcher (it's what `PAUSED` refers
-to). `a start`, `R`, and `t` are **on-demand** runs that fire one agent now and **bypass pause** — so
-you can kick off work while the loop is parked. `start` runs the *role* that handles the task's
-status, which then pulls the **highest-priority** task of that status (not necessarily the one you
-clicked). To make work flow automatically, **resume** (`p`) or start the loop (`w`).
-
-## How work flows
-
-Statuses are the spine — a task's status *is* whose turn it is, and the router runs the role that
-owns it (verify → build → plan by precedence). A typical code task:
-
-```
-backlog ──▶ ready ──▶ needs_qa ──▶ ready_to_merge ──▶ done
-  (you)    (engineer)   (qa)        (you merge)
-              ▲            └─ bounce ──▶ changes_requested ──▶ (engineer)
-
-a sparse task you add ──▶ needs_scoping ──▶ (lead specs it) ──▶ ready
-                                                              └─▶ proposed  (you approve new direction)
-```
-
-Two founder gates frame it: **`proposed`** (front door — a Lead initiative you approve before it's
-built) and the back-door deliverable gate — **`ready_to_merge`** (a QA-approved PR you merge) or
-**`needs_review`** (a finished non-code deliverable you review and close). **Dependencies:**
-`dais task set <id> --depends-on <other>` keeps a task out of the queue until its predecessor is
-done — the scheduler skips it and the panel marks it `⛓`.
-
-**Deploy** is a third gate for projects where **merge ≠ deploy** (e.g. an auto-merge project that
-deploys manually). Set a `deploy:` command in `project.yaml` (any shell — ssh pull, `fly deploy`,
-a script); `dais deploy <project>` (or `D` in the panel) runs it founder-gated and logs it as a run.
-A migration-inclusive variant lives in `deploy_migrate:` — `D` auto-selects it (with a loud confirm)
-when a pending commit touches a migration; deploys are always manual, never automatic.
-
-**"Needs deploy?" is the truth, not a guess.** Set `deployed_rev:` — a command that prints what SHA
-the *server* is running (e.g. `ssh … git rev-parse --short HEAD`). dais compares prod ↔ `main` and
-shows **⬆ DEPLOY** (yes/no) plus an **AWAITING DEPLOY** band listing the exact commits that would
-ship (select one for its full detail in the inspector) — so you never have to know prod's state
-yourself. The panel refreshes that check in the background (`dais deploy <p> --check` caches it); a
-successful deploy updates the cache. Projects where merge *is* the deploy (e.g. beacon) set no
-`deploy:`.
-
-Every deploy is **logged like a run** (full output saved under `projects/<p>/logs/`, openable from
-the runs view). A failed deploy is surfaced loudly in the band (`⚠ last deploy FAILED …`) and leaves
-prod behind, so it can't be missed; **`F`** files a fix task from it (founder-initiated — deploy
-failures are often transient/ops, so nothing is auto-created).
+**Manual vs. the loop.** `dais watch` is the continuous auto-dispatcher. `dais start <id>`,
+`R`, and `t` are on-demand runs that fire one agent now and bypass pause. `start` runs the
+role the machine dispatches for the task's state — honoring the dependency chain.
 
 ## Playbooks: running any craft
 
-The agent prompt is two layers: a **neutral coordination contract** (the board, statuses, hand-offs,
-"do one unit then stop") that every agent gets, plus a **playbook** — the craft-specific conventions
-for *how this kind of work is done here*. The tool ships `code`, `legal`, and `content`; add your own
-under `harness/playbooks/` (or override per project in `projects/<name>/playbooks/`).
+The agent prompt is two layers: a **neutral coordination contract** (the board, the machine,
+hand-offs, "do one unit then stop") that every agent gets, plus a **playbook** — the
+craft-specific conventions for *how this kind of work is done here*. The tool ships `code`,
+`legal`, `content`, and `plan`; add your own under `harness/playbooks/` (or override per
+project in `projects/<name>/playbooks/`).
 
-A playbook is bound at the **role** level, so a single project can mix crafts (an `engineer` on `code`,
-a `gc` on `legal`, a `marketer` on `content`). Resolution is **role wins, project defaults**: the role's
-6th `roles` column → the project's `playbook:` default → built-in `code`. So existing code projects need
-no change, and a pure-legal workspace can set one default.
+A playbook is bound at the **role** level, so a single project can mix crafts (an `engineer`
+on `code`, a `marketer` on `content`). Resolution is **role wins, project defaults**: the
+role's optional 6th `roles` column → the project's `playbook:` default → built-in `code`.
 
 ```
-# roles:  name      access  trigger   handles          prec  playbook
-gc          review  reactive  needs_legal      1     legal
-engineer    edit    reactive  ready            3     code
-marketer    draft   every:48h -               6     content
+# roles:  name      access  trigger    handles  prec  playbook
+engineer    edit    reactive   -       20      code
+marketer    draft   every:48h  -       60      content
 ```
 
-The full prompt an agent sees, in escalating specificity:
-`workspace CONTEXT → project CONTEXT → role playbook → role persona`.
+(`handles` is legacy and unused — dispatch comes from the machine's edges.) The full prompt an
+agent sees, in escalating specificity: `workspace CONTEXT → project CONTEXT → role playbook →
+role persona`.
 
-**Let Claude design a role:** `dais role new <project> --desc "what it does"` proposes a persona +
-routing row (access / trigger / handles / playbook / prec) from your project's existing roles; you
-confirm, and `dais lint` guards the invariant that each status has exactly **one** schedulable owner.
-A role's `handles` is reactive ownership: a cadence role (e.g. a `lead` on `every:5h`) that also
-`handles needs_scoping` reacts to scoping work on the next tick **and** keeps its periodic run.
+**Let Claude design a role:** `dais role new <project> --desc "what it does"` proposes a
+persona + routing row from your project's existing roles; you confirm.
 
 ## The CLI
 
 | Command | What it does |
 |---|---|
 | `dais init [path]` | bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board); idempotent |
-| `dais status` | the dashboard — running now, merge-ready, blocked-on-you, queues, recent runs |
+| `dais status` | everything at a glance — running now, gates waiting on you, queues, recent runs |
 | `dais top [secs]` | the live control panel (see [Driving the control panel](#driving-the-control-panel-dais-top)) |
-| `dais backlog <project>` | stage goal + ranked queue |
+| `dais project <name>` | a project's setup: cast + models, machine dispatch map, config |
 | `dais tasks <project>` | list a project's tasks (filter by `--status` / `--assignee`) |
-| `dais watch [secs] [N]` | run the loop (N = parallel agents, 1–5) |
+| `dais task add/set …` | manage the board (new tasks enter at the machine's entry state) |
+| `dais fire <id> <verb>` | advance a task by firing a machine edge (guards: `--confirm` / `--typed` / `--attest` / `--verify`) |
+| `dais edges <id>` | the fireable edges from a task's current state |
+| `dais start <id>` | run the role the machine dispatches for this task's state, now (bypasses pause) |
+| `dais watch [secs] [N]` | run the loop (N = parallel agents) |
 | `dais pause` / `dais resume` | park / un-park the loop |
-| `dais tick [project]` | run one scheduling tick (the router picks who runs) |
+| `dais tick [project]` | run one scheduling tick (the machine picks who runs) |
 | `dais run <project> <agent>` | run a specific agent now |
-| `dais start <id>` | run the role that handles this task's status, right now (bypasses pause) |
 | `dais cancel <project>` | stop the project's in-flight agent (marks the run interrupted) |
-| `dais task add/set …` | manage the board (incl. `--depends-on <id>` to gate on a predecessor) |
-| `dais handoff <id> <role>` | hand a task to a role (sets the status that role handles) |
-| `dais approve <id>` | approve a `proposed` initiative → `ready` |
-| `dais ship <project> <pr#>` | QA-gated, migration-aware squash-merge (founder gate) |
-| `dais deploy <project> [--migrate] [--check]` | run the project's deploy (gate after merge); `--check` caches prod's live SHA |
-| `dais scaffold <project>` | create a new project from the template |
+| `dais scaffold <project> [--template coding\|marketing]` | create a project (roles + its own machine) from a template |
 | `dais role new <project> --desc "…"` | Claude designs a new role (persona + routing); you confirm |
-| `dais lint [project]` | validate a project (roles + project.yaml + playbooks + required files) |
+| `dais lint [project]` | validate a project (roles + project.yaml + playbooks + machine coherence) |
 | `dais migrate` | apply pending DB migrations (run with the loop paused) |
 | `dais schedule install [secs]` | background ticks (launchd on macOS, cron on Linux) |
 | `dais learn <project> "…"` | append a durable decision/gotcha to the project's CONTEXT.md |
-| `dais actions <id>` | list the founder actions valid for a task + the exact command for each |
-| `dais logs <project> [N]` | recent runs + their saved log paths (open one from the panel's `r` view) |
+| `dais logs <project> [N]` | recent runs + their saved log paths |
+| `dais version` | which build this machine runs |
 
 ## Layout
 
 ```
 dais                  the CLI — your control panel and the agents' coordination interface
 harness/
+  machine.py          the engine: load/lint a machine, derive dispatch + bands, fire edges (atomic)
   dispatch.sh         scheduler: one tick = pick + run the next agent
   run-agent.sh        runs an agent headless (claude -p), streams + logs what it changed
-  router.py           decides who runs next from each project's roles file; also `dais lint`
-  dashboard.py        the data layer + the classic status/top renderers
-  panel.py            the default `dais top` control panel (responsive mission-control cockpit)
-  playbooks/          craft conventions injected per role (code, legal, content, …)
-  lib.sh schema.sql   shared helpers + the board schema
+  router.py           parses each project's roles file (cast, cadence, playbooks); roles lint
+  dashboard.py        data layer + plain renderers (status/project) + the base TUI action engine
+  panel.py            the `dais top` cockpit — the multi-pane renderer on top of dashboard.py
+  machines/           the machine templates projects are seeded from (coding, marketing)
+  playbooks/          craft conventions injected per role (code, legal, content, plan)
+  lib.sh schema.sql   shared shell helpers + the board schema
   migrations/         ordered DB migrations (applied by `dais migrate` / first init)
-  templates/          the `dais scaffold` project template
-  tests/              the test suite (python -m pytest harness/tests/)
+  templates/          the `dais scaffold` project templates
+  tests/              the test suite (python3 -m pytest harness/tests/)
+design/
+  machine-model.md    the machine model — schema, guard vocabulary, effects, lint rules
 ```
 
 In a workspace, each project lives under `projects/<name>/`:
-`project.yaml` (repo, model + effort — with per-role `model_<role>:`/`effort_<role>:` overrides —
-stage goal, optional `playbook:` default), `roles` (who exists +
-how scheduled + each role's playbook), `agents/*.md` (role personas), `CONTEXT.md` (project
-memory agents read first), and optional `playbooks/` (project-specific craft overrides).
+`machine.json` (its authored lifecycle), `project.yaml` (repo, model + effort — with per-role
+overrides — stage goal, optional `playbook:` default), `roles` (who exists + cadence +
+playbook), `agents/*.md` (role personas), `CONTEXT.md` (project memory agents read first), and
+optional `playbooks/` (project-specific craft overrides).
 
 ## License
 

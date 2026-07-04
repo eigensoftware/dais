@@ -16,7 +16,7 @@ usage(){ cat <<'U'
 dais — your agent company control panel
 
   dais status                         everything at a glance (tasks + recent runs)
-  dais top [secs]                     live TUI dashboard (read-only; default 2s refresh)
+  dais top [secs]                     live control panel — act on tasks, fire guarded edges (default 2s refresh)
   dais project <name>                 a project's setup: cast + models, machine dispatch map, config
   dais tasks <project> [--assignee A] [--status S]
   dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."]
@@ -123,7 +123,7 @@ MD
     python3 "$DAIS_ROOT/harness/dashboard.py" --project "$name" ;;
 
   top)
-    # the responsive multi-pane control panel (harness/panel.py)
+    # the multi-pane control panel: dashboard.py --tui instantiates panel.PanelApp
     secs="${1:-2}"
     case "$secs" in ''|*[!0-9.]*) echo "top: secs must be a number"; exit 1;; esac
     [ -f "$DB" ] || db_init >/dev/null 2>&1
