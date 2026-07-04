@@ -395,8 +395,52 @@ def task_row(conn, tid):
     return None
 
 
+def _prefix_candidates(name):
+    """Deterministic prefix candidates for a project name, most distinctive first: for a
+    multi-word name, first-word[:3] + the next word's initial (puttflow-web -> putw, so it
+    can't be misread as a puttflow id); then name[:4]; then letter-substitution variants;
+    then a numbered fallback. Always lowercase alphanumeric."""
+    import re as _re
+    words = [w for w in _re.split(r"[^a-z0-9]+", name.lower()) if w]
+    base = words[0] if words else "task"
+    out = []
+    if len(words) > 1 and len(base) >= 3:
+        out.append(base[:3] + words[1][0])
+    out.append(base[:4])
+    for c in base[4:] + "".join(words[1:]):
+        out.append(base[:3] + c)
+    out += [base[:3] + str(i) for i in range(2, 100)]
+    seen, uniq = set(), []
+    for p in out:
+        if p and p not in seen:
+            seen.add(p); uniq.append(p)
+    return uniq
+
+
+def _id_prefix(conn, project):
+    """The auto-id prefix this project's tasks use — unique per project. A project KEEPS the
+    prefix it owns (its oldest task's token, when the overall-oldest task with that token is
+    also this project's — ids are identity, history never re-labels). A collision loser, or a
+    fresh project, derives from _prefix_candidates, skipping tokens other projects' ids use."""
+    row = conn.execute("SELECT id FROM tasks WHERE project=? AND id LIKE '%-%' "
+                       "ORDER BY rowid LIMIT 1", (project,)).fetchone()
+    if row:
+        token = row[0].split("-")[0]
+        owner = conn.execute("SELECT project FROM tasks WHERE id LIKE ? ORDER BY rowid LIMIT 1",
+                             (token + "-%",)).fetchone()
+        if owner and owner[0] == project:
+            return token
+    taken = {r[0].split("-")[0] for r in
+             conn.execute("SELECT DISTINCT id FROM tasks WHERE project<>? AND id LIKE '%-%'",
+                          (project,))}
+    for cand in _prefix_candidates(project):
+        if cand not in taken:
+            return cand
+    return project[:3]                                   # unreachable in practice; backstop
+
+
 def _new_id(conn, project):
-    abbr = project[:3]
+    abbr = _id_prefix(conn, project)
     n = conn.execute("SELECT COUNT(*)+1 FROM tasks WHERE project=?", (project,)).fetchone()[0]
     tid = f"{abbr}-{n}"
     while conn.execute("SELECT 1 FROM tasks WHERE id=?", (tid,)).fetchone():

@@ -407,6 +407,50 @@ class TestPromptsFor(unittest.TestCase):
         self.assertEqual(ps, [{"kind": "verify", "check": "tests_pass", "declared": True}])
 
 
+class TestIdPrefixes(unittest.TestCase):
+    """Auto-id prefixes are unique per project: a project KEEPS the prefix it owns (has the
+    oldest task using it — ids are identity, history never re-labels), a collision loser
+    re-derives, and fresh derivation is 4 chars with word-aware variation (puttflow-web
+    prefers put+w over putt, which would read like a puttflow id)."""
+    def setUp(self):
+        self.conn = _db()
+        self.m = M.load(CODING)
+
+    def _seed(self, project, *ids):
+        for tid in ids:
+            self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES(?,?,?,'ready')",
+                              (tid, project, tid))
+
+    def test_new_project_gets_four_chars(self):
+        tid = M.create_task(self.conn, self.m, "winterbraid", "t")
+        self.assertEqual(tid, "wint-1")
+
+    def test_established_prefix_is_kept(self):
+        self._seed("winterbraid", "win-1", "win-2")
+        self.assertEqual(M.create_task(self.conn, self.m, "winterbraid", "t"), "win-3")
+
+    def test_hyphenated_name_borrows_next_word_initial(self):
+        self._seed("puttflow", "put-1", "put-2")
+        self.assertEqual(M.create_task(self.conn, self.m, "puttflow-web", "t"), "putw-1")
+
+    def test_collision_loser_rederives_but_history_stays(self):
+        # puttflow owns put- (oldest); puttflow-web got bumped ids under the old scheme
+        self._seed("puttflow", "put-1", "put-2")
+        self._seed("puttflow-web", "put-7", "put-8")
+        self.assertEqual(M.create_task(self.conn, self.m, "puttflow", "t"), "put-3")
+        # numbering continues from the project's task COUNT (2 tasks -> -3), prefix re-derives
+        self.assertEqual(M.create_task(self.conn, self.m, "puttflow-web", "t"), "putw-3")
+
+    def test_derived_prefix_avoids_other_projects(self):
+        self._seed("dais-site", "dais-1")               # dais-site owns "dais"
+        tid = M.create_task(self.conn, self.m, "daisy", "t")
+        self.assertFalse(tid.startswith("dais-"))       # daisy must vary, not collide
+        self.assertNotEqual(tid.split("-")[0], "dais")
+
+    def test_short_name_uses_whole_name(self):
+        self.assertEqual(M.create_task(self.conn, self.m, "app", "t"), "app-1")
+
+
 class TestCreateTaskAttributes(unittest.TestCase):
     """create_task speaks the full board vocabulary (explicit id, priority, notes, blocked_on)
     so the CLI's `task add` can delegate to the engine instead of re-implementing entry
