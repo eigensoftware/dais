@@ -242,6 +242,20 @@ class TestAgentSetup(unittest.TestCase):
         s = router.agent_setup(self.root, "demo", "engineer")
         self.assertEqual((s["provider"], s["auth"]), ("anthropic", "subscription"))
 
+    def test_project_model_does_not_leak_across_providers(self):
+        self._agent("qa", "provider: openai\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual(s["provider"], "openai")
+        self.assertEqual(s["model"], "")               # codex CLI default, not the anthropic id
+
+    def test_frontmatter_model_applies_to_its_own_provider(self):
+        self._agent("qa", "provider: openai\nmodel: gpt-5.2-codex\n")
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["model"], "gpt-5.2-codex")
+
+    def test_suffix_key_still_applies_on_default_provider(self):
+        self._agent("qa")                              # anthropic default; model_qa in project.yaml
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["model"], "claude-haiku-4-5")
+
     def test_playbook_file_resolved(self):
         os.makedirs(os.path.join(self.pdir, "playbooks"))
         with open(os.path.join(self.pdir, "playbooks", "design.md"), "w") as f:

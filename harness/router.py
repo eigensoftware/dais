@@ -88,9 +88,15 @@ def agent_setup(root, project, role):
             ytext = fh.read()
 
     provider = fm.get("provider") or _yaml_line(ytext, "provider") or "anthropic"
-    model = (fm.get("model") or _yaml_line(ytext, "model_" + role)
-             or _yaml_line(ytext, "model")
-             or ("claude-opus-4-8" if provider == "anthropic" else ""))
+    # project.yaml's model_<role>/model keys are written against the project's DEFAULT
+    # provider — they must not leak onto a role resolved to a different provider (e.g. a
+    # per-role `provider: openai` override), or that CLI gets handed an anthropic model id.
+    project_provider = _yaml_line(ytext, "provider") or "anthropic"
+    provider_default_model = "claude-opus-4-8" if provider == "anthropic" else ""
+    model = fm.get("model") or (
+        (_yaml_line(ytext, "model_" + role) or _yaml_line(ytext, "model")
+         or provider_default_model) if provider == project_provider
+        else provider_default_model)
     effort = (fm.get("effort") or _yaml_line(ytext, "effort_" + role)
               or _yaml_line(ytext, "effort"))
     auth = fm.get("auth") or _yaml_line(ytext, "auth") or "subscription"
