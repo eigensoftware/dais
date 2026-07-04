@@ -370,15 +370,25 @@ def _new_id(conn, project):
     return tid
 
 
-def _insert_task(conn, project, title, status, assignee):
-    """INSERT with a fresh auto-id, retrying on an id collision — two concurrent creators
-    (parallel agents adding tasks, racing spawn effects) compute the same next id; the loser
-    re-derives instead of dying on the UNIQUE constraint. Returns the id used."""
+def _insert_task(conn, project, title, status, assignee, tid=None, extra=None):
+    """INSERT a task and return its id. With no `tid` a fresh auto-id is allocated, retrying on
+    a collision — two concurrent creators (parallel agents adding tasks, racing spawn effects)
+    compute the same next id; the loser re-derives instead of dying on the UNIQUE constraint.
+    An EXPLICIT `tid` collision is a real error (ValueError), never a retry. `extra` adds
+    columns (priority/notes/blocked_on) — keys are code-controlled, values are bound."""
+    extra = extra or {}
+    cols = ["id", "project", "title", "status", "assignee"] + list(extra)
+    sql = f"INSERT INTO tasks({','.join(cols)}) VALUES({','.join('?' * len(cols))})"
+    if tid is not None:
+        try:
+            conn.execute(sql, [tid, project, title, status, assignee] + list(extra.values()))
+            return tid
+        except sqlite3.IntegrityError:
+            raise ValueError(f"could not insert {tid} (id already exists)")
     for _ in range(20):
         tid = _new_id(conn, project)
         try:
-            conn.execute("INSERT INTO tasks(id,project,title,status,assignee) VALUES(?,?,?,?,?)",
-                         (tid, project, title, status, assignee))
+            conn.execute(sql, [tid, project, title, status, assignee] + list(extra.values()))
             return tid
         except sqlite3.IntegrityError:
             continue
@@ -632,10 +642,27 @@ def recover_interrupted(conn, m, project):
 # --------------------------------------------------------------------------- #
 # task creation (enters at an initial state)
 # --------------------------------------------------------------------------- #
-def create_task(conn, m, project, title, state=None, assignee=None):
+def create_task(conn, m, project, title, state=None, assignee=None,
+                tid=None, priority=None, notes=None, blocked_on=None):
+    """Create a task at `state` (default: the machine's entry). The one authority for what
+    `dais task add` needs — state validation, id allocation (or an explicit tid), and the
+    optional board attributes — so the CLI delegates here instead of re-deriving any of it.
+    assignee: omitted -> the state's dispatch role (what spawns/python callers want);
+    '' -> explicitly unassigned (what a founder's bare `task add` means)."""
     initials = [s for s, meta in m["states"].items() if meta.get("initial")]
     st = state or m.get("entry") or (initials[0] if initials else "backlog")
-    tid = _insert_task(conn, project, title, st, assignee or dispatch_role(m, st))
+    if st not in m.get("states", {}):
+        raise ValueError(f"invalid status '{st}'. valid: {' '.join(m.get('states', {}))}")
+    if blocked_on:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        if "blocked_on" not in have:                     # column arrives by migration 0001
+            raise ValueError("dependencies need a schema upgrade — run 'dais migrate' first")
+        if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (blocked_on,)).fetchone():
+            raise ValueError(f"no such predecessor task: {blocked_on}")
+    asg = assignee if assignee is not None else dispatch_role(m, st)
+    extra = {k: v for k, v in (("priority", priority), ("notes", notes),
+                               ("blocked_on", blocked_on)) if v is not None}
+    tid = _insert_task(conn, project, title, st, asg or None, tid=tid, extra=extra)
     conn.commit()
     return tid
 
@@ -652,7 +679,8 @@ def _open(db):
 def _main(argv):
     if not argv:
         print("usage: machine.py lint <machine> | edges <machine> <state> | "
-              "create <db> <machine> <project> <title> [state] | "
+              "create <db> <machine> <project> <title> [state] [--id X] [--priority P] "
+              "[--assignee A] [--notes N] [--blocked-on ID] | "
               "fire <db> <machine> <task> <verb> <actor> [--confirm] [--typed X] "
               "[--attest fact] [--verify check] | "
               "advance <db> <machine> <project> | recover <db> <machine> <project>", file=sys.stderr)
@@ -684,10 +712,27 @@ def _main(argv):
         print(f"  (dispatch: {d or '— parks/awaits'})")
         return 0
     if cmd == "create":
+        # create <db> <machine> <project> <title> [state] [--id X] [--priority P]
+        #        [--assignee A] [--notes N] [--blocked-on ID]
+        # prints "<id>|<state>" (the CLI's `task add` echoes both); errors go to stderr, exit 1.
         db, mp, project, title = argv[1], argv[2], argv[3], argv[4]
-        st = argv[5] if len(argv) > 5 else None
+        st, kw, rest = None, {}, argv[5:]
+        flags = {"--id": "tid", "--priority": "priority", "--assignee": "assignee",
+                 "--notes": "notes", "--blocked-on": "blocked_on"}
+        i = 0
+        while i < len(rest):
+            if rest[i] in flags:
+                kw[flags[rest[i]]] = rest[i + 1]; i += 2
+            elif st is None and not rest[i].startswith("--"):
+                st = rest[i]; i += 1
+            else:
+                i += 1
         conn = _open(db)
-        print(create_task(conn, load(mp), project, title, st))
+        try:
+            tid = create_task(conn, load(mp), project, title, st, **kw)
+        except ValueError as ex:
+            print(ex, file=sys.stderr); return 1
+        print(f"{tid}|{conn.execute('SELECT status FROM tasks WHERE id=?', (tid,)).fetchone()[0]}")
         return 0
     if cmd == "fire":
         db, mp, tid, verb, actor = argv[1:6]

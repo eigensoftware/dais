@@ -158,7 +158,7 @@ MD
     case "$sub" in
       add)
         proj="${1:?usage: dais task add <project> \"title\" [--id X] [--priority P] [--status S] [--assignee A] [--notes \"...\"] [--depends-on ID]}"; shift
-        id=""; title=""; pri="medium"; st="backlog"; asg=""; notes=""; dep=""
+        id=""; title=""; pri="medium"; st=""; asg=""; notes=""; dep=""
         while [ $# -gt 0 ]; do case "$1" in
           --id)         id="$2"; shift 2;;
           --priority)   pri="$2"; shift 2;;
@@ -169,37 +169,20 @@ MD
           *) [ -z "$title" ] && title="$1"; shift;;
         esac; done
         [ -n "$title" ] || { echo "need a title"; exit 1; }
-        # machine projects: a bare create enters at the machine's entry state, not the legacy backlog
-        if [ "$st" = "backlog" ]; then
-          _mp="$(machine_path "$proj")"
-          [ -n "$_mp" ] && st="$(python3 -c "import sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;m=M.load('$_mp');print(m.get('entry') or next((s for s,v in m['states'].items() if v.get('initial')),'backlog'))" 2>/dev/null)"
-        fi
-        valid_status "$proj" "$st" || { echo "task add: invalid status '$st'. valid: $(status_help "$proj")"; exit 1; }
-        pe="$(sqlesc "$proj")"
-        auto=0
-        next_auto_id(){                             # auto-id: <abbrev>-<n>, first free slot
-          local abbr n; abbr="$(printf '%s' "$proj" | cut -c1-3)"
-          n="$(db "SELECT COUNT(*)+1 FROM tasks WHERE project='$pe';")"
-          id="${abbr}-${n}"
-          while [ -n "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$id")';")" ]; do n=$((n+1)); id="${abbr}-${n}"; done
-        }
-        [ -z "$id" ] && { auto=1; next_auto_id; }
-        if [ -n "$dep" ]; then
-          has_blocked_on || { echo "task add: dependencies need a schema upgrade — run 'dais migrate' first"; exit 1; }
-          [ -z "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$dep")';")" ] && { echo "task add: no such predecessor task: $dep"; exit 1; }
-        fi
-        # retry an AUTO id on collision — two concurrent creators (parallel agents) compute the
-        # same next id; the loser re-derives instead of dying on the UNIQUE constraint. An
-        # EXPLICIT --id collision is a real error and still fails.
-        ok=0
-        for _try in 1 2 3 4 5; do
-          cols="id,project,title,priority,status,assignee,notes"; vals="'$(sqlesc "$id")','$pe','$(sqlesc "$title")','$(sqlesc "$pri")','$(sqlesc "$st")',$([ -n "$asg" ] && echo "'$(sqlesc "$asg")'" || echo NULL),$([ -n "$notes" ] && echo "'$(sqlesc "$notes")'" || echo NULL)"
-          [ -n "$dep" ] && { cols="$cols,blocked_on"; vals="$vals,'$(sqlesc "$dep")'"; }
-          if db "INSERT INTO tasks($cols) VALUES($vals);" 2>/dev/null; then ok=1; break; fi
-          [ "$auto" = 1 ] || break
-          next_auto_id
-        done
-        [ "$ok" = 1 ] || { echo "task add: could not insert $id (id already exists?)"; exit 1; }
+        # the ENGINE creates the task (machine.py create): entry-state resolution, state
+        # validation, id allocation (auto retry / explicit --id collision error), dependency
+        # checks — one authority instead of a bash re-implementation of each.
+        [ -f "$DB" ] || db_init >/dev/null 2>&1
+        MP="$(machine_path "$proj")"
+        [ -n "$MP" ] || { echo "task add: no machine for project '$proj'"; exit 1; }
+        args=(create "$DB" "$MP" "$proj" "$title" --priority "$pri" --assignee "$asg")
+        [ -n "$st" ]    && args+=("$st")
+        [ -n "$id" ]    && args+=(--id "$id")
+        [ -n "$notes" ] && args+=(--notes "$notes")
+        [ -n "$dep" ]   && args+=(--blocked-on "$dep")
+        res="$(python3 "$DAIS_ROOT/harness/machine.py" "${args[@]}" 2>&1)" \
+          || { echo "task add: $res"; exit 1; }
+        id="${res%%|*}"; st="${res##*|}"
         link_run_task "$id" create; echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]" ;;
       set)
         id="$1"; shift

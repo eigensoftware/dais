@@ -364,6 +364,58 @@ class TestAttestFact(unittest.TestCase):
         self.assertIsNone(M.attest_fact("typed_confirm", self.row("t-1")))
 
 
+class TestCreateTaskAttributes(unittest.TestCase):
+    """create_task speaks the full board vocabulary (explicit id, priority, notes, blocked_on)
+    so the CLI's `task add` can delegate to the engine instead of re-implementing entry
+    resolution + id allocation + collision retry in bash."""
+    def setUp(self):
+        self.conn = _db()
+        self.m = M.load(CODING)
+
+    def test_explicit_id_is_used_verbatim(self):
+        self.assertEqual(M.create_task(self.conn, self.m, "proj", "t", tid="custom-7"),
+                         "custom-7")
+
+    def test_explicit_id_collision_is_an_error_not_a_retry(self):
+        M.create_task(self.conn, self.m, "proj", "t", tid="dup-1")
+        with self.assertRaisesRegex(ValueError, "dup-1"):
+            M.create_task(self.conn, self.m, "proj", "t2", tid="dup-1")
+
+    def test_state_defaults_to_the_machine_entry(self):
+        tid = M.create_task(self.conn, self.m, "proj", "t")
+        self.assertEqual(_status(self.conn, tid), self.m["entry"])
+
+    def test_invalid_state_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, "invalid status"):
+            M.create_task(self.conn, self.m, "proj", "t", state="nonsense")
+
+    def test_priority_and_notes_written(self):
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT")
+        tid = M.create_task(self.conn, self.m, "proj", "t", priority="high", notes="why")
+        row = self.conn.execute("SELECT priority, notes FROM tasks WHERE id=?", (tid,)).fetchone()
+        self.assertEqual((row["priority"], row["notes"]), ("high", "why"))
+
+    def test_blocked_on_written_and_predecessor_validated(self):
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN blocked_on TEXT")
+        pred = M.create_task(self.conn, self.m, "proj", "pred")
+        tid = M.create_task(self.conn, self.m, "proj", "t", blocked_on=pred)
+        self.assertEqual(self.conn.execute(
+            "SELECT blocked_on FROM tasks WHERE id=?", (tid,)).fetchone()[0], pred)
+        with self.assertRaisesRegex(ValueError, "no such predecessor"):
+            M.create_task(self.conn, self.m, "proj", "t2", blocked_on="ghost-9")
+
+    def test_blocked_on_without_column_asks_for_migrate(self):
+        with self.assertRaisesRegex(ValueError, "dais migrate"):   # column arrives by migration 0001
+            M.create_task(self.conn, self.m, "proj", "t", blocked_on="x-1")
+
+    def test_empty_assignee_means_unassigned_not_dispatch_default(self):
+        # the CLI's `task add` passes assignee through explicitly; '' = leave it NULL
+        # (omitting the arg keeps the dispatch-role default for python callers/spawns)
+        tid = M.create_task(self.conn, self.m, "proj", "t", assignee="")
+        self.assertIsNone(self.conn.execute(
+            "SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()[0])
+
+
 class TestAtomicityAndConcurrency(unittest.TestCase):
     """fire() is one transaction: the transition + ALL effects commit together or roll back
     together, and the state change is a compare-and-swap so racing fires can't double-apply."""
