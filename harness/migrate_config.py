@@ -88,7 +88,7 @@ def migrate(home, project):
     # 3) strip legacy keys from project.yaml
     if ytext:
         kept = [l for l in ytext.splitlines(True)
-                if not re.match(r"^(model|effort)_[a-z_]+:", l)
+                if not re.match(r"^(model|effort)_[a-z0-9._-]+:", l)
                 and not re.match(r"^active_agents:", l)]
         if kept != ytext.splitlines(True):
             with open(projyaml, "w") as f:

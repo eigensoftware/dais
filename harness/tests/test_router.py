@@ -349,6 +349,14 @@ class TestLintTransitionWarnings(unittest.TestCase):
         self.assertTrue(any("model_qa" in w for w in warns))
         self.assertTrue(any("active_agents" in w for w in warns))
 
+    def test_warns_on_legacy_suffix_key_with_digit_in_role_slug(self):
+        # role slugs may contain digits/dots/dashes (e.g. a second qa instance "qa2") — the
+        # suffix-key warning regex must match the full role-slug charset, not just [a-z_]+.
+        with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
+            f.write("model_qa2: claude-haiku-4-5\n")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("model_qa2" in w for w in warns))
+
     def test_warns_on_agent_file_with_no_machine_role(self):
         self._agent("ghost")
         _, warns = router.lint_project(self.root, "demo")

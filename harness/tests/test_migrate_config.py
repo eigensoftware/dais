@@ -75,6 +75,16 @@ class TestMigrateConfig(unittest.TestCase):
         self.assertIn("model: claude-sonnet-5", qa)        # not clobbered
         self.assertNotIn("claude-haiku-4-5", qa)
 
+    def test_suffix_key_with_digit_in_role_slug_is_stripped(self):
+        # role slugs may contain digits/dots/dashes (e.g. a second qa instance "qa2") — the
+        # project.yaml strip regex must match the full role-slug charset, not just [a-z_]+,
+        # even when no matching role row exists (the strip is row-independent, pure regex).
+        with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
+            f.write("model_qa2: claude-haiku-4-5\n")
+        run_migrate(self.root, "demo")
+        y = open(os.path.join(self.pdir, "project.yaml")).read()
+        self.assertNotIn("model_qa2", y)
+
     def test_keyless_frontmatter_block_is_replaced_not_stacked(self):
         with open(os.path.join(self.pdir, "agents", "qa.md"), "w") as f:
             f.write("---\n# just a comment, no keys\n---\nYou are qa.\n")

@@ -20,6 +20,7 @@ cfg(){ printf '%s\n' "$CFG" | sed -n "s/^$1=//p" | head -1; }
 MODEL="$(cfg model)"; EFF="$(cfg effort)"
 PROVIDER="$(cfg provider)"; AUTH="$(cfg auth)"
 ACCESS="$(cfg access)"; PB="$(cfg playbook)"; PB_FILE="$(cfg playbook_file)"
+TRIG="$(cfg trigger)"; PREC="$(cfg prec)"
 EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
 
 # Secrets transport (auth: api): the provider's standard env var, from the process env,
@@ -39,7 +40,7 @@ load_env "$DAIS_HOME/.env"
 
 # Debug seam: print the resolved config and exit WITHOUT calling the provider CLI.
 if [ "${DAIS_SHOW_CONFIG:-0}" = 1 ]; then
-  echo "model=$MODEL effort=$EFF provider=$PROVIDER auth=$AUTH access=$ACCESS playbook=$PB"; exit 0
+  echo "model=$MODEL effort=$EFF provider=$PROVIDER auth=$AUTH access=$ACCESS playbook=$PB trigger=$TRIG prec=$PREC"; exit 0
 fi
 
 # auth:api preflight — fail fast, before any network/claude work (git fetch is right below),
@@ -155,6 +156,9 @@ ${MACHINE_COORD}Coordination runs through the dais CLI (at $DAIS_ROOT/dais) back
 Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, fire the edge that hands the work on per your role.${PLAYBOOK}"
 
 # The persona injected into the prompt is the BODY only — frontmatter is config, not prompt.
+# NOTE: an UNTERMINATED --- block yields an empty persona here while router.frontmatter() treats
+# the same file as all-body (config defaults) — malformed hand-edits only; migrate/role-new
+# always write a closer.
 PERSONA="$(awk 'NR==1 && $0=="---" {infm=1; next} infm && $0=="---" {infm=0; next} !infm' "$ROLE")"
 
 # Debug seam: dump the assembled agent prompt and exit, WITHOUT calling claude. Lets tests

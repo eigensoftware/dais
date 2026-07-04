@@ -224,7 +224,7 @@ def lint_project(root, project):
             warnings.append("project.yaml playbook '%s' has no file (looked in projects/%s/playbooks/ "
                             "and harness/playbooks/); roles fall back to no conventions"
                             % (m.group(1), project))
-        for key in re.findall(r"(?m)^((?:model|effort)_[a-z_]+):", text):
+        for key in re.findall(r"(?m)^((?:model|effort)_[a-z0-9._-]+):", text):
             warnings.append("legacy per-role key '%s:' in project.yaml — move it into "
                             "agents/<role>.md frontmatter (dais migrate --config)" % key)
         if re.search(r"(?m)^active_agents:", text):
