@@ -467,6 +467,17 @@ class TestRunningVisibility(unittest.TestCase):
                          "engineer edit reactive ready 2\n")
             self.assertEqual(d.project_roles(root, "p"), ["qa", "engineer"])
 
+    def test_project_roles_from_agents_dir(self):
+        with tempfile.TemporaryDirectory() as root:
+            pdir = os.path.join(root, "projects", "p")
+            os.makedirs(os.path.join(pdir, "agents"))
+            with open(os.path.join(pdir, "project.yaml"), "w") as f:
+                f.write("project: p\nrepo: x\nstage_goal: g\n")
+            with open(os.path.join(pdir, "agents", "qa.md"), "w") as f:
+                f.write("---\ntrigger: reactive\n---\npersona\n")
+            roles = d.project_roles(root, "p")
+            self.assertIn("qa", roles)
+
 
 class TestControl(unittest.TestCase):
     def test_parse_pr_from_url(self):

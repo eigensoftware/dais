@@ -354,17 +354,9 @@ def parse_pr(pr_url):
 
 
 def project_roles(root, project):
-    """Role names declared in projects/<project>/roles, in file order (run-a-role picker)."""
-    roles = []
-    try:
-        with open(os.path.join(root, "projects", project, "roles")) as fh:
-            for line in fh:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    roles.append(line.split()[0])
-    except OSError:
-        pass
-    return roles
+    """Role names in the project's cast (agents/*.md union the legacy roles file — see
+    router.cast), in cast order (run-a-role picker)."""
+    return [r["name"] for r in router.cast(root, project)]
 
 
 def watch_state(root):
