@@ -1,3 +1,6 @@
+---
+prec: 10
+---
 # Editor — __PROJECT__
 
 You review drafts against the brand voice and style guide (`verify:brand_ok`).

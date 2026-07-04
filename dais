@@ -35,7 +35,7 @@ dais — your agent company control panel
   dais lint [project]                 validate a project (roles + project.yaml + required files)
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
   dais migrate [--config <project>]     apply DB migrations | convert a project to frontmatter config
-  dais scaffold <project> [--template coding|marketing]  bootstrap a project (roles + machine) from a workflow template
+  dais scaffold <project> [--template coding|marketing]  bootstrap a project (agents/ + machine) from a workflow template
   dais role new <project> [--desc "..."] [--yes]  Claude designs a new role (persona + routing); you confirm
   dais version                        which build this machine runs (git tag/commit of the tool checkout)
 U
@@ -286,8 +286,9 @@ print((M.dispatch_role(m, st) or '') + '|' + M.band_of(m, st))" 2>/dev/null)"
 
   scaffold)
     # bootstrap a project from a WORKFLOW TEMPLATE (coding | marketing | …). The template seeds the
-    # roles, personas, project.yaml, CONTEXT.md AND the project's own editable machine.json — so a
-    # scaffolded project runs on its state machine with no `machine:` gate to set.
+    # agents/ personas (frontmatter config + body), project.yaml, CONTEXT.md AND the project's own
+    # editable machine.json — so a scaffolded project runs on its state machine with no `machine:`
+    # gate to set. No roles file: agent_setup()/cast() resolve everything from agents/<role>.md.
     name="${1:?usage: dais scaffold <project> [--template coding]}"; shift 2>/dev/null || true
     tmpl="coding"
     while [ $# -gt 0 ]; do case "$1" in --template) tmpl="$2"; shift 2;; *) shift;; esac; done
@@ -308,8 +309,10 @@ print((M.dispatch_role(m, st) or '') + '|' + M.band_of(m, st))" 2>/dev/null)"
     echo "scaffolded projects/$name from '$tmpl' (machine.json seeded) — edit project.yaml, then: dais lint $name" ;;
 
   role)
-    # role new <project> — Claude designs a new role (persona + routing row) for the project;
-    # the founder confirms before anything is written; `dais lint` then guards the status invariant.
+    # role new <project> — Claude designs a new agent (frontmatter config + persona) for the
+    # project; the founder confirms before anything is written; `dais lint` then guards the
+    # config. Access + dispatch are the project's machine.json's job, not this command's — the
+    # printed reminder after writing tells the founder to wire that up.
     sub="${1:?usage: dais role new <project> [--desc \"...\"] [--yes]}"; shift 2>/dev/null || true
     case "$sub" in
       new)
@@ -324,28 +327,39 @@ print((M.dispatch_role(m, st) or '') + '|' + M.band_of(m, st))" 2>/dev/null)"
         [ -n "$desc" ] || { printf 'describe the role (what it does): '; read -r desc < /dev/tty 2>/dev/null || true; }
         [ -n "$desc" ] || { echo "role new: a description is required (--desc \"...\")"; exit 1; }
         PDIR="$DAIS_HOME/projects/$proj"
-        existing="$(grep -v '^#' "$PDIR/roles" 2>/dev/null | sed '/^[[:space:]]*$/d')"
+        # existing cast summary (name + resolved trigger/prec/playbook), one per line — the
+        # agents/ directory IS the cast now, resolved the same way the scheduler resolves it.
+        existing="$(python3 -c "
+import os, sys
+sys.path.insert(0, '$DAIS_ROOT/harness')
+import router
+root, proj = '$DAIS_HOME', '$proj'
+adir = os.path.join(root, 'projects', proj, 'agents')
+names = sorted(f[:-3] for f in os.listdir(adir) if f.endswith('.md')) if os.path.isdir(adir) else []
+for n in names:
+    s = router.agent_setup(root, proj, n)
+    print(n, 'trigger=' + s['trigger'], 'prec=' + s['prec'], 'playbook=' + s['playbook'])
+" 2>/dev/null)"
         pbs="$( { ls "$DAIS_ROOT/harness/playbooks/"*.md "$PDIR/playbooks/"*.md ; } 2>/dev/null | sed 's#.*/##; s#\.md$##' | sort -u | paste -sd, - )"
-        genprompt="You are configuring ONE new agent role for the dais multi-agent harness (a machine-routed board: each project's machine.json routes task states to roles).
+        genprompt="You are configuring ONE new agent for the dais multi-agent harness (a machine-routed board: each project's machine.json routes task states to roles; access + dispatch live there, not in this agent's config).
 Role to design: $desc
 Project: $proj
-Existing roles (columns: name access trigger handles prec playbook):
+Existing cast (name trigger prec playbook):
 $existing
 Available playbooks: ${pbs:-code}
 Rules:
-- access: edit (may modify the repo/docs) | review | draft (both read-only) | none.
 - trigger: reactive (runs when the machine dispatches it) | every:Nh (cadence) | none.
-- handles: leave as '-' (dispatch comes from the project's machine — to route work to this role, add edges with by: <role> to projects/$proj/machine.json).
-- playbook: pick from the available list the craft that fits (or 'code').
-- prec: integer; reviewers low, builders mid, planners high — fit it among the existing precs.
+- prec: integer; reviewers low, builders mid, planners high — fit it among the existing cast's precs.
+- playbook: pick from the available list the craft that fits, or 'code' for ordinary coding work.
+- model / effort: leave blank to inherit the project default; set one only to override it for this role.
 - persona: a crisp system prompt — who the agent is, the ONE kind of work it does per run, that it reads its queue via 'dais tasks $proj --assignee <name>' and advances work by firing machine edges ('dais edges <task-id>' then 'dais fire <task-id> <verb>'). Do NOT repeat coordination boilerplate, the playbook, or CONTEXT — the harness injects those.
 Output EXACTLY this and nothing else (header lines, then a line with three dashes, then the persona markdown):
 name: <slug>
-access: <edit|review|draft|none>
 trigger: <reactive|every:Nh|none>
-handles: <status, comma-list, or ->
-playbook: <name>
 prec: <int>
+playbook: <name>
+model: <optional model id, or blank>
+effort: <optional low|medium|high, or blank>
 ---
 <persona markdown>"
         echo "▸ asking Claude to design the role…"
@@ -356,28 +370,38 @@ prec: <int>
         field(){ printf '%s\n' "$proposal" | awk -v k="$1" '
           { i=index($0,":"); if(i){ key=tolower(substr($0,1,i-1));
               if(key==k){ v=substr($0,i+1); sub(/^[ \t]+/,"",v); sub(/[ \t]+$/,"",v); print v; exit } } }'; }
-        name="$(field name)"; access="$(field access)"; trig="$(field trigger)"
-        handles="$(field handles)"; pbook="$(field playbook)"; prec="$(field prec)"
-        # the roles row is whitespace-delimited — strip any spaces the model put in these
-        # single-token / comma-list values so the appended columns can't shift.
-        access="${access//[[:space:]]/}"; trig="${trig//[[:space:]]/}"
-        handles="${handles//[[:space:]]/}"; prec="${prec//[[:space:]]/}"; pbook="${pbook//[[:space:]]/}"
+        name="$(field name)"; trig="$(field trigger)"; prec="$(field prec)"
+        pbook="$(field playbook)"; model="$(field model)"; effort="$(field effort)"
+        # frontmatter is line-based (key: value) — strip any stray spaces the model put in these
+        # single-token values so a written frontmatter line can't get mangled.
+        trig="${trig//[[:space:]]/}"; prec="${prec//[[:space:]]/}"; pbook="${pbook//[[:space:]]/}"
+        model="${model//[[:space:]]/}"; effort="${effort//[[:space:]]/}"
         persona="$(printf '%s\n' "$proposal" | awk 'f; /^---[[:space:]]*$/{f=1}')"
         [[ "$name" =~ ^[a-z0-9._-]+$ ]] || { echo "role new: generator returned a bad/blank name: '$name'"; exit 1; }
         [ -n "$persona" ] || { echo "role new: proposal had no persona (after the --- line)"; exit 1; }
         [ -e "$PDIR/agents/$name.md" ] && { echo "role new: role '$name' already exists (agents/$name.md)"; exit 1; }
         echo; echo "Proposed role for $proj:"
-        printf '  %-12s access=%s trigger=%s handles=%s prec=%s playbook=%s\n' \
-          "$name" "$access" "$trig" "$handles" "$prec" "$pbook"
+        printf '  %-12s trigger=%s prec=%s playbook=%s%s%s\n' \
+          "$name" "$trig" "$prec" "$pbook" "${model:+ model=$model}" "${effort:+ effort=$effort}"
         echo "  persona → agents/$name.md ($(printf '%s\n' "$persona" | grep -c '') lines)"
         if [ "$yes" -ne 1 ]; then
           printf 'create this role? [y/N] '; read -r ans < /dev/tty 2>/dev/null || ans=""
           case "$ans" in y|Y|yes|YES) ;; *) echo "cancelled — nothing written."; exit 0;; esac
         fi
         mkdir -p "$PDIR/agents"
-        printf '%s\n' "$persona" > "$PDIR/agents/$name.md"
-        printf '%s  %s  %s  %s  %s  %s\n' "$name" "$access" "$trig" "$handles" "$prec" "$pbook" >> "$PDIR/roles"
-        echo "✓ wrote agents/$name.md + appended the roles row. linting ${proj}…"
+        {
+          echo "---"
+          echo "trigger: $trig"
+          echo "prec: $prec"
+          [ -n "$pbook" ] && echo "playbook: $pbook"
+          [ -n "$model" ] && echo "model: $model"
+          [ -n "$effort" ] && echo "effort: $effort"
+          echo "---"
+          printf '%s\n' "$persona"
+        } > "$PDIR/agents/$name.md"
+        echo "✓ wrote agents/$name.md (frontmatter + persona) — no roles-file row. access defaults to"
+        echo "  'review' until you add roles.$name.access + dispatch edges to projects/$proj/machine.json."
+        echo "linting ${proj}…"
         "$DAIS_ROOT/dais" lint "$proj" ;;
       *) echo "usage: dais role new <project> [--desc \"...\"] [--yes]"; exit 1;;
     esac ;;

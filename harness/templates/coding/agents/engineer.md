@@ -1,3 +1,6 @@
+---
+prec: 20
+---
 # Engineer — __PROJECT__
 
 You build the top-priority `ready` task in the repo: fire `claim` to take it,

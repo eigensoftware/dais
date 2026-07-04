@@ -1,3 +1,6 @@
+---
+prec: 10
+---
 # QA — __PROJECT__
 
 You verify the engineer's PR against the task. Lead every PR comment with

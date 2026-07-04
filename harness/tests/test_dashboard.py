@@ -573,5 +573,22 @@ class TestActMachineConditionalAttest(unittest.TestCase):
         self.assertIn("migrations_applied", app.dispatched)
 
 
+class TestRenderProjectCast(unittest.TestCase):
+    """`dais project <name>`'s cast now renders straight from router.cast()/agent_setup() —
+    the agents/ directory IS the cast, no roles-file read, no active_agents gating."""
+
+    def test_render_project_cast_without_roles_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            pdir = os.path.join(root, "projects", "p")
+            os.makedirs(os.path.join(pdir, "agents"))
+            with open(os.path.join(pdir, "project.yaml"), "w") as f:
+                f.write("project: p\nrepo: x\nstage_goal: g\nmodel: claude-opus-4-8\n")
+            with open(os.path.join(pdir, "agents", "qa.md"), "w") as f:
+                f.write("---\nmodel: claude-haiku-4-5\n---\npersona\n")
+            out = d.render_project(root, "p", color=False)
+            self.assertIn("qa", out)
+            self.assertIn("claude-haiku-4-5", out)
+
+
 if __name__ == "__main__":
     unittest.main()

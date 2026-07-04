@@ -1220,7 +1220,7 @@ def tool_version():
 def render_project(root, name, color=None):
     """One project's SETUP on a page — the cast (with the model/effort a run would actually
     use), the machine's dispatch map, and the config header. `dais project <name>`. This is
-    the files' view (roles / project.yaml / machine.json / agents/), not the board's — for
+    the files' view (project.yaml / machine.json / agents/), not the board's — for
     tasks use `dais status` / `dais top`."""
     import machine as MC
     if color is None:
@@ -1243,26 +1243,23 @@ def render_project(root, name, color=None):
     if goal:
         P(f"  {c['CD']}stage goal:{c['C0']} {truncate_words(goal, 90)}")
 
-    # cast — roles-file rows, with the resolved model/effort a run would use (mirrors
-    # run-agent.sh via agent_model) and whether a persona file exists
+    # cast — router.cast() (the agents/ directory) resolved through router.agent_setup(), so
+    # this mirrors exactly what a run would use (frontmatter -> legacy roles file -> project.yaml
+    # -> defaults) with no separate roles-file read here.
     P("")
     P(f"  {c['CB']}cast{c['C0']} {c['CD']}(role · access · trigger · model @ effort · persona){c['C0']}")
-    active = set((project_field(root, name, "active_agents") or "").split())
-    try:
-        rows = [l.split() for l in open(os.path.join(pdir, "roles"))
-                if l.strip() and not l.strip().startswith("#")]
-    except OSError:
-        rows = []
-    for r in rows:
-        role, access, trigger = r[0], r[1] if len(r) > 1 else "?", r[2] if len(r) > 2 else "?"
-        if role == "founder":
-            P(f"    {role:<10} {c['CD']}(human — gates ◆){c['C0']}")
-            continue
-        model, effort = agent_model(root, name, role)
-        persona = "agents/%s.md" % role if os.path.exists(os.path.join(pdir, "agents", role + ".md")) else c['CR'] + "no persona" + c['C0']
-        off = "" if not active or role in active else f"  {c['CY']}(not in active_agents){c['C0']}"
-        playbook = f"  {c['CD']}[{r[5]}]{c['C0']}" if len(r) > 5 else ""
-        P(f"    {role:<10} {access:<7} {trigger:<10} {model}{' @ ' + effort if effort else ''}  {c['CD']}{persona}{c['C0']}{playbook}{off}")
+    for r in router.cast(root, name):
+        if r["name"] == "founder":     # some legacy roles files carry an explicit founder
+            continue                   # row (trigger none) — the static line below covers it
+        s = router.agent_setup(root, name, r["name"])
+        persona = ("agents/%s.md" % r["name"]
+                   if os.path.exists(os.path.join(pdir, "agents", r["name"] + ".md"))
+                   else c['CR'] + "no persona" + c['C0'])
+        playbook = f"  {c['CD']}[{s['playbook']}]{c['C0']}" if s["playbook"] != "code" else ""
+        P(f"    {r['name']:<10} {s['access']:<7} {s['trigger']:<10} "
+          f"{s['model']}{' @ ' + s['effort'] if s['effort'] else ''}  "
+          f"{c['CD']}{persona}{c['C0']}{playbook}")
+    P(f"    {'founder':<10} {c['CD']}(human — gates ◆){c['C0']}")
 
     # dispatch map — which role the machine runs per state, gates flagged
     m = _load_machine(root, name)

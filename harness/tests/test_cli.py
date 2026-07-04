@@ -564,9 +564,10 @@ class TestMachinePromptInjection(CliTest):
 
 
 class TestRolePlaybook(CliTest):
-    """Conventions are bound at the ROLE via a playbook (6th `roles` column → project default →
-    built-in `code`), injected into the agent prompt. De-codes the harness for non-code domains
-    while keeping coding conventions intact for code roles. Asserted via the DAIS_SHOW_PROMPT seam."""
+    """Conventions are bound at the ROLE via a playbook (agents/<role>.md frontmatter → project
+    default → built-in `code`), injected into the agent prompt. De-codes the harness for
+    non-code domains while keeping coding conventions intact for code roles. Asserted via the
+    DAIS_SHOW_PROMPT seam."""
 
     def _scaffold_with_repo(self):
         dais(self.root, "scaffold", "demo")
@@ -583,14 +584,15 @@ class TestRolePlaybook(CliTest):
                               capture_output=True, text=True, env=e, cwd=self.root).stdout
 
     def _pin_engineer_playbook(self, name):
-        rolesf = os.path.join(self.root, "projects", "demo", "roles")
-        out = []
-        for l in open(rolesf).read().splitlines():
-            if l and not l.startswith("#") and l.split()[0] == "engineer":
-                l = l + "  " + name
-            out.append(l)
-        with open(rolesf, "w") as fh:
-            fh.write("\n".join(out) + "\n")
+        # inject a `playbook:` key into agents/engineer.md's frontmatter block (between its
+        # two `---` markers) — the frontmatter-era equivalent of the old roles-column pin.
+        p = os.path.join(self.root, "projects", "demo", "agents", "engineer.md")
+        lines = open(p).read().splitlines()
+        assert lines[0] == "---", "engineer.md has no frontmatter block"
+        close = lines[1:].index("---") + 1
+        lines.insert(close, "playbook: " + name)
+        with open(p, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
 
     def test_code_role_keeps_coding_conventions(self):
         base = self._scaffold_with_repo()
@@ -635,8 +637,8 @@ class TestRoleNew(CliTest):
     """`dais role new` has Claude design a role (persona + routing row); the founder confirms, then
     lint guards. The model call is stubbed via DAIS_ROLE_GEN so the flow is deterministic offline."""
 
-    PROP = ("name: paralegal\naccess: edit\ntrigger: reactive\n"
-            "handles: needs_research\nplaybook: legal\nprec: 4\n---\n"
+    PROP = ("name: paralegal\ntrigger: reactive\nprec: 4\nplaybook: legal\n"
+            "model: \neffort: \n---\n"
             "# Paralegal — demo\nYou pull authorities and draft a research memo, then hand off.\n")
 
     def _gen_stub(self, body):
@@ -646,7 +648,7 @@ class TestRoleNew(CliTest):
         os.chmod(p, 0o755)
         return p
 
-    def test_writes_persona_and_appends_routing_row(self):
+    def test_writes_frontmatter_persona_no_roles_file(self):
         dais(self.root, "scaffold", "demo")
         r = dais(self.root, "role", "new", "demo", "--desc", "a paralegal", "--yes",
                  env={"DAIS_ROLE_GEN": self._gen_stub(self.PROP)})
@@ -654,15 +656,17 @@ class TestRoleNew(CliTest):
         persona = os.path.join(self.root, "projects", "demo", "agents", "paralegal.md")
         self.assertTrue(os.path.exists(persona))
         body = open(persona).read()
+        self.assertTrue(body.startswith("---\n"))
+        self.assertIn("trigger: reactive", body)
+        self.assertIn("prec: 4", body)
+        self.assertIn("playbook: legal", body)
         self.assertIn("research memo", body)
-        self.assertNotIn("access: edit", body)          # header keys must NOT leak into the persona
-        roles = open(os.path.join(self.root, "projects", "demo", "roles")).read()
-        self.assertRegex(roles, r"paralegal\s+edit\s+reactive\s+needs_research\s+4\s+legal")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", "roles")))
 
     def test_rejects_bad_name_writes_nothing(self):
         dais(self.root, "scaffold", "demo")
-        bad = self._gen_stub("name: bad name!\naccess: edit\ntrigger: reactive\n"
-                             "handles: needs_x\nplaybook: code\nprec: 5\n---\n# x\nbody\n")
+        bad = self._gen_stub("name: bad name!\ntrigger: reactive\nprec: 5\nplaybook: code\n"
+                             "model: \neffort: \n---\n# x\nbody\n")
         r = dais(self.root, "role", "new", "demo", "--desc", "x", "--yes", env={"DAIS_ROLE_GEN": bad})
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", "agents", "bad.md")))
@@ -670,29 +674,30 @@ class TestRoleNew(CliTest):
     def test_preserves_cadence_trigger_with_colon(self):
         # 'trigger: every:24h' must survive — the value parser splits on the FIRST colon only
         dais(self.root, "scaffold", "demo")
-        prop = ("name: metrics\naccess: review\ntrigger: every:24h\n"
-                "handles: -\nplaybook: code\nprec: 7\n---\n# Metrics\nbody\n")
+        prop = ("name: metrics\ntrigger: every:24h\nprec: 7\nplaybook: code\n"
+                "model: \neffort: \n---\n# Metrics\nbody\n")
         r = dais(self.root, "role", "new", "demo", "--desc", "x", "--yes",
                  env={"DAIS_ROLE_GEN": self._gen_stub(prop)})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        roles = open(os.path.join(self.root, "projects", "demo", "roles")).read()
-        self.assertRegex(roles, r"metrics\s+review\s+every:24h\s+-\s+7\s+code")
+        body = open(os.path.join(self.root, "projects", "demo", "agents", "metrics.md")).read()
+        self.assertIn("trigger: every:24h", body)
 
-    def test_strips_spaces_in_comma_handles(self):
-        # a model emitting 'needs_x, needs_y' must not mis-column the whitespace-delimited row
+    def test_strips_spaces_in_optional_fields(self):
+        # a model padding values with spaces must not corrupt the written frontmatter lines
         dais(self.root, "scaffold", "demo")
-        prop = ("name: dualrole\naccess: edit\ntrigger: reactive\n"
-                "handles: needs_x, needs_y\nplaybook: code\nprec: 8\n---\n# X\nbody\n")
+        prop = ("name: metricstwo\ntrigger: reactive\nprec:  8 \nplaybook: code \n"
+                "model: claude-haiku-4-5\neffort:  low \n---\n# X\nbody\n")
         r = dais(self.root, "role", "new", "demo", "--desc", "x", "--yes",
                  env={"DAIS_ROLE_GEN": self._gen_stub(prop)})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        roles = open(os.path.join(self.root, "projects", "demo", "roles")).read()
-        self.assertRegex(roles, r"dualrole\s+edit\s+reactive\s+needs_x,needs_y\s+8\s+code")
+        body = open(os.path.join(self.root, "projects", "demo", "agents", "metricstwo.md")).read()
+        self.assertIn("prec: 8\n", body)
+        self.assertIn("effort: low\n", body)
 
     def test_refuses_to_clobber_existing_role(self):
         dais(self.root, "scaffold", "demo")             # ships agents/engineer.md
-        dup = self._gen_stub("name: engineer\naccess: edit\ntrigger: reactive\n"
-                             "handles: ready\nplaybook: code\nprec: 5\n---\n# eng\nbody\n")
+        dup = self._gen_stub("name: engineer\ntrigger: reactive\nprec: 5\nplaybook: code\n"
+                             "model: \neffort: \n---\n# eng\nbody\n")
         r = dais(self.root, "role", "new", "demo", "--desc", "dup", "--yes", env={"DAIS_ROLE_GEN": dup})
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("already exists", r.stdout + r.stderr)
@@ -740,13 +745,22 @@ class TestScaffold(CliTest):
         r = dais(self.root, "scaffold", "demo")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         base = os.path.join(self.root, "projects", "demo")
-        for rel in ("project.yaml", "roles", "agents/lead.md",
+        for rel in ("project.yaml", "agents/lead.md",
                     "agents/engineer.md", "agents/qa.md", "CONTEXT.md", "logs"):
             self.assertTrue(os.path.exists(os.path.join(base, rel)), rel)
         with open(os.path.join(base, "project.yaml")) as fh:
             y = fh.read()
         self.assertIn("project: demo", y)
         self.assertNotIn("__PROJECT__", y)
+
+    def test_scaffold_has_no_roles_file_and_frontmatter_agents(self):
+        r = dais(self.root, "scaffold", "fresh")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        pdir = os.path.join(self.root, "projects", "fresh")
+        self.assertFalse(os.path.exists(os.path.join(pdir, "roles")))
+        lead = open(os.path.join(pdir, "agents", "lead.md")).read()
+        self.assertTrue(lead.startswith("---\n"))
+        self.assertIn("trigger: every:24h", lead)
 
     def test_scaffold_refuses_existing(self):
         dais(self.root, "scaffold", "demo")

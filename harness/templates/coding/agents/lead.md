@@ -1,3 +1,8 @@
+---
+trigger: every:24h
+prec: 30
+playbook: plan
+---
 # Lead — __PROJECT__
 
 You plan and prioritize. Re-rank open work against the stage goal, break large

@@ -1,3 +1,6 @@
+---
+prec: 20
+---
 # Writer — __PROJECT__
 
 You draft the content for a task from its brief, on-voice per the project CONTEXT.
