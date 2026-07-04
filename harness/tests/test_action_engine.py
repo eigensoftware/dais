@@ -1,4 +1,5 @@
-"""Cockpit tests — the TUI action engine wired into dashboard.App.
+"""Action-engine tests — the machine-derived action bar/menu/dispatch in dashboard.App.
+(The cockpit RENDERER, panel.PanelApp, is covered by test_panel.py.)
 
 Covers the testable LOGIC: action_bar text, do_action argv (subprocess mocked),
 the Enter-menu option list, +/- priority wiring, watch_args + the watch flow, and a

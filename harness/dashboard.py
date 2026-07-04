@@ -489,7 +489,7 @@ class App:
     guard prompting and dispatch. Deliberately renderer-less — `run()` calls `draw()` and
     `left_rows()`, which only a renderer subclass supplies (panel.PanelApp, the cockpit
     `main()` actually launches). Instantiate the subclass; the base class exists so the
-    engine is testable without curses layout (see test_cockpit.py's FakeScr harness)."""
+    engine is testable without curses layout (see test_action_engine.py's FakeScr harness)."""
 
     def __init__(self, scr, interval=2.0, root=HOME, conn=None):
         self.scr = scr

@@ -112,7 +112,7 @@ import sqlite3
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dashboard as d
-from test_cockpit import FakeScr, _conn, make_app   # reuse the wired-App helpers
+from test_action_engine import FakeScr, _conn, make_app   # reuse the wired-App helpers
 
 
 def _seed(conn, rows):
