@@ -502,6 +502,15 @@ class TestPerRoleModelOverride(CliTest):
         out = self._show_config("qa")               # preflight passes; config seam prints
         self.assertIn("auth=api", out)
 
+    def test_unknown_provider_fails_with_named_error(self):
+        agent = os.path.join(self.root, "projects", "demo", "agents", "qa.md")
+        with open(agent, "w") as f:
+            f.write("---\nprovider: gemini\n---\npersona\n")
+        out = self._show_config("qa")
+        self.assertIn("provider=gemini", out)      # resolution passes it through
+        r = self._run_agent("qa")                  # the run itself fails, named
+        self.assertIn("no adapter for provider 'gemini'", r.stdout + r.stderr)
+
 
 class TestWorkspaceContextInjection(CliTest):
     """run-agent.sh injects the WORKSPACE CONTEXT.md (company-wide rules) ahead of

@@ -179,7 +179,7 @@ cd "$REPO" || { echo "cd failed"; exit 1; }
 # fmt-stream writes the PLAIN log file (always) and colors the terminal on its stdout.
 # In QUIET mode (parallel runs) we send that terminal stream to /dev/null so N agents don't
 # garble the console — the full log file is still written. pipefail keeps claude's exit code.
-run_claude(){
+run_agent_anthropic(){
   claude -p "$STANDING" \
         --append-system-prompt "$PERSONA" \
         --model "$MODEL" \
@@ -190,13 +190,26 @@ run_claude(){
         | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG"
 }
 
+# Stub — Task 12 replaces this with the real OpenAI adapter.
+run_agent_openai(){
+  echo "openai adapter not yet implemented" >&2; return 1
+}
+
+run_agent(){
+  case "$PROVIDER" in
+    anthropic) run_agent_anthropic;;
+    openai)    run_agent_openai;;
+    *) echo "  ✗ no adapter for provider '$PROVIDER' (known: anthropic, openai)" | tee -a "$LOG"; return 1;;
+  esac
+}
+
 if [ "$QUIET" = 1 ]; then
   echo "  ${CC}${CB}▶ $PROJECT · $AGENT${C0} ${CD}started (parallel) · log: $LOG${C0}"
-  if run_claude >/dev/null; then STATUS=succeeded; else STATUS=failed; fi
+  if run_agent >/dev/null; then STATUS=succeeded; else STATUS=failed; fi
 else
   echo "${CC}${CB}  ▶ $PROJECT · $AGENT${C0}  ${CD}live · full log: $LOG${C0}"
   echo "${CD}  ──────────────────────────────────────────────────────${C0}"
-  if run_claude; then STATUS=succeeded; else STATUS=failed; fi
+  if run_agent; then STATUS=succeeded; else STATUS=failed; fi
   echo "${CD}  ──────────────────────────────────────────────────────${C0}"
 fi
 # A capped, empty, or "Execution error" run is NOT success.
