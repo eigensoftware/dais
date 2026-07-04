@@ -23,16 +23,24 @@ def migrate(home, project):
         print("  ! roles:%d %s -> %r (skipped)" % (ln, msg, line))
 
     projyaml = os.path.join(pdir, "project.yaml")
-    ytext = open(projyaml).read() if os.path.exists(projyaml) else ""
+    if os.path.exists(projyaml):
+        with open(projyaml) as f:
+            ytext = f.read()
+    else:
+        ytext = ""
 
     # 1) frontmatter into each persona (skip founder — implicit actor, never scheduled)
     for r in rows:
         if r["name"] == "founder":
             continue
         persona = os.path.join(pdir, "agents", r["name"] + ".md")
-        body = open(persona).read() if os.path.exists(persona) else "You are the %s.\n" % r["name"]
-        existing = router.frontmatter(persona)
-        if existing:                      # strip the old block; merged keys win below
+        if os.path.exists(persona):
+            with open(persona) as f:
+                body = f.read()
+        else:
+            body = "You are the %s.\n" % r["name"]
+        existing = router.frontmatter(persona) if os.path.exists(persona) else {}
+        if body.startswith("---\n"):       # strip any leading block, keyed or not
             body = re.sub(r"\A---\n.*?\n---\n", "", body, flags=re.S)
         fm = {}
         mval = router._yaml_line(ytext, "model_" + r["name"])
@@ -60,7 +68,8 @@ def migrate(home, project):
     # 2) access -> machine.json roles (the authority)
     mfile = os.path.join(pdir, "machine.json")
     if os.path.exists(mfile):
-        m = json.load(open(mfile))
+        with open(mfile) as f:
+            m = json.load(f)
         roles = m.setdefault("roles", {})
         changed = False
         for r in rows:

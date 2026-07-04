@@ -75,6 +75,16 @@ class TestMigrateConfig(unittest.TestCase):
         self.assertIn("model: claude-sonnet-5", qa)        # not clobbered
         self.assertNotIn("claude-haiku-4-5", qa)
 
+    def test_keyless_frontmatter_block_is_replaced_not_stacked(self):
+        with open(os.path.join(self.pdir, "agents", "qa.md"), "w") as f:
+            f.write("---\n# just a comment, no keys\n---\nYou are qa.\n")
+        run_migrate(self.root, "demo")
+        qa = open(os.path.join(self.pdir, "agents", "qa.md")).read()
+        self.assertEqual(qa.count("---\n"), 2)          # exactly one block
+        self.assertIn("model: claude-haiku-4-5", qa)
+        self.assertIn("You are qa.", qa)
+        self.assertNotIn("just a comment", qa)
+
 
 if __name__ == "__main__":
     unittest.main()
