@@ -261,5 +261,44 @@ class TestAgentSetup(unittest.TestCase):
         self.assertIn("access=review", out)
 
 
+class TestCastFromAgents(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="dais-cast-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.pdir = os.path.join(self.root, "projects", "demo")
+        os.makedirs(os.path.join(self.pdir, "agents"))
+        with open(os.path.join(self.pdir, "project.yaml"), "w") as f:
+            f.write("project: demo\nrepo: demo\nstage_goal: x\n")
+
+    def _agent(self, role, fm=""):
+        with open(os.path.join(self.pdir, "agents", role + ".md"), "w") as f:
+            f.write((("---\n%s---\n" % fm) if fm else "") + "persona\n")
+
+    def test_cast_from_agent_files_with_frontmatter(self):
+        self._agent("engineer")
+        self._agent("lead", "trigger: every:5h\nprec: 3\n")
+        c = {r["name"]: r for r in router.cast(self.root, "demo")}
+        self.assertEqual(c["engineer"]["trigger"], "reactive")
+        self.assertEqual(c["engineer"]["prec"], 50)
+        self.assertEqual(c["lead"]["trigger"], "every:5h")
+        self.assertEqual(c["lead"]["prec"], 3)
+
+    def test_legacy_roles_file_still_contributes(self):
+        with open(os.path.join(self.pdir, "roles"), "w") as f:
+            f.write("qa  review  reactive  -  1\n")
+        names = {r["name"] for r in router.cast(self.root, "demo")}
+        self.assertIn("qa", names)
+
+    def test_frontmatter_beats_legacy_row(self):
+        self._agent("lead", "trigger: none\n")
+        with open(os.path.join(self.pdir, "roles"), "w") as f:
+            f.write("lead  review  every:5h  -  3\n")
+        c = {r["name"]: r for r in router.cast(self.root, "demo")}
+        self.assertEqual(c["lead"]["trigger"], "none")
+
+    def test_empty_project_is_empty_cast(self):
+        self.assertEqual(router.cast(self.root, "demo"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

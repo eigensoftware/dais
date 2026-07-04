@@ -114,6 +114,27 @@ def agent_setup(root, project, role):
             "playbook_file": _playbook_file(root, project, playbook)}
 
 
+def cast(root, project):
+    """The project's schedulable cast: the union of agents/<role>.md files and legacy
+    roles-file rows, each resolved through agent_setup (so frontmatter wins). The agents/
+    directory listing IS the cast in the new world; the roles file contributes during the
+    transition only."""
+    pdir = os.path.join(root, "projects", project)
+    names = []
+    adir = os.path.join(pdir, "agents")
+    if os.path.isdir(adir):
+        names += [f[:-3] for f in sorted(os.listdir(adir)) if f.endswith(".md")]
+    for r in parse_roles(os.path.join(pdir, "roles"))[0]:
+        if r["name"] not in names:
+            names.append(r["name"])
+    out = []
+    for n in names:
+        s = agent_setup(root, project, n)
+        out.append({"name": n, "trigger": s["trigger"],
+                    "prec": int(s["prec"]) if s["prec"].lstrip("-").isdigit() else 999})
+    return out
+
+
 def _machine_for(root, project):
     """The machine a project runs — ALWAYS one (dispatch is unconditionally machine-driven). Primary
     signal: the project's own machine.json (seeded from a workflow template). A `machine:` selector
@@ -133,7 +154,7 @@ def decide(root, project, excluded=None):
     dispatcher's no-progress throttle) are skipped in BOTH reactive dispatch and cadence, but
     other roles' work still surfaces — a cooled lead must not starve the engineer behind it."""
     excluded = excluded or set()
-    roles, _ = parse_roles(os.path.join(root, "projects", project, "roles"))
+    roles = cast(root, project)
     if not roles:
         return None
     db = sqlite3.connect(os.path.join(root, "dais.db"))
