@@ -140,7 +140,14 @@ else
   C0=''; CB=''; CD=''; CR=''; CG=''; CY=''; CBL=''; CM=''; CC=''; CW=''
 fi
 
-# Did a claude run die on the subscription cap? Match ONLY the genuine CLI cap message
-# ("You've hit your session limit …") — NOT an agent merely reviewing rate-limit / usage-cap
-# code, which would otherwise false-positive now that logs stream the agent's reasoning.
-is_capped(){ grep -qiE "you'?ve (hit|reached) your (usage|session|5-?hour|weekly) limit" "${1:-/dev/null}" 2>/dev/null; }
+# Did a run die on the provider's usage limit (subscription window, plan rate limit, or —
+# under auth:api — a 429/credits error)? $2 = provider (default anthropic). Match only
+# genuine limit MESSAGES, not an agent merely discussing rate limits in its reasoning.
+is_capped(){
+  local pats="you'?ve (hit|reached) your (usage|session|5-?hour|weekly) limit"
+  case "${2:-anthropic}" in
+    openai) pats="$pats|rate limit reached|you'?ve hit your usage limit" ;;
+  esac
+  pats="$pats|insufficient_quota|credit balance is too low|error.*429"
+  grep -qiE "$pats" "${1:-/dev/null}" 2>/dev/null
+}

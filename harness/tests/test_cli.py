@@ -318,6 +318,51 @@ class TestPreflight(unittest.TestCase):
         self.assertEqual(r.stderr, "")
 
 
+class TestIsCapped(unittest.TestCase):
+    """is_capped <log> [provider] — provider-aware usage-limit detection (lib.sh)."""
+
+    def setUp(self):
+        self.root = make_sandbox()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        d = tempfile.mkdtemp(prefix="dais-is-capped-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        self.log = os.path.join(d, "run.log")
+
+    def _lib(self, cmd):
+        # call the bash helper directly with a controlled PATH, mirroring TestPreflight._need
+        script = 'source "%s/harness/lib.sh"; %s' % (self.root, cmd)
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                              env={"PATH": _PREFLIGHT_PATH, "DAIS_ROOT": self.root})
+
+    def test_is_capped_openai_patterns(self):
+        for msg in ("You've hit your usage limit. Try again later.",
+                    "Rate limit reached for gpt-5.2",
+                    "insufficient_quota: your credit balance is too low"):
+            with open(self.log, "w") as f:
+                f.write(msg + "\n")
+            r = self._lib("is_capped '%s' openai" % self.log)
+            self.assertEqual(r.returncode, 0, msg)
+
+    def test_is_capped_anthropic_unchanged(self):
+        with open(self.log, "w") as f:
+            f.write("You've hit your session limit — resets at 3pm\n")
+        self.assertEqual(self._lib("is_capped '%s'" % self.log).returncode, 0)
+        self.assertEqual(self._lib("is_capped '%s' anthropic" % self.log).returncode, 0)
+
+    def test_is_capped_openai_does_not_match_anthropic_only_phrasing(self):
+        # "rate limit reached" / insufficient_quota are openai-only patterns; an
+        # unrelated line must not false-positive under either provider.
+        with open(self.log, "w") as f:
+            f.write("just a normal line about rate limits in general\n")
+        self.assertNotEqual(self._lib("is_capped '%s' openai" % self.log).returncode, 0)
+
+    def test_is_capped_api_metered_patterns_both_providers(self):
+        for provider in ("anthropic", "openai"):
+            with open(self.log, "w") as f:
+                f.write("Error: 429 Too Many Requests\n")
+            self.assertEqual(self._lib("is_capped '%s' %s" % (self.log, provider)).returncode, 0)
+
+
 class TestRemovedLegacyVerbs(CliTest):
     """approve/handoff/backlog were legacy status pokes that bypassed the machine (and could
     strand a task in a state its machine doesn't have). They exit nonzero, change NOTHING,

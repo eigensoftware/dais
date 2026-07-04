@@ -190,9 +190,20 @@ run_agent_anthropic(){
         | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG"
 }
 
-# Stub — Task 12 replaces this with the real OpenAI adapter.
+# codex has no per-tool disallows: edit -> workspace-write; review/draft roles rely on
+# the persona + machine guards (v1 limitation, documented in the spec). DAIS_HOME is
+# added as a writable root so `dais fire` (coordination writes dais.db) always works.
 run_agent_openai(){
-  echo "openai adapter not yet implemented" >&2; return 1
+  local sandbox="workspace-write"
+  codex exec --json --skip-git-repo-check --cd "$REPO" \
+        ${MODEL:+-m "$MODEL"} \
+        ${EFF:+-c model_reasoning_effort="$EFF"} \
+        --sandbox "$sandbox" \
+        -c 'sandbox_workspace_write.writable_roots=["'"$DAIS_HOME"'"]' \
+        "$STANDING
+
+$PERSONA" 2>&1 \
+        | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG" --provider openai
 }
 
 run_agent(){
@@ -213,7 +224,7 @@ else
   echo "${CD}  ──────────────────────────────────────────────────────${C0}"
 fi
 # A capped, empty, or "Execution error" run is NOT success.
-if is_capped "$LOG"; then STATUS=capped
+if is_capped "$LOG" "$PROVIDER"; then STATUS=capped
 elif [ ! -s "$LOG" ] || grep -qiE "^[[:space:]]*execution error[[:space:]]*$" "$LOG"; then STATUS=failed; fi
 
 # Summarize what the run actually changed: tasks it touched during the run, with their new status.
@@ -222,5 +233,5 @@ TOUCHED="$(db "SELECT group_concat(id||'→'||status,', ') FROM tasks WHERE proj
 db "UPDATE runs SET ended_at=datetime('now'), status='$STATUS', summary='$(sqlesc "$TOUCHED")' WHERE id=$RUNID;"
 case "$STATUS" in succeeded) sc="$CG";; capped|failed) sc="$CR";; interrupted) sc="$CY";; *) sc="$C0";; esac
 echo "  ${sc}${CB}[$STATUS]${C0} $PROJECT/$AGENT ${CD}—${C0} $TOUCHED"
-[ "$STATUS" = capped ] && echo "  (hit the subscription cap — back off until the window resets)"
+[ "$STATUS" = capped ] && echo "  (hit the $PROVIDER usage limit — back off until it resets)"
 exit 0
