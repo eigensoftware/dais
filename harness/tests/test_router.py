@@ -300,5 +300,30 @@ class TestCastFromAgents(unittest.TestCase):
         self.assertEqual(router.cast(self.root, "demo"), [])
 
 
+class TestLintEnumeratesWithoutRolesFile(unittest.TestCase):
+    """lint() enumerates projects by project.yaml presence — the roles file is legacy and
+    optional, so a project.yaml-only project (no roles file) must still be linted, not skipped."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="dais-lint-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.pdir = os.path.join(self.root, "projects", "demo")
+        os.makedirs(os.path.join(self.pdir, "agents"))
+        with open(os.path.join(self.pdir, "project.yaml"), "w") as f:
+            f.write("project: demo\nrepo: demo\nstage_goal: x\n")
+        with open(os.path.join(self.pdir, "machine.json"), "w") as f:
+            f.write('{"name":"t","entry":"ready","roles":{"engineer":{"access":"edit"}},'
+                    '"states":{"ready":{"initial":true},"done":{"terminal":true}},'
+                    '"edges":[{"from":"ready","to":"done","by":"engineer","verb":"finish"}]}')
+        # deliberately no roles file
+
+    def test_lint_enumerates_project_without_roles_file(self):
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            router.lint(self.root, "")
+        self.assertIn("demo", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

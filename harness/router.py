@@ -292,7 +292,7 @@ def lint(root, project):
     else:
         pdir = os.path.join(root, "projects")
         projects = sorted(d for d in os.listdir(pdir)
-                          if os.path.exists(os.path.join(pdir, d, "roles")))
+                          if os.path.exists(os.path.join(pdir, d, "project.yaml")))
     any_err = False
     # workspace-level check (once, not per project): the workspace CONTEXT.md is injected into
     # every agent run, so an oversized one bloats every prompt. Warn (don't fail) past the cap.

@@ -217,6 +217,15 @@ class TestDataLayer(unittest.TestCase):
         done = [r for r in snap.recent_runs if r.status == "succeeded"][0]
         self.assertEqual(done.dur_min, 3)
 
+    def test_snapshot_sees_project_without_roles_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            pdir = os.path.join(root, "projects", "newstyle")
+            os.makedirs(pdir)
+            with open(os.path.join(pdir, "project.yaml"), "w") as f:
+                f.write("project: newstyle\nrepo: x\nstage_goal: g\n")
+            snap = d.load_snapshot(_seed(), root=root)
+            self.assertIn("newstyle", [p.name for p in snap.projects])
+
 
 class TestWorkspaceName(unittest.TestCase):
     """workspace_name reads the `workspace:` value from a workspace's dais.yaml
