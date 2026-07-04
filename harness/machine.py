@@ -409,10 +409,15 @@ def _prefix_candidates(name):
     out.append(base[:4])
     for c in base[4:] + "".join(words[1:]):
         out.append(base[:3] + c)
+    if len(words) > 1:                       # stem taken entirely? initial + next word reads
+        out.append((base[0] + words[1][:3]))  # far better than a char-drop: puttflow-web -> pweb
+    head = base[:4]
+    for i in range(len(head) - 1, -1, -1):   # char-dropped variants: escape a taken stem
+        out.append(head[:i] + head[i + 1:])  # entirely (dais with dai- taken -> das)
     out += [base[:3] + str(i) for i in range(2, 100)]
     seen, uniq = set(), []
     for p in out:
-        if p and p not in seen:
+        if len(p) >= 2 and p not in seen:
             seen.add(p); uniq.append(p)
     return uniq
 
@@ -434,7 +439,9 @@ def _id_prefix(conn, project):
              conn.execute("SELECT DISTINCT id FROM tasks WHERE project<>? AND id LIKE '%-%'",
                           (project,))}
     for cand in _prefix_candidates(project):
-        if cand not in taken:
+        # PREFIX-FREE, not merely unequal: dai- taken makes dais- a conflict (and vice
+        # versa) — dai-9 vs dais-9 is visually ambiguous even though the strings differ.
+        if not any(t.startswith(cand) or cand.startswith(t) for t in taken):
             return cand
     return project[:3]                                   # unreachable in practice; backstop
 

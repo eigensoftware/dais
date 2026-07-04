@@ -429,8 +429,13 @@ class TestIdPrefixes(unittest.TestCase):
         self._seed("winterbraid", "win-1", "win-2")
         self.assertEqual(M.create_task(self.conn, self.m, "winterbraid", "t"), "win-3")
 
-    def test_hyphenated_name_borrows_next_word_initial(self):
+    def test_hyphenated_name_with_stem_taken_uses_initial_plus_word(self):
+        # put- is taken, and prefix-freeness rules out EVERY put* candidate (putw-9 vs put-9
+        # is the same squint as dais-9 vs dai-9) — so: first initial + next word.
         self._seed("puttflow", "put-1", "put-2")
+        self.assertEqual(M.create_task(self.conn, self.m, "puttflow-web", "t"), "pweb-1")
+
+    def test_hyphenated_name_unclaimed_stem_keeps_word_initial_variant(self):
         self.assertEqual(M.create_task(self.conn, self.m, "puttflow-web", "t"), "putw-1")
 
     def test_collision_loser_rederives_but_history_stays(self):
@@ -439,7 +444,7 @@ class TestIdPrefixes(unittest.TestCase):
         self._seed("puttflow-web", "put-7", "put-8")
         self.assertEqual(M.create_task(self.conn, self.m, "puttflow", "t"), "put-3")
         # numbering continues from the project's task COUNT (2 tasks -> -3), prefix re-derives
-        self.assertEqual(M.create_task(self.conn, self.m, "puttflow-web", "t"), "putw-3")
+        self.assertEqual(M.create_task(self.conn, self.m, "puttflow-web", "t"), "pweb-3")
 
     def test_derived_prefix_avoids_other_projects(self):
         self._seed("dais-site", "dais-1")               # dais-site owns "dais"
@@ -449,6 +454,19 @@ class TestIdPrefixes(unittest.TestCase):
 
     def test_short_name_uses_whole_name(self):
         self.assertEqual(M.create_task(self.conn, self.m, "app", "t"), "app-1")
+
+    def test_prefixes_are_prefix_free(self):
+        # dai- is established (dais-site); a new `dais` project must NOT mint dais- —
+        # dai-9 vs dais-9 is visually ambiguous. One string-prefixing another is a conflict.
+        self._seed("dais-site", "dai-1", "dai-2")
+        self.assertEqual(M.create_task(self.conn, self.m, "dais", "t"), "das-1")
+
+    def test_prefix_free_other_direction(self):
+        # the taken token is LONGER: wint- established, a new `win` project can't mint win-
+        self._seed("winterbraid", "wint-1")
+        tid = M.create_task(self.conn, self.m, "win", "t")
+        tok = tid.split("-")[0]
+        self.assertFalse("wint".startswith(tok) or tok.startswith("wint"))
 
 
 class TestCreateTaskAttributes(unittest.TestCase):
