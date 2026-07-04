@@ -156,9 +156,7 @@ class Snapshot:
 
 
 def connect(db=DB):
-    conn = sqlite3.connect(db, timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return MC.open_db(db)
 
 
 def _has_column(conn, table, col):

@@ -65,20 +65,32 @@ def _is_strong_human(g):
 
 
 def lint(m):
-    """Return (errors, warnings). Errors mean the machine is malformed / non-deterministic."""
+    """Return (errors, warnings). Errors mean the machine is malformed / non-deterministic.
+    One function per rule below — adding a rule is adding a pass, not growing a body."""
     errors, warns = [], []
     states = m.get("states", {})
-    roles = set(m.get("roles", {})) | IMPLICIT_ACTORS
     edges = m.get("edges", [])
-    terminals = {s for s, meta in states.items() if meta.get("terminal")}
-    initials = {s for s, meta in states.items() if meta.get("initial")}
     out = {s: [] for s in states}
-
-    for i, e in enumerate(edges):
-        tag = f"edge[{i}] {e.get('from','?')}--{e.get('verb','?')}-->{e.get('to','?')}"
+    for e in edges:
         if e.get("from") in states:
             out[e["from"]].append(e)
-        else:
+    _lint_e1_references(m, states, edges, errors)
+    _lint_e2_dead_ends(states, out, errors)
+    _lint_e3_dispatch(states, out, errors)
+    _lint_e4_entry_exits(m, states, errors)
+    _lint_e5_duplicate_edges(edges, errors)
+    _lint_w1_reachability(states, edges, out, warns)
+    _lint_w2_terminal_reach(states, edges, warns)
+    _lint_w3_unguarded_outward(states, edges, warns)
+    return errors, warns
+
+
+def _lint_e1_references(m, states, edges, errors):
+    """E1 referential integrity: every from/to/by/guard/effect names something that exists."""
+    roles = set(m.get("roles", {})) | IMPLICIT_ACTORS
+    for i, e in enumerate(edges):
+        tag = f"edge[{i}] {e.get('from','?')}--{e.get('verb','?')}-->{e.get('to','?')}"
+        if e.get("from") not in states:
             errors.append(f"E1 {tag}: unknown `from` state {e.get('from')!r}")
         if e.get("to") == "@history":
             # history return: valid only out of a state that DECLARES history (else there is
@@ -105,10 +117,16 @@ def lint(m):
             if sp.get("by") not in roles:
                 errors.append(f"E1 {tag}: spawn.by {sp.get('by')!r} is not a role")
 
+
+def _lint_e2_dead_ends(states, out, errors):
+    """E2: every non-terminal state must have a way out."""
     for s in states:
-        if s not in terminals and not out.get(s):
+        if not states[s].get("terminal") and not out.get(s):
             errors.append(f"E2 dead-end: non-terminal state {s!r} has no outgoing edge")
 
+
+def _lint_e3_dispatch(states, out, errors):
+    """E3: at most one agent role dispatches a state (unless it opts into pool: any-of-N)."""
     for s in states:
         if states[s].get("pool"):
             continue
@@ -118,16 +136,21 @@ def lint(m):
             errors.append(f"E3 ambiguous dispatch: state {s!r} auto-dispatches multiple roles "
                           f"{sorted(agents)} (add \"pool\": true to allow any-of)")
 
-    if not initials:
+
+def _lint_e4_entry_exits(m, states, errors):
+    """E4: the machine has somewhere to start (initial + valid entry) and somewhere to end."""
+    if not any(meta.get("initial") for meta in states.values()):
         errors.append("E4: no `initial` state declared")
-    if not terminals:
+    if not any(meta.get("terminal") for meta in states.values()):
         errors.append("E4: no `terminal` state declared")
     if m.get("entry") and m["entry"] not in states:
         errors.append(f"E4: `entry` {m['entry']!r} is not a state (new tasks would enter an "
                       f"unknown state with no edges)")
 
-    # E5: a duplicate (from, verb) pair is non-deterministic — fire() takes the first match,
-    # silently shadowing the other edge (and whatever guards/effects it carries).
+
+def _lint_e5_duplicate_edges(edges, errors):
+    """E5: a duplicate (from, verb) pair is non-deterministic — fire() takes the first match,
+    silently shadowing the other edge (and whatever guards/effects it carries)."""
     seen_fv = {}
     for e in edges:
         fv = (e.get("from"), e.get("verb"))
@@ -137,11 +160,14 @@ def lint(m):
         elif all(fv):
             seen_fv[fv] = e.get("to")
 
-    # entry points: declared initials PLUS any state a spawn effect drops a new task into
+
+def _lint_w1_reachability(states, edges, out, warns):
+    """W1: entry points are declared initials PLUS any state a spawn effect drops a task into."""
+    initials = {s for s, meta in states.items() if meta.get("initial")}
     spawn_targets = {e["effect"]["spawn"]["initial"] for e in edges
                      if e.get("effect", {}).get("spawn", {}).get("initial") in states}
-    roots = set(initials) | spawn_targets
-    seen, stack = set(roots), list(roots)
+    seen = initials | spawn_targets
+    stack = list(seen)
     while stack:
         for e in out.get(stack.pop(), []):
             if e["to"] in states and e["to"] not in seen:
@@ -150,11 +176,15 @@ def lint(m):
         if s not in seen:
             warns.append(f"W1 unreachable: {s!r} not reachable from an initial state or a spawn")
 
+
+def _lint_w2_terminal_reach(states, edges, warns):
+    """W2: every state should have a path to some terminal (else work strands there)."""
     preds = {s: [] for s in states}
     for e in edges:
         if e.get("from") in states and e.get("to") in states:
             preds[e["to"]].append(e["from"])
-    can_end, stack = set(terminals), list(terminals)
+    can_end = {s for s, meta in states.items() if meta.get("terminal")}
+    stack = list(can_end)
     while stack:
         for p in preds.get(stack.pop(), []):
             if p not in can_end:
@@ -163,6 +193,9 @@ def lint(m):
         if s not in can_end:
             warns.append(f"W2 no exit: {s!r} cannot reach any terminal state")
 
+
+def _lint_w3_unguarded_outward(states, edges, warns):
+    """W3: an outward script effect wants a strong-human guard on its edge or its approach."""
     inbound = {s: [] for s in states}
     for e in edges:
         if e.get("to") in states:
@@ -178,7 +211,6 @@ def lint(m):
             warns.append(f"W3 unguarded outward effect: {e.get('from')}--{e.get('verb')}-->"
                          f"{e.get('to')} runs an outward script with no human gate on it or its "
                          f"approach (may auto-fire to prod)")
-    return errors, warns
 
 
 # --------------------------------------------------------------------------- #
@@ -586,50 +618,66 @@ def _link_run(conn, tid, verb):
 def _apply_effect(conn, m, task, edge, result, ctx):
     eff = edge.get("effect", {})
     if "spawn" in eff:
-        sp = eff["spawn"]
-        title = f"[{sp.get('template','task')}] {task['title']}"
-        cid = _insert_task(conn, task["project"], title, sp["initial"], sp.get("by"))
-        rel = {"from_proposal": "spawned_from", "blocks_parent": "blocks_parent",
-               "part_of": "part_of"}.get(sp.get("rel"), "spawned_from")
-        conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,?)",
-                     (task["id"], cid, rel))
-        _link_run(conn, cid, "create")
-        result["spawned"].append({"id": cid, "rel": rel, "state": sp["initial"]})
+        _effect_spawn(conn, task, eff["spawn"], result)
     if "aggregate" in eff:
-        sel = eff["aggregate"].get("select", "")
-        want = dict(kv.split("=", 1) for kv in sel.split(",") if "=" in kv)
-        rows = conn.execute("SELECT id FROM tasks WHERE project=? AND status=?",
-                            (task["project"], want.get("state"))).fetchall()
-        # "already encompassed" counts only links whose encompassing parent is still OPEN —
-        # a task swept into a release that was later aborted/cancelled (terminal parent) is
-        # re-aggregatable, else it would strand in the select state with no path out.
-        terminals = sorted(s for s, meta in m.get("states", {}).items() if meta.get("terminal"))
-        q = ("SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
-             "WHERE l.child_id=? AND l.rel='encompasses'")
-        if terminals:
-            q += " AND p.status NOT IN (%s)" % ",".join("?" * len(terminals))
-        for (cid,) in rows:
-            if conn.execute(q, [cid] + terminals).fetchone():
-                continue
-            conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,'encompasses')",
-                         (task["id"], cid))
-            result["encompassed"].append(cid)
-    if "then" in eff:                     # fire an edge on related tasks (effects fire edges)
-        scope, _, transition = eff["then"].partition(":")
-        from_state, _, to_state = transition.partition("->")
-        if scope == "encompassed":
-            kids = conn.execute("SELECT child_id FROM task_links WHERE parent_id=? AND rel='encompasses'",
-                                (task["id"],)).fetchall()
-            child_edge = next((e for e in m["edges"]
-                               if e["from"] == from_state and e["to"] == to_state), None)
-            for (cid,) in kids:
-                c = task_row(conn, cid)
-                if c and c["status"] == from_state and child_edge:
-                    # nested: joins the outer fire's transaction — the release and every
-                    # child close together, or the whole fire rolls back.
-                    fire(conn, m, cid, child_edge["verb"], "system", ctx, _nested=True)
+        _effect_aggregate(conn, m, task, eff["aggregate"], result)
+    if "then" in eff:
+        _effect_then(conn, m, task, eff["then"], ctx)
     # eff["script"] would run an external effect script here (merge/deploy/publish) — out of scope
     # for the engine prototype; the transition + guards above are what make it safe.
+
+
+def _effect_spawn(conn, task, sp, result):
+    """spawn: create a linked child task (a fix, an impl from a proposal, a rollback)."""
+    title = f"[{sp.get('template','task')}] {task['title']}"
+    cid = _insert_task(conn, task["project"], title, sp["initial"], sp.get("by"))
+    rel = {"from_proposal": "spawned_from", "blocks_parent": "blocks_parent",
+           "part_of": "part_of"}.get(sp.get("rel"), "spawned_from")
+    conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,?)",
+                 (task["id"], cid, rel))
+    _link_run(conn, cid, "create")
+    result["spawned"].append({"id": cid, "rel": rel, "state": sp["initial"]})
+
+
+def _effect_aggregate(conn, m, task, agg, result):
+    """aggregate: pull every task matching the select into this task's `encompasses` set."""
+    sel = agg.get("select", "")
+    want = dict(kv.split("=", 1) for kv in sel.split(",") if "=" in kv)
+    rows = conn.execute("SELECT id FROM tasks WHERE project=? AND status=?",
+                        (task["project"], want.get("state"))).fetchall()
+    # "already encompassed" counts only links whose encompassing parent is still OPEN —
+    # a task swept into a release that was later aborted/cancelled (terminal parent) is
+    # re-aggregatable, else it would strand in the select state with no path out.
+    terminals = sorted(s for s, meta in m.get("states", {}).items() if meta.get("terminal"))
+    q = ("SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+         "WHERE l.child_id=? AND l.rel='encompasses'")
+    if terminals:
+        q += " AND p.status NOT IN (%s)" % ",".join("?" * len(terminals))
+    for (cid,) in rows:
+        if conn.execute(q, [cid] + terminals).fetchone():
+            continue
+        conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,'encompasses')",
+                     (task["id"], cid))
+        result["encompassed"].append(cid)
+
+
+def _effect_then(conn, m, task, spec, ctx):
+    """then: fire an edge on related tasks (effects fire edges — never poke state).
+    spec: "encompassed:<from>-><to>" — e.g. shipping a release closes everything it encompasses."""
+    scope, _, transition = spec.partition(":")
+    from_state, _, to_state = transition.partition("->")
+    if scope != "encompassed":
+        return
+    kids = conn.execute("SELECT child_id FROM task_links WHERE parent_id=? AND rel='encompasses'",
+                        (task["id"],)).fetchall()
+    child_edge = next((e for e in m["edges"]
+                       if e["from"] == from_state and e["to"] == to_state), None)
+    for (cid,) in kids:
+        c = task_row(conn, cid)
+        if c and c["status"] == from_state and child_edge:
+            # nested: joins the outer fire's transaction — the release and every
+            # child close together, or the whole fire rolls back.
+            fire(conn, m, cid, child_edge["verb"], "system", ctx, _nested=True)
 
 
 def _system_edge_sweep(conn, m, project, match):
@@ -698,13 +746,18 @@ def create_task(conn, m, project, title, state=None, assignee=None,
     return tid
 
 
+def open_db(path):
+    """The one sqlite opening for the harness (rows by name, 10s busy timeout so concurrent
+    writers wait for the lock instead of dying on 'database is locked' — the python twin of
+    lib.sh's `.timeout 10000`). dashboard.connect delegates here."""
+    conn = sqlite3.connect(path, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 # --------------------------------------------------------------------------- #
 # __main__ — the surface the bash `dais` CLI shells (like actions.py)
 # --------------------------------------------------------------------------- #
-def _open(db):
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def _main(argv):
@@ -720,7 +773,7 @@ def _main(argv):
     if cmd in ("advance", "recover"):
         # dispatcher hooks: `advance` fires system `unblocked` edges each tick; `recover` fires
         # system `interrupt` edges on orphan-reconcile. Prints the ids moved, one per line.
-        conn = _open(argv[1])
+        conn = open_db(argv[1])
         f = advance_unblocked if cmd == "advance" else recover_interrupted
         for tid in f(conn, load(argv[2]), argv[3]):
             print(tid)
@@ -758,7 +811,7 @@ def _main(argv):
                 st = rest[i]; i += 1
             else:
                 i += 1
-        conn = _open(db)
+        conn = open_db(db)
         try:
             tid = create_task(conn, load(mp), project, title, st, **kw)
         except ValueError as ex:
@@ -781,7 +834,7 @@ def _main(argv):
                 ctx.setdefault("verifiers", {})[rest[i + 1]] = True; i += 2
             else:
                 i += 1
-        conn = _open(db)
+        conn = open_db(db)
         try:
             r = fire(conn, load(mp), tid, verb, actor, ctx)
         except (GuardFailure, ValueError) as ex:
