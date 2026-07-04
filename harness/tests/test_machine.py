@@ -364,6 +364,49 @@ class TestAttestFact(unittest.TestCase):
         self.assertIsNone(M.attest_fact("typed_confirm", self.row("t-1")))
 
 
+class TestPromptsFor(unittest.TestCase):
+    """prompts_for(m, edge, task) is the ONE reading of an edge's guard list for elicitation —
+    a UI asks it what a human must supply, so the panel can never prompt for something fire()
+    won't demand (or skip something it will). Conditional attests resolve against the task row
+    with the same rule as enforcement."""
+    def setUp(self):
+        self.conn = _db()
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN parked_from TEXT")
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN touches_migrations INTEGER")
+        self.m = M.load(CODING)
+
+    def _edge(self, frm, verb):
+        return next(e for e in M.edges_from(self.m, frm) if e["verb"] == verb)
+
+    def _release(self, flag):
+        rel = M.create_task(self.conn, self.m, "proj", "rel", state="release_open", assignee="engineer")
+        M.fire(self.conn, self.m, rel, "assemble", "engineer")
+        self.conn.execute("UPDATE tasks SET touches_migrations=? WHERE id=?", (flag, rel))
+        return M.task_row(self.conn, rel)
+
+    def test_lifted_attest_is_absent(self):
+        ps = M.prompts_for(self.m, self._edge("release_review", "greenlight"), self._release(0))
+        self.assertEqual([p["kind"] for p in ps], ["typed"])
+
+    def test_unknown_flag_keeps_the_attest(self):
+        ps = M.prompts_for(self.m, self._edge("release_review", "greenlight"), self._release(None))
+        self.assertEqual([p["kind"] for p in ps], ["typed", "attest"])
+        self.assertEqual(ps[1]["fact"], "migrations_applied")
+
+    def test_confirm_edge(self):
+        ps = M.prompts_for(self.m, self._edge("proposal_review", "approve"), None)
+        self.assertIn({"kind": "confirm"}, ps)
+
+    def test_undeclared_verify_fails_closed(self):
+        ps = M.prompts_for(self.m, self._edge("qa_review", "pass"), None)
+        self.assertEqual(ps, [{"kind": "verify", "check": "tests_pass", "declared": False}])
+
+    def test_declared_verify_is_marked_runnable(self):
+        m = dict(self.m, checks={"tests_pass": "true"})
+        ps = M.prompts_for(m, self._edge("qa_review", "pass"), None)
+        self.assertEqual(ps, [{"kind": "verify", "check": "tests_pass", "declared": True}])
+
+
 class TestCreateTaskAttributes(unittest.TestCase):
     """create_task speaks the full board vocabulary (explicit id, priority, notes, blocked_on)
     so the CLI's `task add` can delegate to the engine instead of re-implementing entry
@@ -450,19 +493,19 @@ class TestAtomicityAndConcurrency(unittest.TestCase):
     def test_stale_state_is_a_cas_failure_not_a_double_apply(self):
         # simulate a concurrent writer: the task moves between fire()'s read and its UPDATE.
         t = M.create_task(self.conn, self.m, "proj", "t", state="ready", assignee="engineer")
-        real_task = M._task
+        real_task = M.task_row
         def stale(conn, tid):
             row = real_task(conn, tid)
             if tid == t:
                 conn.execute("UPDATE tasks SET status='deferred' WHERE id=?", (t,))  # racer wins
-                M._task = real_task                              # only interpose once
+                M.task_row = real_task                              # only interpose once
             return row
-        M._task = stale
+        M.task_row = stale
         try:
             with self.assertRaises(M.GuardFailure):
                 M.fire(self.conn, self.m, t, "claim", "engineer")
         finally:
-            M._task = real_task
+            M.task_row = real_task
         # the loser must NOT have applied its transition (in this same-connection simulation
         # the rollback also undoes the simulated racer's write; the point is no double-apply).
         self.assertNotEqual(_status(self.conn, t), "doing")

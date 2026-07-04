@@ -1298,41 +1298,36 @@ class App:
         if not edge:
             self.flash = f"no '{verb}' edge from {t['status']}"
             return
-        guards = edge.get("guards", [])
+        # the ENGINE says what a human must supply for this edge on this task (MC.prompts_for,
+        # against a fresh task row) — the panel only renders the asks, so it prompts for exactly
+        # what fire() will demand: conditional attests already resolved, no more, no less.
+        prompts = MC.prompts_for(m, edge, MC.task_row(self.conn, t["id"]))
         # a verify:<check> with no declared checker (machine `checks`) means "a check must have
         # RUN" — the panel can't assert that, so it surfaces the exact command instead of
         # stamping it. (Checkers that ARE declared run inside the engine on fire.)
-        checks = (m or {}).get("checks", {})
-        unchecked = [g for g in guards
-                     if g.startswith("verify:") and g.split(":", 1)[1] not in checks]
+        unchecked = [p for p in prompts if p["kind"] == "verify" and not p["declared"]]
         if unchecked:
-            flags = " ".join("--verify " + g.split(":", 1)[1] for g in unchecked)
+            flags = " ".join("--verify " + p["check"] for p in unchecked)
             self.flash = f"{verb} needs a verified check — run:  dais fire {t['id']} {verb} {flags}"
             return
         # strong-human guards prompt IN the panel — same strength as the CLI flags (you type
         # the task id / the fact name), without dropping to a shell to greenlight a release.
-        # Conditional attests are read through the engine's own predicate against a FRESH task
-        # row, so the panel prompts for exactly what fire() will demand — no more, no less.
         cmd = ["fire", t["id"], verb, "--by", "founder"]
-        task_row = MC._task(self.conn, t["id"])
         prompted = False
-        for g in guards:
-            if g == "typed_confirm":
+        for p in prompts:
+            if p["kind"] == "typed":
                 typed = self._prompt(f"{verb} {t['id']} — type the task id to confirm")
                 if typed != t["id"]:
                     self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — typed confirmation mismatch"
                     return
                 cmd += ["--typed", t["id"]]; prompted = True
-            elif g.startswith("attest:"):
-                fact = MC.attest_fact(g, task_row)
-                if fact is None:                     # conditional lifted (flag explicitly false)
-                    continue
-                typed = self._prompt(f"attest '{fact}' — type the fact name to assert it")
-                if typed != fact:
+            elif p["kind"] == "attest":
+                typed = self._prompt(f"attest '{p['fact']}' — type the fact name to assert it")
+                if typed != p["fact"]:
                     self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — attestation not given"
                     return
-                cmd += ["--attest", fact]; prompted = True
-        if "confirm" in guards:
+                cmd += ["--attest", p["fact"]]; prompted = True
+        if any(p["kind"] == "confirm" for p in prompts):
             # the typed prompt IS the confirmation when one just happened — don't double-ask
             if not prompted and not self._confirm(f"{verb} {t['id']}?"):
                 return

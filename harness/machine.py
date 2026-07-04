@@ -348,9 +348,11 @@ class GuardFailure(Exception):
     pass
 
 
-def _task(conn, tid):
-    # touches_migrations (0005) and parked_from (0004) arrive by migration — degrade gracefully on an
-    # unmigrated db by peeling the newest columns off the SELECT until one succeeds.
+def task_row(conn, tid):
+    """The engine's view of a task (public: UIs fetch through this too, so guard predicates
+    like attest_fact/prompts_for see the same columns enforcement sees).
+    touches_migrations (0005) and parked_from (0004) arrive by migration — degrade gracefully on an
+    unmigrated db by peeling the newest columns off the SELECT until one succeeds."""
     for cols in ("id,project,status,title,assignee,parked_from,touches_migrations",
                  "id,project,status,title,assignee,parked_from",
                  "id,project,status,title,assignee"):
@@ -444,6 +446,35 @@ def attest_fact(guard, task):
     return fact
 
 
+def prompts_for(m, edge, task):
+    """What a HUMAN must supply to fire this edge on this task — the one reading of the guard
+    list for elicitation, next to _check_guards' reading for enforcement, so a UI can never
+    prompt for something fire() won't demand (or skip something it will). Ordered entries:
+      {"kind": "typed"}                             — type the task id (typed_confirm)
+      {"kind": "attest", "fact": f}                 — assert the fact; conditional attests are
+                                                      resolved against the task row (lifted ones
+                                                      are ABSENT, same rule as enforcement)
+      {"kind": "confirm"}                           — a click
+      {"kind": "verify", "check": c, "declared": b} — b: the machine declares a checker command
+                                                      (fire runs it); False = only an explicit
+                                                      --verify self-assertion passes (fails closed)
+    """
+    out, checks = [], (m or {}).get("checks", {})
+    for g in edge.get("guards", []):
+        if g == "typed_confirm":
+            out.append({"kind": "typed"})
+        elif g == "confirm":
+            out.append({"kind": "confirm"})
+        elif g.startswith("attest:"):
+            fact = attest_fact(g, task)
+            if fact:
+                out.append({"kind": "attest", "fact": fact})
+        elif g.startswith("verify:"):
+            check = g[len("verify:"):]
+            out.append({"kind": "verify", "check": check, "declared": check in checks})
+    return out
+
+
 def _check_guards(conn, m, edge, task, ctx):
     for g in edge.get("guards", []):
         if g == "confirm":
@@ -489,7 +520,7 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         # standalone it opens one. Rollback-to-savepoint undoes only this fire's work.
         conn.execute("SAVEPOINT dais_fire")
     try:
-        task = _task(conn, tid)
+        task = task_row(conn, tid)
         if not task:
             raise ValueError(f"no such task: {tid}")
         # The dependency chain binds AGENTS, not just the dispatcher: an agent may not fire any
@@ -592,7 +623,7 @@ def _apply_effect(conn, m, task, edge, result, ctx):
             child_edge = next((e for e in m["edges"]
                                if e["from"] == from_state and e["to"] == to_state), None)
             for (cid,) in kids:
-                c = _task(conn, cid)
+                c = task_row(conn, cid)
                 if c and c["status"] == from_state and child_edge:
                     # nested: joins the outer fire's transaction — the release and every
                     # child close together, or the whole fire rolls back.
