@@ -1,5 +1,7 @@
+import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -7,6 +9,8 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import dashboard as d  # harness/dashboard.py
 import machine as MC
+
+HARNESS = os.path.join(os.path.dirname(__file__), "..")
 
 
 SCHEMA = """
@@ -185,6 +189,36 @@ class TestLogColor(unittest.TestCase):
 
     def test_plain_line_uncoloured(self):
         self.assertEqual(self.attr("  some raw passthrough line"), 0)
+
+
+class TestFmtStreamProvider(unittest.TestCase):
+    """fmt-stream.py --provider openai maps codex `exec --json` JSONL onto the
+    same markers the claude stream-json path produces."""
+
+    def test_fmt_stream_openai_maps_markers(self):
+        fixture = os.path.join(os.path.dirname(__file__), "fixtures", "codex-exec.jsonl")
+        with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+            logpath = lf.name
+        self.addCleanup(os.unlink, logpath)
+        with open(fixture) as fin:
+            subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"),
+                            logpath, "--provider", "openai"],
+                           stdin=fin, capture_output=True, text=True)
+        log = open(logpath).read()
+        self.assertIn("💬", log)                    # the agent_message mapped
+        self.assertIn("✓", log)                     # turn completion mapped
+
+    def test_fmt_stream_default_is_anthropic_unchanged(self):
+        # a claude stream-json line still maps (regression: the provider arg is additive)
+        line = json.dumps({"type": "assistant",
+                            "message": {"content": [{"type": "text", "text": "hi"}]}})
+        with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+            logpath = lf.name
+        self.addCleanup(os.unlink, logpath)
+        subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"), logpath],
+                       input=line + "\n", capture_output=True, text=True)
+        log = open(logpath).read()
+        self.assertIn("💬 hi", log)
 
 
 class TestDataLayer(unittest.TestCase):
