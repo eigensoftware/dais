@@ -1,7 +1,7 @@
 # Authored task state machines
 
-Status: proposal (design branch `design/machine-model`). Supersedes the fixed
-status set + the `ship`/`deploy`/`automerge` special cases.
+Status: implemented (`harness/machine.py` + `harness/machines/`). Superseded the
+fixed status set + the `ship`/`deploy`/`automerge` special cases.
 
 ## The model — one atom, two graphs, one bridge
 
@@ -78,7 +78,7 @@ machine's `roles` declaration order (declaration order = precedence).
 |---|---|---|
 | `confirm` | a click | weak; an auto-approver can satisfy it |
 | `typed_confirm` | a human typing a phrase | **strong human** |
-| `attest:<fact>` | a human asserting an unverifiable fact | **strong human** (when-conditions: future) |
+| `attest:<fact>` | a human asserting an unverifiable fact | **strong human**; optional conditional `attest:<fact> when task:<flag>` — required unless the task's `<flag>` column is explicitly false (NULL/unknown still requires it) |
 | `verify:<check>` | an automatic check (tests, CI, no-conflict, brand_voice) | the machine's `checks.<check>` command runs on fire; absent that, only an explicit `--verify` self-assertion by the firing role passes it (fails closed) |
 | `role:<r>` | actor authorization | |
 
@@ -98,7 +98,8 @@ protection mechanism; danger is declared per-edge, not coded per-action.
 ## Lint — coherence only, never policy
 
 The structure imposes **no** inherent limits. Lint blocks only on incoherence;
-everything policy/safety-flavored is a warning you can wave off. (`design/lint_machine.py`.)
+everything policy/safety-flavored is a warning you can wave off. (Implemented as
+`lint()` in `harness/machine.py`; run it with `dais lint`.)
 
 **Errors (block):** E1 referential integrity · E2 no dead-end (every
 non-terminal has an out-edge) · E3 unambiguous dispatch · E4 has an initial and
@@ -161,7 +162,7 @@ edges:
   - { from: release_ready,  to: release_review, by: engineer, verb: assemble,
       effect: { aggregate: { select: "state=awaiting_release" } } }
   - { from: release_review, to: releasing, by: founder, verb: greenlight,      # the human gate
-      guards: ["typed_confirm", "attest:migrations_applied when changed(migrations/**)"] }
+      guards: ["typed_confirm", "attest:migrations_applied when task:touches_migrations"] }
   - { from: release_review, to: cancelled, by: founder, verb: abort, guards: [confirm] }
   - { from: releasing, to: done, by: engineer, verb: shipped,
       effect: { script: { name: release, outward: true }, then: "encompassed:awaiting_release->done" } }
