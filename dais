@@ -459,17 +459,11 @@ prec: <int>
     echo "$$ $interval $par" > "$PIDF"
     trap 'rm -f "$PIDF"' EXIT
     # Clean stop: parallel agents are detached (backgrounded), so they don't receive this
-    # terminal's Ctrl-C. On stop we walk each live agent's process tree (wrapper → claude →
-    # children) and TERM it; the agent's EXIT trap marks the run interrupted and its task stays
-    # put, resuming on the next start. Tree-walk (not process groups) so it needs no job control.
-    kill_tree(){ local pid="$1" k; for k in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$k"; done; kill -TERM "$pid" 2>/dev/null; }
+    # terminal's Ctrl-C. On stop we TERM each live agent's whole tree (lib.sh kill_tree); the
+    # agent's EXIT trap marks the run interrupted and its task stays put, resuming on the next start.
     stop(){
       echo; echo "■ watch stopping — halting any in-flight agents…"
-      for lk in "$DAIS_HOME"/projects/*/.lock-*; do
-        [ -e "$lk" ] || continue
-        pid="$(cat "$lk" 2>/dev/null)"; [ -n "$pid" ] || continue
-        kill -0 "$pid" 2>/dev/null && kill_tree "$pid"
-      done
+      for pid in $(live_lock_pids); do kill_tree "$pid"; done
       echo "■ stopped. In-flight runs are marked interrupted; their tasks stay put and resume on the next start. Safe to restart anytime."
       rm -f "$PIDF"
       exit 0
@@ -495,13 +489,8 @@ prec: <int>
 
   cancel)
     proj="${1:?usage: dais cancel <project>}"
-    kill_tree(){ local pid="$1" k; for k in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$k"; done; kill -TERM "$pid" 2>/dev/null; }
     n=0
-    for lk in "$DAIS_HOME/projects/$proj"/.lock-*; do
-      [ -e "$lk" ] || continue
-      pid="$(cat "$lk" 2>/dev/null)"; [ -n "$pid" ] || continue
-      kill -0 "$pid" 2>/dev/null && { kill_tree "$pid"; n=$((n+1)); }
-    done
+    for pid in $(live_lock_pids "$proj"); do kill_tree "$pid"; n=$((n+1)); done
     [ "$n" -gt 0 ] && echo "■ cancelled $n in-flight agent(s) in $proj — marked interrupted; task stays put" \
                    || echo "nothing running in $proj" ;;
 

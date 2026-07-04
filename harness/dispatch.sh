@@ -26,12 +26,8 @@ fi
 #     it — no hardcoded statuses, correct for any authored machine. Safe because this only fires
 #     when live=0 (no agent holds a lock → nothing is genuinely mid-flight). ---
 if [ "$DRY" = 0 ]; then
-  live=0
-  for lk in "$DAIS_HOME"/projects/*/.lock-*; do
-    [ -e "$lk" ] || continue
-    if kill -0 "$(cat "$lk" 2>/dev/null)" 2>/dev/null; then live=1; else rm -f "$lk"; fi
-  done
-  if [ "$live" = 0 ]; then
+  reap_stale_locks
+  if [ -z "$(live_lock_pids)" ]; then
     db "UPDATE runs SET status='interrupted', ended_at=datetime('now') WHERE status='running';"
     for p in "$DAIS_HOME"/projects/*/; do
       [ -d "$p" ] || continue; pj="$(basename "$p")"
@@ -84,11 +80,7 @@ MAX="${DAIS_MAX_PARALLEL:-1}"
 [ "$MAX" -gt 5 ] && MAX=5
 
 # how many agents are live right now (across all projects) → how many slots are free this tick
-running=0
-for lk in "$DAIS_HOME"/projects/*/.lock-*; do
-  [ -e "$lk" ] || continue
-  kill -0 "$(cat "$lk" 2>/dev/null)" 2>/dev/null && running=$((running+1))
-done
+running="$(live_lock_pids | wc -l | tr -d ' ')"
 free=$((MAX - running))
 
 # which projects to consider
@@ -103,12 +95,7 @@ else for p in "$DAIS_HOME"/projects/*/; do [ -d "$p" ] && projects+=("$(basename
 eligible=()
 for proj in "${projects[@]}"; do
   [ "$free" -le 0 ] && break   # pool full — no slot to fill, so don't bother polling the router
-  busy=0
-  for lk in "$DAIS_HOME/projects/$proj"/.lock-*; do
-    [ -e "$lk" ] || continue
-    kill -0 "$(cat "$lk" 2>/dev/null)" 2>/dev/null && busy=1
-  done
-  [ "$busy" = 1 ] && continue   # already running its one agent — counted in `running` above
+  [ -n "$(live_lock_pids "$proj")" ] && continue   # already running its one agent — counted in `running` above
 
   # who runs next is decided by the project's roles config (see harness/router.py) — no role
   # names hardcoded here. The router returns a role to run, or nothing (idle). A role whose LAST

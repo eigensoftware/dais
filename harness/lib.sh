@@ -1,5 +1,7 @@
-# shared helpers — sourced by run-agent.sh and dais. Not executable on its own.
+# shared helpers — sourced by run-agent.sh, dispatch.sh and dais. Not executable on its own.
 DAIS_ROOT="${DAIS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
+# expand a leading ~ to $HOME (defined before the DAIS_HOME resolution below, which uses it)
+expand(){ printf '%s' "${1/#\~/$HOME}"; }
 # DAIS_HOME = the workspace (dais.yaml + CONTEXT.md + projects/ + dais.db). Resolution order:
 #   1) $DAIS_HOME env (explicit override)
 #   2) nearest ancestor of cwd containing a workspace marker (dais.yaml or dais.db) — "the
@@ -25,12 +27,15 @@ if [ -z "${DAIS_HOME:-}" ] && [ -f "$HOME/.dais/config" ]; then
   DAIS_HOME="$(sed -n 's/^home=//p' "$HOME/.dais/config" | head -1)"
 fi
 DAIS_HOME="${DAIS_HOME:-$DAIS_ROOT}"
-DAIS_HOME="${DAIS_HOME/#\~/$HOME}"          # expand a leading ~
+DAIS_HOME="$(expand "$DAIS_HOME")"
 export DAIS_ROOT DAIS_HOME
 DB="$DAIS_HOME/dais.db"
 
+# need <tool> <install-hint> — fail loud + actionable when a required CLI is missing.
+need(){ command -v "$1" >/dev/null 2>&1 || { printf "dais: '%s' not found — %s\n" "$1" "${2:-install it and retry}" >&2; exit 127; }; }
+
 # preflight: every dais/run-agent/dispatch path hits the DB — fail clearly if sqlite3 is absent.
-command -v sqlite3 >/dev/null 2>&1 || { echo "dais: 'sqlite3' not found — install SQLite and retry" >&2; exit 127; }
+need sqlite3 "install SQLite and retry"
 
 # `.timeout` makes concurrent writers wait for the lock (up to 10s) instead of failing with
 # "database is locked" — needed once `dais watch` runs agents in parallel (they share dais.db).
@@ -85,9 +90,6 @@ machine_path(){
   DAIS_MACH="$mach" python3 -c "import os,sys;sys.path.insert(0,'$DAIS_ROOT/harness');import machine as M;print(M.default_machine_path('$DAIS_ROOT', os.environ.get('DAIS_MACH') or None))" 2>/dev/null
 }
 
-# expand a leading ~ to $HOME
-expand(){ printf '%s' "${1/#\~/$HOME}"; }
-
 # repo_path <project> — absolute path to a project's working repo.
 # absolute -> as-is; ~ -> $HOME; relative -> ${DAIS_AGENT_REPOS:-<parent of DAIS_HOME>}/<value>.
 # The default base is the WORKSPACE's parent (DAIS_HOME), not the install dir (DAIS_ROOT), so a
@@ -102,17 +104,33 @@ repo_path(){
   esac
 }
 
-# migrations_re <project> — grep -E regex matching this project's migration files in a PR diff.
-# project.yaml `migrations_glob:` (default */migrations/*.sql) -> regex (* -> .*, . -> \., anchored at end).
-migrations_re(){
-  local g; g="$(pcfg "$1" migrations_glob)"; g="${g:-*/migrations/*.sql}"
-  # glob -> grep -E: escape dots, turn * into .*, anchor the suffix
-  local re="${g//./\\.}"; re="${re//\*/.*}"
-  printf '%s$' "$re"
+# --- agent locks. Each running agent holds projects/<p>/.lock-<role> containing its pid; a lock
+#     whose pid is dead is stale (a crash left it behind). One vocabulary, three verbs: ---
+
+# live_lock_pids [project] — print the pid of every live agent (one per line), workspace-wide
+# or scoped to one project. Empty output = nothing running.
+live_lock_pids(){
+  local lk pid
+  for lk in "$DAIS_HOME"/projects/${1:-*}/.lock-*; do
+    [ -e "$lk" ] || continue
+    pid="$(cat "$lk" 2>/dev/null)"; [ -n "$pid" ] || continue
+    kill -0 "$pid" 2>/dev/null && echo "$pid"
+  done
 }
 
-# need <tool> <install-hint> — fail loud + actionable when a required CLI is missing.
-need(){ command -v "$1" >/dev/null 2>&1 || { printf "dais: '%s' not found — %s\n" "$1" "${2:-install it and retry}" >&2; exit 127; }; }
+# reap_stale_locks — delete lock files whose pid is dead, so a crashed agent can't wedge dispatch.
+reap_stale_locks(){
+  local lk
+  for lk in "$DAIS_HOME"/projects/*/.lock-*; do
+    [ -e "$lk" ] || continue
+    kill -0 "$(cat "$lk" 2>/dev/null)" 2>/dev/null || rm -f "$lk"
+  done
+}
+
+# kill_tree <pid> — TERM a process and all its descendants (wrapper → claude → children).
+# Tree-walk (not process groups) so it needs no job control; the agent's EXIT trap then marks
+# its run interrupted and the task stays put, resuming on the next start.
+kill_tree(){ local pid="$1" k; for k in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$k"; done; kill -TERM "$pid" 2>/dev/null; }
 
 # --- colors (auto-off when stdout isn't a terminal, or NO_COLOR is set) ---
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
