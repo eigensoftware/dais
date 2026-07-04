@@ -21,10 +21,41 @@ MODEL="$(cfg model)"; EFF="$(cfg effort)"
 PROVIDER="$(cfg provider)"; AUTH="$(cfg auth)"
 ACCESS="$(cfg access)"; PB="$(cfg playbook)"; PB_FILE="$(cfg playbook_file)"
 EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
+
+# Secrets transport (auth: api): the provider's standard env var, from the process env,
+# ~/.dais/env (user-level; keep it chmod 600), or $DAIS_HOME/.env (workspace override,
+# gitignored by init) — in that order, FIRST setting wins (process env beats both files).
+load_env(){
+  local f="$1" line k
+  [ -f "$f" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue;; esac
+    k="${line%%=*}"
+    [ -n "$k" ] && [ -z "$(eval "printf '%s' \"\${$k:-}\"")" ] && export "$k"="${line#*=}"
+  done < "$f"
+}
+load_env "$HOME/.dais/env"
+load_env "$DAIS_HOME/.env"
+
 # Debug seam: print the resolved config and exit WITHOUT calling the provider CLI.
 if [ "${DAIS_SHOW_CONFIG:-0}" = 1 ]; then
   echo "model=$MODEL effort=$EFF provider=$PROVIDER auth=$AUTH access=$ACCESS playbook=$PB"; exit 0
 fi
+
+# auth:api preflight — fail fast, before any network/claude work (git fetch is right below),
+# if the provider's key isn't set anywhere (process env / ~/.dais/env / $DAIS_HOME/.env).
+if [ "$AUTH" = "api" ]; then
+  case "$PROVIDER" in
+    anthropic) KEYVAR="ANTHROPIC_API_KEY";;
+    openai)    KEYVAR="OPENAI_API_KEY";;
+    *)         KEYVAR="";;
+  esac
+  if [ -n "$KEYVAR" ] && [ -z "$(eval "printf '%s' \"\${$KEYVAR:-}\"")" ]; then
+    echo "[$PROJECT/$AGENT] auth: api but \$$KEYVAR is not set — put it in your environment," \
+         "~/.dais/env, or $DAIS_HOME/.env"; exit 1
+  fi
+fi
+
 [ -d "$REPO" ] || { echo "repo not found: $REPO"; exit 1; }
 git -C "$REPO" fetch -q origin 2>/dev/null || true   # always work against current origin
 # Keep the local default branch current. The fetch above only moves origin/* refs, but agents read

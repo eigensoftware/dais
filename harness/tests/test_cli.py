@@ -438,6 +438,17 @@ class TestPerRoleModelOverride(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r.stdout
 
+    def _run_agent(self, agent, env=None):
+        # like _show_config, but WITHOUT DAIS_SHOW_CONFIG — the run must reach the
+        # auth:api preflight (which sits after the config seam), not stop at it.
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_AGENT_REPOS": self.repo_base})
+        if env:
+            e.update(env)
+        return subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", agent],
+                              capture_output=True, text=True, env=e, cwd=self.root)
+
     def test_role_override_beats_project_default(self):
         qa = self._show_config("qa")
         self.assertIn("model=claude-haiku-4-5", qa)
@@ -473,6 +484,23 @@ class TestPerRoleModelOverride(CliTest):
             f.write("---\nmodel: claude-sonnet-5\n---\nPERSONA-BODY-MARKER\n")
         out = self._show_prompt("qa")          # DAIS_SHOW_PROMPT seam + role file dump
         self.assertNotIn("model: claude-sonnet-5", out)
+
+    def test_api_auth_without_key_fails_fast(self):
+        agent = os.path.join(self.root, "projects", "demo", "agents", "qa.md")
+        with open(agent, "w") as f:
+            f.write("---\nauth: api\n---\npersona\n")
+        r = self._run_agent("qa", env={"ANTHROPIC_API_KEY": ""})   # ensure absent
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ANTHROPIC_API_KEY", r.stdout + r.stderr)
+
+    def test_env_file_supplies_key(self):
+        agent = os.path.join(self.root, "projects", "demo", "agents", "qa.md")
+        with open(agent, "w") as f:
+            f.write("---\nauth: api\n---\npersona\n")
+        with open(os.path.join(self.root, ".env"), "w") as f:
+            f.write("ANTHROPIC_API_KEY=sk-test-not-real\n")
+        out = self._show_config("qa")               # preflight passes; config seam prints
+        self.assertIn("auth=api", out)
 
 
 class TestWorkspaceContextInjection(CliTest):
@@ -898,6 +926,15 @@ class TestInitBootstrap(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         with open(keep) as fh:
             self.assertIn("KEEP ME", fh.read())  # the [ ! -f ] guard preserved it
+
+    def test_init_gitignores_env(self):
+        # .env carries secrets (the auth:api key transport) — init must gitignore it,
+        # both on a fresh workspace and one whose .gitignore predates this convention.
+        T = self._fresh_dir()
+        r = dais(self.root, "init", T, env={"HOME": self._neutral_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(T, ".gitignore")) as fh:
+            self.assertIn(".env", fh.read())
 
 
 class TestWorkspaceResolution(CliTest):
