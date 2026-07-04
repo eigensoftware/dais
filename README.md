@@ -64,7 +64,7 @@ Runs on macOS (bash 3.2+) and Linux.
 ## Quickstart
 
 ```sh
-dais scaffold myproject     # create a project from a template (roles + its own machine.json)
+dais scaffold myproject     # create a project from a template (agents/ cast + its own machine.json)
 dais lint myproject         # validate the project config + machine coherence
 dais top                    # live control panel — the primary way to operate the workspace
 dais watch                  # run the loop: agents drain the queue, parking at your gates
@@ -160,20 +160,68 @@ project in `projects/<name>/playbooks/`).
 
 A playbook is bound at the **role** level, so a single project can mix crafts (an `engineer`
 on `code`, a `marketer` on `content`). Resolution is **role wins, project defaults**: the
-role's optional 6th `roles` column → the project's `playbook:` default → built-in `code`.
+role's own frontmatter `playbook:` → the project's `playbook:` default → built-in `code`.
+
+Each role's config — model, effort, provider, auth, scheduling — lives in its own
+`agents/<role>.md`, as a flat `key: value` block between leading `---` markers, above the
+persona prose:
 
 ```
-# roles:  name      access  trigger    handles  prec  playbook
-engineer    edit    reactive   -       20      code
-marketer    draft   every:48h  -       60      content
+---
+provider: openai
+auth: subscription
+trigger: every:48h
+prec: 60
+playbook: content
+---
+# Marketer — myproject
+
+You draft social copy and blog posts from the stage goal...
 ```
 
-(`handles` is legacy and unused — dispatch comes from the machine's edges.) The full prompt an
-agent sees, in escalating specificity: `workspace CONTEXT → project CONTEXT → role playbook →
-role persona`.
+(A bare persona file with no frontmatter is fine — every key falls back down the chain; see
+[Providers](#providers-anthropic--openai) below.) `access` is the exception: it's not a
+frontmatter key — it's owned by `machine.json`'s `roles` block (see
+[machine-model.md](design/machine-model.md#roles)), since it's what `run-agent` enforces.
 
 **Let Claude design a role:** `dais role new <project> --desc "what it does"` proposes a
-persona + routing row from your project's existing roles; you confirm.
+persona + config from your project's existing roles; you confirm.
+
+## Providers: anthropic + openai
+
+Each agent runs against one of two provider CLIs, chosen per-role:
+
+```
+---
+model: gpt-5.1-codex-mini
+provider: openai        # anthropic (default, claude CLI) | openai (codex exec)
+auth: api                # subscription (default, CLI login) | api (metered)
+---
+```
+
+Resolution (frontmatter → legacy roles file → `project.yaml` → defaults) is one authority,
+`router.agent_setup`, read by every consumer (the scheduler, `run-agent.sh`, `dais project`).
+**Model keys are provider-scoped:** a project-wide `model:` in `project.yaml` only applies to
+roles resolved to that project's *default* provider — it never leaks a `claude-opus-4-8` id
+onto a role you've overridden to `provider: openai` (or vice versa). Give a per-role override
+its own `model:` in that role's frontmatter instead.
+
+**`auth: api`** reads the provider's standard key (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) from
+the process environment, then `~/.dais/env`, then `$DAIS_HOME/.env` (workspace override) — first
+one set wins. Never put a key in `project.yaml` or a persona file (`dais lint` warns on
+secret-shaped values); `dais init` gitignores `.env` for you. `auth: subscription` (the default)
+runs the CLI as already logged in — nothing to configure.
+
+**v1 caveats, honestly:**
+- **codex has no per-tool sandbox like claude's.** A `review` or `draft` access role on
+  `provider: openai` can't be restricted to read-only/no-edit the way an anthropic role can —
+  the persona's instructions plus the machine's own guards are the only guard. Don't rely on
+  the sandbox to enforce a reviewer's read-only-ness under codex.
+- **the codex `workspace-write` sandbox blocks writes under `.git/`.** An `openai`-provider
+  engineer can edit files in the repo but cannot `git commit`, branch, or push from inside the
+  sandbox today. That makes `openai` a good fit for reviewer/QA/content roles right now;
+  code-committing roles (engineer) should stay on `anthropic` until a sandbox path around this
+  lands.
 
 ## The CLI
 
@@ -193,10 +241,11 @@ persona + routing row from your project's existing roles; you confirm.
 | `dais tick [project]` | run one scheduling tick (the machine picks who runs) |
 | `dais run <project> <agent>` | run a specific agent now |
 | `dais cancel <project>` | stop the project's in-flight agent (marks the run interrupted) |
-| `dais scaffold <project> [--template coding\|marketing]` | create a project (roles + its own machine) from a template |
+| `dais scaffold <project> [--template coding\|marketing]` | create a project (agents/ cast + its own machine) from a template |
 | `dais role new <project> --desc "…"` | Claude designs a new role (persona + routing); you confirm |
 | `dais lint [project]` | validate a project (roles + project.yaml + playbooks + machine coherence) |
 | `dais migrate` | apply pending DB migrations (run with the loop paused) |
+| `dais migrate --config <project>` | convert a project's legacy roles file into `agents/<role>.md` frontmatter + machine-owned access |
 | `dais schedule install [secs]` | background ticks (launchd on macOS, cron on Linux) |
 | `dais learn <project> "…"` | append a durable decision/gotcha to the project's CONTEXT.md |
 | `dais logs <project> [N]` | recent runs + their saved log paths |
@@ -209,8 +258,9 @@ dais                  the CLI — your control panel and the agents' coordinatio
 harness/
   machine.py          the engine: load/lint a machine, derive dispatch + bands, fire edges (atomic)
   dispatch.sh         scheduler: one tick = pick + run the next agent
-  run-agent.sh        runs an agent headless (claude -p), streams + logs what it changed
-  router.py           parses each project's roles file (cast, cadence, playbooks); roles lint
+  run-agent.sh        runs an agent headless (provider adapter: claude -p or codex exec), streams + logs what it changed
+  router.py           agent_setup() — the one config-resolution authority (frontmatter → legacy roles file → project.yaml → defaults); cast + lint
+  migrate_config.py   `dais migrate --config` — mechanical conversion of a project's legacy roles file into frontmatter + machine-owned access
   dashboard.py        data layer + plain renderers (status/project) + the base TUI action engine
   panel.py            the `dais top` cockpit — the multi-pane renderer on top of dashboard.py
   machines/           the machine templates projects are seeded from (coding, marketing)
@@ -224,10 +274,13 @@ design/
 ```
 
 In a workspace, each project lives under `projects/<name>/`:
-`machine.json` (its authored lifecycle), `project.yaml` (repo, model + effort — with per-role
-overrides — stage goal, optional `playbook:` default), `roles` (who exists + cadence +
-playbook), `agents/*.md` (role personas), `CONTEXT.md` (project memory agents read first), and
-optional `playbooks/` (project-specific craft overrides).
+`machine.json` (its authored lifecycle — and, now, the `roles` block that's authoritative for
+`access`), `project.yaml` (repo, stage goal, optional project-wide `playbook:`/`provider:`
+defaults), `agents/*.md` (the cast — persona prose plus each role's own frontmatter: model,
+effort, provider, auth, trigger, prec, playbook), `CONTEXT.md` (project memory agents read
+first), and optional `playbooks/` (project-specific craft overrides). The legacy `roles` file
+(one row per role: name/access/trigger/handles/prec/playbook) still works this release but is
+retired — `dais migrate --config <project>` converts it.
 
 ## License
 

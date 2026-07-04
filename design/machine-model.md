@@ -41,6 +41,12 @@ roles:
 task parks until you act); `system` = an automatic edge (interrupt rewind, an
 unblocked dependency, a release effect firing a child's edge).
 
+The machine's `roles` values are authoritative for `access` (run-agent enforces from here);
+scheduling/cadence — model, effort, provider, auth, trigger, prec, playbook — lives in each
+agent's own frontmatter (`agents/<role>.md`), resolved by `router.agent_setup` (see the
+README's [Playbooks](../README.md#playbooks-running-any-craft) and
+[Providers](../README.md#providers-anthropic--openai) sections).
+
 ## Schema
 
 ```yaml
