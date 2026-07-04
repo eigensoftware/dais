@@ -178,5 +178,88 @@ class TestFrontmatter(unittest.TestCase):
         self.assertEqual(router.frontmatter(p), {"playbook": "plan"})
 
 
+class TestAgentSetup(unittest.TestCase):
+    """One resolution authority: frontmatter -> legacy roles file -> project.yaml -> defaults;
+    access: machine.json roles -> legacy roles file -> review."""
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="dais-as-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.pdir = os.path.join(self.root, "projects", "demo")
+        os.makedirs(os.path.join(self.pdir, "agents"))
+        with open(os.path.join(self.pdir, "project.yaml"), "w") as f:
+            f.write("project: demo\nrepo: demo\nmodel: claude-opus-4-8\neffort: high\n"
+                    "model_qa: claude-haiku-4-5\nstage_goal: x\n")
+        # a machine whose roles carry access (the new authority)
+        with open(os.path.join(self.pdir, "machine.json"), "w") as f:
+            f.write('{"name":"t","entry":"ready","roles":{"engineer":{"access":"edit"},'
+                    '"qa":{"access":"review"}},'
+                    '"states":{"ready":{"initial":true},"done":{"terminal":true}},'
+                    '"edges":[{"from":"ready","to":"done","by":"engineer","verb":"finish"}]}')
+
+    def _agent(self, role, fm=""):
+        with open(os.path.join(self.pdir, "agents", role + ".md"), "w") as f:
+            f.write((("---\n%s---\n" % fm) if fm else "") + "You are %s.\n" % role)
+
+    def test_frontmatter_wins_over_suffix_key(self):
+        self._agent("qa", "model: claude-sonnet-5\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual(s["model"], "claude-sonnet-5")
+
+    def test_suffix_key_wins_over_project_default(self):
+        self._agent("qa")
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["model"], "claude-haiku-4-5")
+
+    def test_project_default_then_tool_default(self):
+        self._agent("engineer")
+        s = router.agent_setup(self.root, "demo", "engineer")
+        self.assertEqual(s["model"], "claude-opus-4-8")     # project-wide
+        self.assertEqual(s["effort"], "high")
+
+    def test_access_from_machine_roles(self):
+        self._agent("engineer")
+        self.assertEqual(router.agent_setup(self.root, "demo", "engineer")["access"], "edit")
+
+    def test_access_legacy_roles_file_then_review_default(self):
+        self._agent("lead")
+        with open(os.path.join(self.pdir, "roles"), "w") as f:
+            f.write("lead  draft  every:5h  -  3  plan\n")
+        s = router.agent_setup(self.root, "demo", "lead")
+        self.assertEqual(s["access"], "draft")              # legacy roles file (not in machine)
+        self.assertEqual(s["trigger"], "every:5h")
+        self.assertEqual(s["prec"], "3")
+        self.assertEqual(s["playbook"], "plan")
+        os.remove(os.path.join(self.pdir, "roles"))
+        s = router.agent_setup(self.root, "demo", "lead")
+        self.assertEqual(s["access"], "review")             # safe default
+        self.assertEqual(s["trigger"], "reactive")
+        self.assertEqual(s["prec"], "50")
+
+    def test_provider_auth_defaults_and_frontmatter(self):
+        self._agent("qa", "provider: openai\nauth: api\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["provider"], s["auth"]), ("openai", "api"))
+        self._agent("engineer")
+        s = router.agent_setup(self.root, "demo", "engineer")
+        self.assertEqual((s["provider"], s["auth"]), ("anthropic", "subscription"))
+
+    def test_playbook_file_resolved(self):
+        os.makedirs(os.path.join(self.pdir, "playbooks"))
+        with open(os.path.join(self.pdir, "playbooks", "design.md"), "w") as f:
+            f.write("design conventions\n")
+        self._agent("qa", "playbook: design\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertTrue(s["playbook_file"].endswith("projects/demo/playbooks/design.md"))
+
+    def test_cli_mode_prints_key_value_lines(self):
+        self._agent("qa", "model: claude-sonnet-5\n")
+        import subprocess
+        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(router.__file__), "router.py"),
+                              "--agent-config", self.root, "demo", "qa"],
+                             capture_output=True, text=True).stdout
+        self.assertIn("model=claude-sonnet-5", out)
+        self.assertIn("provider=anthropic", out)
+        self.assertIn("access=review", out)
+
+
 if __name__ == "__main__":
     unittest.main()

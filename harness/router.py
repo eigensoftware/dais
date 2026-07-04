@@ -60,6 +60,60 @@ def frontmatter(path):
     return {}          # unterminated block -> treat as no frontmatter
 
 
+AGENT_CONFIG_KEYS = ("model", "effort", "provider", "auth", "access",
+                     "trigger", "prec", "playbook", "playbook_file")
+
+
+def _yaml_line(text, key):
+    """First-line value of `key:` from project.yaml text ('' if absent) — the python twin
+    of lib.sh's pcfg, comment-stripped."""
+    m = re.search(r"(?m)^%s:[ \t]*(.*)$" % re.escape(key), text)
+    return m.group(1).split(" #", 1)[0].strip() if m else ""
+
+
+def agent_setup(root, project, role):
+    """THE resolution authority for how one role runs (spec 2026-07-04): frontmatter ->
+    legacy roles file -> project.yaml (suffix key, then project-wide) -> defaults.
+    access: machine.json roles -> legacy roles file -> 'review' (safe: runs, read-only).
+    Every consumer (run-agent.sh via --agent-config, the scheduler, the dashboard) reads
+    through here so the layers can't drift."""
+    pdir = os.path.join(root, "projects", project)
+    fm = frontmatter(os.path.join(pdir, "agents", role + ".md"))
+    legacy = next((r for r in parse_roles(os.path.join(pdir, "roles"))[0]
+                   if r["name"] == role), {})
+    ytext = ""
+    projyaml = os.path.join(pdir, "project.yaml")
+    if os.path.exists(projyaml):
+        with open(projyaml) as fh:
+            ytext = fh.read()
+
+    provider = fm.get("provider") or _yaml_line(ytext, "provider") or "anthropic"
+    model = (fm.get("model") or _yaml_line(ytext, "model_" + role)
+             or _yaml_line(ytext, "model")
+             or ("claude-opus-4-8" if provider == "anthropic" else ""))
+    effort = (fm.get("effort") or _yaml_line(ytext, "effort_" + role)
+              or _yaml_line(ytext, "effort"))
+    auth = fm.get("auth") or _yaml_line(ytext, "auth") or "subscription"
+
+    access = ""
+    try:
+        import machine as MC
+        m = MC.load(_machine_for(root, project))
+        access = (m.get("roles", {}).get(role, {}) or {}).get("access", "")
+    except Exception:
+        pass                                    # machine lint reports its own problems
+    access = access or str(legacy.get("access", "")) or "review"
+
+    trigger = fm.get("trigger") or str(legacy.get("trigger", "")) or "reactive"
+    prec = fm.get("prec") or (legacy.get("prec_raw", "") if legacy else "") or "50"
+    playbook = (fm.get("playbook") or str(legacy.get("playbook", "") if legacy else "")
+                or _yaml_line(ytext, "playbook") or "code")
+    return {"model": model, "effort": effort, "provider": provider, "auth": auth,
+            "access": access, "trigger": trigger, "prec": str(prec),
+            "playbook": playbook,
+            "playbook_file": _playbook_file(root, project, playbook)}
+
+
 def _machine_for(root, project):
     """The machine a project runs — ALWAYS one (dispatch is unconditionally machine-driven). Primary
     signal: the project's own machine.json (seeded from a workflow template). A `machine:` selector
@@ -240,6 +294,11 @@ def lint(root, project):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--agent-config":
+        s = agent_setup(sys.argv[2], sys.argv[3], sys.argv[4])
+        for k in AGENT_CONFIG_KEYS:
+            print("%s=%s" % (k, s[k]))
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--lint":
         root = sys.argv[2]
         project = sys.argv[3] if len(sys.argv) > 3 else ""
