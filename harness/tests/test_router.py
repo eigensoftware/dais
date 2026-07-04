@@ -2,6 +2,7 @@
 (coding default here): the dispatch role of the top pending task, skipping blocked/parked states and
 tasks waiting on an open dependency (tasks.blocked_on). Cadence roles still run on their clock."""
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -139,6 +140,42 @@ class TestCadence(unittest.TestCase):
         # a proposed task blocked on an open predecessor is NOT reactive; with no cadence lead it idles
         # (proving the blocked task itself didn't trigger a dispatch).
         self.assertIsNone(router.decide(_ws([("a", "proposed", "b"), ("b", "approved")]), "p"))
+
+
+class TestFrontmatter(unittest.TestCase):
+    """Flat `key: value` lines between leading --- markers of a persona file.
+    Line-based on purpose (no YAML library) — nested values are not supported."""
+    def _write(self, text):
+        d = tempfile.mkdtemp(prefix="dais-fm-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p = os.path.join(d, "qa.md")
+        with open(p, "w") as f:
+            f.write(text)
+        return p
+
+    def test_reads_flat_keys(self):
+        p = self._write("---\nmodel: claude-opus-4-8[1m]\ntrigger: every:5h\nprec: 3\n---\nYou are QA.\n")
+        fm = router.frontmatter(p)
+        self.assertEqual(fm["model"], "claude-opus-4-8[1m]")
+        self.assertEqual(fm["trigger"], "every:5h")   # value itself may contain ':'
+        self.assertEqual(fm["prec"], "3")
+
+    def test_inline_comment_stripped(self):
+        p = self._write("---\neffort: high   # crank it\n---\nbody\n")
+        self.assertEqual(router.frontmatter(p)["effort"], "high")
+
+    def test_no_frontmatter_is_empty(self):
+        self.assertEqual(router.frontmatter(self._write("You are QA. No block here.\n")), {})
+
+    def test_unterminated_block_is_empty(self):
+        self.assertEqual(router.frontmatter(self._write("---\nmodel: x\nno closing marker\n")), {})
+
+    def test_missing_file_is_empty(self):
+        self.assertEqual(router.frontmatter("/nonexistent/qa.md"), {})
+
+    def test_blank_and_comment_lines_ignored(self):
+        p = self._write("---\n\n# a comment\nplaybook: plan\n---\nbody\n")
+        self.assertEqual(router.frontmatter(p), {"playbook": "plan"})
 
 
 if __name__ == "__main__":

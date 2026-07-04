@@ -37,6 +37,29 @@ def parse_roles(path):
     return roles, problems
 
 
+def frontmatter(path):
+    """Flat `key: value` lines between leading --- markers of an agents/<role>.md persona.
+    The per-agent config home (model/effort/provider/auth/trigger/prec/playbook). Line-based
+    on purpose — no YAML library (stdlib-only harness), no nesting. Returns {} when the file,
+    the block, or the closing marker is absent; inline ` #` comments are stripped."""
+    fm = {}
+    try:
+        with open(path) as fh:
+            if fh.readline().strip() != "---":
+                return {}
+            for raw in fh:
+                line = raw.strip()
+                if line == "---":
+                    return fm
+                if not line or line.startswith("#") or ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                fm[k.strip()] = v.split(" #", 1)[0].strip()
+    except OSError:
+        return {}
+    return {}          # unterminated block -> treat as no frontmatter
+
+
 def _machine_for(root, project):
     """The machine a project runs — ALWAYS one (dispatch is unconditionally machine-driven). Primary
     signal: the project's own machine.json (seeded from a workflow template). A `machine:` selector
