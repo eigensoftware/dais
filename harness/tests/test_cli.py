@@ -83,6 +83,29 @@ class TestAgentStateSurgery(CliTest):
         r = dais(self.root, "task", "set", "d-1", "--notes", "hello", env={"DAIS_RUN_ID": "7"})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_notes_append_is_the_log(self):
+        # notes are the agents' only channel: --notes APPENDS an attributed, timestamped
+        # entry — a handoff can never clobber the spec the next reader still needs.
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--notes", "SPEC: do the thing")
+        r = dais(self.root, "task", "set", "d-1", "--notes", "handoff: verify A and B",
+                 env={"DAIS_ACTOR": "engineer"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        notes = q(self.root, "SELECT notes FROM tasks WHERE id='d-1'")[0]
+        self.assertIn("SPEC: do the thing", notes)           # prior entry preserved
+        self.assertIn("handoff: verify A and B", notes)
+        self.assertIn("[engineer", notes)                    # attributed to the actor
+        dais(self.root, "task", "set", "d-1", "--notes", "checked")
+        notes = q(self.root, "SELECT notes FROM tasks WHERE id='d-1'")[0]
+        self.assertIn("[founder", notes)                     # a plain shell is the founder
+
+    def test_replace_notes_is_founder_surgery(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--notes", "old spec")
+        dais(self.root, "task", "set", "d-1", "--replace-notes", "clean slate")
+        notes = q(self.root, "SELECT notes FROM tasks WHERE id='d-1'")[0]
+        self.assertEqual(notes, "clean slate")
+
     def test_founder_status_set_still_works(self):
         dais(self.root, "scaffold", "demo")
         dais(self.root, "task", "add", "demo", "x", "--id", "d-1")

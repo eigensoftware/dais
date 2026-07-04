@@ -20,7 +20,7 @@ dais — your agent company control panel
   dais project <name>                 a project's setup: cast + models, machine dispatch map, config
   dais tasks <project> [--assignee A] [--status S]
   dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."]
-  dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."] [--touches-migrations true|false]
+  dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."(appends)] [--replace-notes "..."] [--touches-migrations true|false]
   dais tick [project] [--dry-run]     check the list once: run the most valuable pending task
   dais watch [seconds]                keep checking on an interval (default 900s); Ctrl-C to stop
   dais schedule install|uninstall|status   run the interval in the background (cross-platform)
@@ -191,13 +191,14 @@ MD
         link_run_task "$id" create; echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]" ;;
       set)
         id="$1"; shift
-        sets=""; newst=""; dep=""; depset=0
+        sets=""; newst=""; dep=""; depset=0; notes_add=""
         while [ $# -gt 0 ]; do case "$1" in
           --status)     newst="$2"; sets="$sets, status='$(sqlesc "$2")'"; shift 2;;
           --assignee)   sets="$sets, assignee='$(sqlesc "$2")'"; shift 2;;
           --pr)         sets="$sets, pr_url='$(sqlesc "$2")'"; shift 2;;
           --priority)   sets="$sets, priority='$(sqlesc "$2")'"; shift 2;;
-          --notes)      sets="$sets, notes='$(sqlesc "$2")'"; shift 2;;
+          --notes)      notes_add="$2"; shift 2;;
+          --replace-notes) sets="$sets, notes='$(sqlesc "$2")'"; shift 2;;   # founder surgery: rewrites the log
           --title)      sets="$sets, title='$(sqlesc "$2")'"; shift 2;;
           --touches-migrations)  # release fact: does the encompassed diff touch DB migration files?
                         case "$2" in
@@ -208,6 +209,13 @@ MD
           --depends-on) dep="$2"; depset=1                       # '' clears the dependency
                         sets="$sets, blocked_on=$([ -n "$2" ] && echo "'$(sqlesc "$2")'" || echo NULL)"; shift 2;;
           *) shift;; esac; done
+        # Notes are the task's LOG — the agents' only channel. --notes APPENDS an attributed,
+        # timestamped entry so a handoff can never clobber the spec the next reader needs;
+        # --replace-notes rewrites outright (founder surgery).
+        if [ -n "$notes_add" ]; then
+          entry="[${DAIS_ACTOR:-founder} $(date -u '+%Y-%m-%d %H:%M')] $notes_add"
+          sets="$sets, notes=CASE WHEN notes IS NULL OR notes='' THEN '$(sqlesc "$entry")' ELSE notes || char(10) || char(10) || '$(sqlesc "$entry")' END"
+        fi
         # Agents (DAIS_RUN_ID set by run-agent.sh) never set status — state changes fire edges.
         # Founder shells carry no run id, so founder surgery is untouched.
         if [ -n "$newst" ] && [[ "${DAIS_RUN_ID:-}" =~ ^[0-9]+$ ]]; then

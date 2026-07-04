@@ -10,6 +10,13 @@ just-merged PR is squash-merged and its branch DELETED on the remote, but a stal
 worktree may linger — the dais board is the source of truth for what's merged: if a task is 'done',
 its work IS on origin/main, so build on top of main, never stack on that task's old branch.
 
+Roles run CONCURRENTLY in this repo's one checkout (QA can be reviewing while you build) — never
+work on the shared working tree. Build in an isolated worktree off fresh origin/main:
+`git worktree add .worktrees/<branch> -b <branch> origin/main`, and remove it after the branch
+merges (`git worktree remove .worktrees/<branch>`). Never base one PR on another task's OPEN
+branch: squash-merging the base orphans the child, and deleting the base branch auto-CLOSES the
+child PR. One task, one branch, based on main.
+
 ## Retiring invalid work (don't loop on a false premise)
 
 If a `ready` task you're dispatched turns out to be built on a WRONG premise — the work is already

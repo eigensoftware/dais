@@ -153,6 +153,12 @@ ${MACHINE_COORD}Coordination runs through the dais CLI (at $DAIS_ROOT/dais) back
   - Task metadata:     $DAIS_ROOT/dais task set <id> [--pr <url>] [--notes \"...\"] [--priority <p>]   (metadata ONLY — state changes go through 'dais fire')
   - New task:          $DAIS_ROOT/dais task add $PROJECT \"title\" [--notes \"...\"]   (enters at the machine's entry state)
 
+Notes are how agents communicate: the next agent — or the founder deciding at a gate — reads the task's notes with ZERO memory of your run. Before you stop, leave notes they can act on without re-deriving your work:
+  - concrete over narrative: exact ids, paths, PR urls, commands run
+  - what you VERIFIED vs what you merely believe — mark unverified things as such
+  - what's left / what to check next, as a checklist the next reader executes
+'dais task set --notes' APPENDS your entry to the task's log, attributed and timestamped — never repeat what's already there; add what's new. Task-scoped info belongs in notes; durable lessons belong in 'dais learn', never buried in one task's notes.
+
 Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, fire the edge that hands the work on per your role.${PLAYBOOK}"
 
 # The persona injected into the prompt is the BODY only — frontmatter is config, not prompt.
