@@ -498,5 +498,71 @@ class TestControl(unittest.TestCase):
             self.assertEqual(d.watch_state(root)[0], "stopped")
 
 
+class TestActMachineConditionalAttest(unittest.TestCase):
+    """The panel's greenlight prompt must agree with the engine on a CONDITIONAL attest
+    (`attest:<fact> when task:<flag>`): an explicitly-false flag lifts the prompt, while
+    NULL/unknown still prompts (fail-safe) — the panel elicits exactly what fire() will demand."""
+
+    class _FakeApp:
+        """Stand-in App: real _act_machine logic, stubbed I/O. Records every prompt and the
+        argv it would dispatch."""
+        _act_machine = d.App._act_machine
+
+        def __init__(self, conn):
+            self.conn = conn
+            self.flash = None
+            self.prompts = []
+            self.dispatched = None
+
+        def _prompt(self, label):
+            self.prompts.append(label)
+            if "type the task id" in label:
+                return "rel-1"
+            if "attest" in label:                     # answer the attest prompt honestly
+                return label.split("'")[1]
+            return ""
+
+        def _confirm(self, msg):
+            return True
+
+        def _dispatch_out(self, cmd):
+            self.dispatched = cmd
+            return 0, ""
+
+        def refresh(self):
+            pass
+
+    def _app(self, touches_migrations):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE tasks(id TEXT, project TEXT, status TEXT, title TEXT,"
+                     " assignee TEXT, parked_from TEXT, touches_migrations INTEGER)")
+        conn.execute("INSERT INTO tasks(id,project,status,title,touches_migrations)"
+                     " VALUES('rel-1','acme','release_review','Release: acme',?)",
+                     (touches_migrations,))
+        return self._FakeApp(conn)
+
+    _MACHINE = {"edges": [{"from": "release_review", "to": "releasing", "by": "founder",
+                           "verb": "greenlight",
+                           "guards": ["typed_confirm",
+                                      "attest:migrations_applied when task:touches_migrations"]}]}
+    _TASK = {"id": "rel-1", "status": "release_review"}
+
+    def test_false_flag_skips_the_attest_prompt(self):
+        app = self._app(touches_migrations=0)
+        app._act_machine(self._MACHINE, "greenlight", None, self._TASK)
+        self.assertEqual(len(app.prompts), 1)                       # typed_confirm only
+        self.assertIn("type the task id", app.prompts[0])
+        self.assertIsNotNone(app.dispatched)                        # it DID fire
+        self.assertNotIn("--attest", app.dispatched)
+
+    def test_null_flag_still_prompts(self):
+        app = self._app(touches_migrations=None)
+        app._act_machine(self._MACHINE, "greenlight", None, self._TASK)
+        self.assertTrue(any("attest" in p for p in app.prompts))
+        self.assertIn("--attest", app.dispatched)
+        self.assertIn("migrations_applied", app.dispatched)
+
+
 if __name__ == "__main__":
     unittest.main()

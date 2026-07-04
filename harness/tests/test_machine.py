@@ -315,6 +315,55 @@ class TestConditionalMigrationsAttest(unittest.TestCase):
             M.fire(conn, self.m, rel, "greenlight", "founder", {"typed": rel})
 
 
+class TestAttestFact(unittest.TestCase):
+    """attest_fact(guard, task) is the ONE shared reading of an `attest:` guard — the engine
+    enforces with it and the panel decides whether to PROMPT with it, so the two layers can
+    never disagree on whether a conditional attest is live for a task."""
+    def setUp(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE tasks(id TEXT, touches_migrations INTEGER)")
+        conn.execute("INSERT INTO tasks VALUES('t-0', 0), ('t-1', 1), ('t-n', NULL)")
+        self.row = lambda tid: conn.execute(
+            "SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+
+    def test_unconditional_attest_always_required(self):
+        self.assertEqual(M.attest_fact("attest:migrations_applied", self.row("t-0")),
+                         "migrations_applied")
+
+    def test_false_flag_lifts(self):
+        self.assertIsNone(M.attest_fact(
+            "attest:migrations_applied when task:touches_migrations", self.row("t-0")))
+
+    def test_true_flag_requires(self):
+        self.assertEqual(M.attest_fact(
+            "attest:migrations_applied when task:touches_migrations", self.row("t-1")),
+            "migrations_applied")
+
+    def test_null_flag_requires(self):
+        self.assertEqual(M.attest_fact(
+            "attest:migrations_applied when task:touches_migrations", self.row("t-n")),
+            "migrations_applied")
+
+    def test_missing_column_requires(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE tasks(id TEXT)")
+        conn.execute("INSERT INTO tasks VALUES('t-x')")
+        bare = conn.execute("SELECT * FROM tasks").fetchone()
+        self.assertEqual(M.attest_fact(
+            "attest:migrations_applied when task:touches_migrations", bare),
+            "migrations_applied")
+
+    def test_no_task_row_requires(self):
+        self.assertEqual(M.attest_fact(
+            "attest:migrations_applied when task:touches_migrations", None),
+            "migrations_applied")
+
+    def test_non_attest_guard_is_none(self):
+        self.assertIsNone(M.attest_fact("typed_confirm", self.row("t-1")))
+
+
 class TestAtomicityAndConcurrency(unittest.TestCase):
     """fire() is one transaction: the transition + ALL effects commit together or roll back
     together, and the state change is a compare-and-swap so racing fires can't double-apply."""

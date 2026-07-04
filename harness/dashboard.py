@@ -1311,7 +1311,10 @@ class App:
             return
         # strong-human guards prompt IN the panel — same strength as the CLI flags (you type
         # the task id / the fact name), without dropping to a shell to greenlight a release.
+        # Conditional attests are read through the engine's own predicate against a FRESH task
+        # row, so the panel prompts for exactly what fire() will demand — no more, no less.
         cmd = ["fire", t["id"], verb, "--by", "founder"]
+        task_row = MC._task(self.conn, t["id"])
         prompted = False
         for g in guards:
             if g == "typed_confirm":
@@ -1321,7 +1324,9 @@ class App:
                     return
                 cmd += ["--typed", t["id"]]; prompted = True
             elif g.startswith("attest:"):
-                fact = g.split(":", 1)[1].split(" ")[0]
+                fact = MC.attest_fact(g, task_row)
+                if fact is None:                     # conditional lifted (flag explicitly false)
+                    continue
                 typed = self._prompt(f"attest '{fact}' — type the fact name to assert it")
                 if typed != fact:
                     self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — attestation not given"

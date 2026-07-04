@@ -412,6 +412,28 @@ def _run_check(m, check, task):
         return False
 
 
+def attest_fact(guard, task):
+    """The ONE reading of an `attest:<fact>[ when task:<flag>]` guard, shared by the engine
+    (which enforces it) and the panel (which decides whether to PROMPT for it) — a second
+    hand-rolled parse is how the two layers drift apart. Returns the fact that must be
+    attested for this task row, or None when the guard isn't an attest or its conditional
+    lifts it. The conditional lifts ONLY on a flag that is present AND explicitly falsy —
+    truthy, NULL, a missing column, or no row at all still require the attest (fail-safe:
+    the gate can never be skipped by omission). The release greenlight uses this: `assemble`
+    records `touches_migrations`, so a migration-free release doesn't demand a vacuous
+    migrations attestation."""
+    if not guard.startswith("attest:"):
+        return None
+    fact, _, cond = guard[len("attest:"):].partition(" ")
+    cond = cond.strip()
+    if cond.startswith("when task:") and task is not None:
+        key = cond[len("when task:"):].strip()
+        val = task[key] if key in task.keys() else None
+        if val is not None and not val:              # column present AND falsy → requirement lifts
+            return None
+    return fact
+
+
 def _check_guards(conn, m, edge, task, ctx):
     for g in edge.get("guards", []):
         if g == "confirm":
@@ -424,19 +446,8 @@ def _check_guards(conn, m, edge, task, ctx):
             if _blockers_open(conn, task["id"]):
                 raise GuardFailure("guard `unblocked` unmet (open blocks_parent children remain)")
         elif g.startswith("attest:"):
-            fact, _, cond = g[len("attest:"):].partition(" ")
-            # Optional conditional: `attest:<fact> when task:<flag>`. The attest is required only when
-            # the task's <flag> column is truthy OR unknown (fail-safe); an explicitly-false flag
-            # LIFTS it. The release greenlight uses this: `assemble` records `touches_migrations`, so a
-            # migration-free release doesn't demand a vacuous migrations attestation — but a missing
-            # (NULL) or truthy value still requires it, so the gate can never be skipped by omission.
-            cond = cond.strip()
-            if cond.startswith("when task:"):
-                key = cond[len("when task:"):].strip()
-                val = task[key] if key in task.keys() else None
-                if val is not None and not val:      # column present AND falsy → requirement lifts
-                    continue
-            if not (ctx.get("attest") or {}).get(fact):
+            fact = attest_fact(g, task)
+            if fact and not (ctx.get("attest") or {}).get(fact):
                 raise GuardFailure(f"guard `attest:{fact}` unmet (needs --attest {fact})")
         elif g.startswith("verify:"):
             # an explicit --verify (the firing role asserting it ran the check) wins; else the
