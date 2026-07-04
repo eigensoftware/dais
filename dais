@@ -34,7 +34,7 @@ dais — your agent company control panel
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md
   dais lint [project]                 validate a project (roles + project.yaml + required files)
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
-  dais migrate                        apply pending DB migrations (run with watch paused)
+  dais migrate [--config <project>]     apply DB migrations | convert a project to frontmatter config
   dais scaffold <project> [--template coding|marketing]  bootstrap a project (roles + machine) from a workflow template
   dais role new <project> [--desc "..."] [--yes]  Claude designs a new role (persona + routing); you confirm
   dais version                        which build this machine runs (git tag/commit of the tool checkout)
@@ -91,6 +91,10 @@ MD
     echo "  edit dais.yaml + CONTEXT.md, then: dais scaffold <project>" ;;
 
   migrate)
+    if [ "${1:-}" = "--config" ]; then
+      proj="${2:?usage: dais migrate --config <project>}"
+      exec python3 "$DAIS_ROOT/harness/migrate_config.py" "$DAIS_HOME" "$proj"
+    fi
     db_init; echo "migrations applied (recorded in schema_version). tip: run with 'dais watch' paused." ;;
 
   version|--version|-V)
