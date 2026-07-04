@@ -13,15 +13,18 @@ ROLE="$PDIR/agents/$AGENT.md"
 [ -f "$ROLE" ] || { echo "no role file: $ROLE"; exit 1; }
 
 REPO="$(repo_path "$PROJECT")"
-# Model + effort: a per-role `model_<role>:` / `effort_<role>:` in project.yaml beats the
-# project-wide `model:` / `effort:`; unset effort -> CLI default, so other projects are unaffected.
-MODEL="$(pcfg "$PROJECT" "model_$AGENT")"; [ -n "$MODEL" ] || MODEL="$(pcfg "$PROJECT" model)"
-MODEL="${MODEL:-claude-opus-4-8}"
-EFF="$(pcfg "$PROJECT" "effort_$AGENT")"; [ -n "$EFF" ] || EFF="$(pcfg "$PROJECT" effort)"
+# Per-agent config — resolved by the ONE authority (router.agent_setup): frontmatter in
+# agents/<role>.md -> legacy roles file -> project.yaml -> defaults. See the 2026-07-04 spec.
+CFG="$(python3 "$SELF/router.py" --agent-config "$DAIS_HOME" "$PROJECT" "$AGENT")"
+cfg(){ printf '%s\n' "$CFG" | sed -n "s/^$1=//p" | head -1; }
+MODEL="$(cfg model)"; EFF="$(cfg effort)"
+PROVIDER="$(cfg provider)"; AUTH="$(cfg auth)"
+ACCESS="$(cfg access)"; PB="$(cfg playbook)"; PB_FILE="$(cfg playbook_file)"
 EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
-# Debug seam: print the resolved model/effort and exit WITHOUT calling claude (or touching the
-# repo), so tests can assert per-role config resolution offline.
-if [ "${DAIS_SHOW_CONFIG:-0}" = 1 ]; then echo "model=$MODEL effort=$EFF"; exit 0; fi
+# Debug seam: print the resolved config and exit WITHOUT calling the provider CLI.
+if [ "${DAIS_SHOW_CONFIG:-0}" = 1 ]; then
+  echo "model=$MODEL effort=$EFF provider=$PROVIDER auth=$AUTH access=$ACCESS playbook=$PB"; exit 0
+fi
 [ -d "$REPO" ] || { echo "repo not found: $REPO"; exit 1; }
 git -C "$REPO" fetch -q origin 2>/dev/null || true   # always work against current origin
 # Keep the local default branch current. The fetch above only moves origin/* refs, but agents read
@@ -71,16 +74,9 @@ WS_CONTEXT=""
 [ -f "$DAIS_HOME/CONTEXT.md" ] && WS_CONTEXT="Workspace context: FIRST read $DAIS_HOME/CONTEXT.md — company-wide rules and founder decisions that apply to EVERY project (honor them). THEN read the project's $PDIR/CONTEXT.md.
 
 "
-# Working conventions (playbook): the craft-specific "how work is done here", bound at the ROLE level
-# so one harness runs many domains. Resolution — role's 6th `roles` column → project.yaml `playbook:`
-# → built-in 'code'; file — explicit path → projects/<proj>/playbooks/<name>.md → harness/playbooks/.
-PB="$(awk -v r="$AGENT" '!/^#/ && $1==r {print $6; exit}' "$PDIR/roles" 2>/dev/null)"
-[ -n "$PB" ] || PB="$(pcfg "$PROJECT" playbook)"
-[ -n "$PB" ] || PB="code"
-PB_FILE=""
-for cand in "$PB" "$PDIR/playbooks/$PB.md" "$DAIS_ROOT/harness/playbooks/$PB.md"; do
-  [ -f "$cand" ] && { PB_FILE="$cand"; break; }
-done
+# Working conventions (playbook): the craft-specific "how work is done here", bound at the ROLE
+# level so one harness runs many domains. PB/PB_FILE are resolved above via router.agent_setup
+# (frontmatter -> legacy roles file -> project.yaml `playbook:` -> built-in 'code').
 PLAYBOOK=""
 [ -n "$PB_FILE" ] && PLAYBOOK="
 
@@ -127,20 +123,20 @@ ${MACHINE_COORD}Coordination runs through the dais CLI (at $DAIS_ROOT/dais) back
 
 Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, fire the edge that hands the work on per your role.${PLAYBOOK}"
 
+# The persona injected into the prompt is the BODY only — frontmatter is config, not prompt.
+PERSONA="$(awk 'NR==1 && $0=="---" {infm=1; next} infm && $0=="---" {infm=0; next} !infm' "$ROLE")"
+
 # Debug seam: dump the assembled agent prompt and exit, WITHOUT calling claude. Lets tests
 # assert prompt wiring (e.g. workspace-context injection) without an end-to-end model run.
 if [ "${DAIS_SHOW_PROMPT:-0}" = 1 ]; then
   printf '%s\n' "$STANDING"
+  printf '%s\n' "$PERSONA"
   exit 0
 fi
 
-# Permissions come from the role's `access` in the project's roles config:
+# Permissions come from the resolved access (machine.json roles -> legacy roles file -> review):
 #   edit  -> may modify the repo (bypass).
-#   review/draft/none/unknown -> read-only on code (Edit/Write/NotebookEdit hard-disallowed),
-#     so reviewers (qa, gc) and content roles structurally can't change the codebase.
-# Bash is still broad (full OS isolation is a future step); the universal founder-gate covers
-# every outward action. The harness dir is NOT mounted — agents coordinate only via `dais`.
-ACCESS="$(awk -v r="$AGENT" '!/^#/ && $1==r {print $2}' "$PDIR/roles" 2>/dev/null | head -1)"
+#   review/draft/none/unknown -> read-only on code (Edit/Write/NotebookEdit hard-disallowed).
 PERM=(--permission-mode bypassPermissions)
 case "$ACCESS" in
   edit) : ;;
@@ -154,7 +150,7 @@ cd "$REPO" || { echo "cd failed"; exit 1; }
 # garble the console — the full log file is still written. pipefail keeps claude's exit code.
 run_claude(){
   claude -p "$STANDING" \
-        --append-system-prompt "$(cat "$ROLE")" \
+        --append-system-prompt "$PERSONA" \
         --model "$MODEL" \
         ${EFFORT_FLAG[@]+"${EFFORT_FLAG[@]}"} \
         "${PERM[@]}" \

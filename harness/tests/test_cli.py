@@ -407,9 +407,20 @@ class TestPerRoleModelOverride(CliTest):
     """project.yaml `model_<role>:` / `effort_<role>:` override the project-wide `model:` /
     `effort:` for that role only; roles without an override keep the project default. Asserted
     via the DAIS_SHOW_CONFIG=1 debug seam (prints the resolved model/effort, exits pre-claude
-    and pre-repo-guard, so no repo scaffolding is needed)."""
+    and pre-repo-guard, so no repo scaffolding is needed). This class also covers frontmatter
+    precedence, provider/auth/access resolution, and persona-frontmatter stripping (the latter
+    via DAIS_SHOW_PROMPT, which sits past the repo-existence guard, so setUp gives it a repo)."""
 
-    def _config(self, agent):
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")   # template default: model claude-opus-4-8, effort high
+        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as fh:
+            fh.write("model_qa: claude-haiku-4-5\neffort_qa: low\n")
+        self.repo_base = tempfile.mkdtemp(prefix="dais-repos-")
+        self.addCleanup(shutil.rmtree, self.repo_base, ignore_errors=True)
+        os.makedirs(os.path.join(self.repo_base, "demo"))
+
+    def _show_config(self, agent):
         e = dict(os.environ)
         e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
                   "DAIS_SHOW_CONFIG": "1"})
@@ -418,22 +429,50 @@ class TestPerRoleModelOverride(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r.stdout
 
+    def _show_prompt(self, agent):
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_AGENT_REPOS": self.repo_base, "DAIS_SHOW_PROMPT": "1"})
+        r = subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", agent],
+                           capture_output=True, text=True, env=e, cwd=self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
     def test_role_override_beats_project_default(self):
-        dais(self.root, "scaffold", "demo")   # template default: model claude-opus-4-8, effort high
-        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as fh:
-            fh.write("model_qa: claude-haiku-4-5\neffort_qa: low\n")
-        qa = self._config("qa")
+        qa = self._show_config("qa")
         self.assertIn("model=claude-haiku-4-5", qa)
         self.assertIn("effort=low", qa)
-        eng = self._config("engineer")        # no override -> project default untouched
+        eng = self._show_config("engineer")        # no override -> project default untouched
         self.assertIn("model=claude-opus-4-8", eng)
         self.assertIn("effort=high", eng)
 
     def test_project_default_without_override_keys(self):
-        dais(self.root, "scaffold", "demo")
-        out = self._config("engineer")
+        out = self._show_config("engineer")
         self.assertIn("model=claude-opus-4-8", out)
         self.assertIn("effort=high", out)
+
+    def test_frontmatter_model_beats_suffix_key(self):
+        # project.yaml says model_qa: claude-haiku-4-5 (set in setUp); frontmatter wins
+        agent = os.path.join(self.root, "projects", "demo", "agents", "qa.md")
+        with open(agent) as f:
+            body = f.read()
+        with open(agent, "w") as f:
+            f.write("---\nmodel: claude-sonnet-5\n---\n" + body)
+        out = self._show_config("qa")
+        self.assertIn("model=claude-sonnet-5", out)
+
+    def test_show_config_includes_provider_auth_access(self):
+        out = self._show_config("qa")
+        self.assertIn("provider=anthropic", out)
+        self.assertIn("auth=subscription", out)
+        self.assertIn("access=", out)
+
+    def test_frontmatter_stripped_from_prompt(self):
+        agent = os.path.join(self.root, "projects", "demo", "agents", "qa.md")
+        with open(agent, "w") as f:
+            f.write("---\nmodel: claude-sonnet-5\n---\nPERSONA-BODY-MARKER\n")
+        out = self._show_prompt("qa")          # DAIS_SHOW_PROMPT seam + role file dump
+        self.assertNotIn("model: claude-sonnet-5", out)
 
 
 class TestWorkspaceContextInjection(CliTest):
