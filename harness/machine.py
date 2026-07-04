@@ -439,9 +439,9 @@ def _id_prefix(conn, project):
              conn.execute("SELECT DISTINCT id FROM tasks WHERE project<>? AND id LIKE '%-%'",
                           (project,))}
     for cand in _prefix_candidates(project):
-        # PREFIX-FREE, not merely unequal: dai- taken makes dais- a conflict (and vice
-        # versa) — dai-9 vs dais-9 is visually ambiguous even though the strings differ.
-        if not any(t.startswith(cand) or cand.startswith(t) for t in taken):
+        # uniqueness is EXACT-match (founder decision 2026-07-04: dai- beside dais- is
+        # fine) — only a literal prefix collision forces a variation.
+        if cand not in taken:
             return cand
     return project[:3]                                   # unreachable in practice; backstop
 
