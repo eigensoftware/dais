@@ -20,6 +20,7 @@ dais — your agent company control panel
   dais project <name>                 a project's setup: cast + models, machine dispatch map, config
   dais tasks <project> [--assignee A] [--status S]
   dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."]
+  dais task show <id>                 the full record: fields + links + the notes log
   dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."(appends)] [--replace-notes "..."] [--touches-migrations true|false]
   dais tick [project] [--dry-run]     check the list once: run the most valuable pending task
   dais watch [seconds]                keep checking on an interval (default 900s); Ctrl-C to stop
@@ -161,6 +162,19 @@ MD
   task)
     sub="${1:?task add|set}"; shift 2>/dev/null || true
     case "$sub" in
+      show)
+        # the FULL record in one command — fields, links, the notes log — so agents never
+        # spelunk dais.db with find/.schema (a third of QA tool calls before this existed).
+        id="${1:?usage: dais task show <id>}"
+        [ -n "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$id")';")" ] || { echo "no task: $id"; exit 1; }
+        cols="id, project, title, status, priority, assignee, pr_url, created_at, updated_at"
+        has_blocked_on && cols="$cols, blocked_on"
+        [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='touches_migrations';" 2>/dev/null)" ] && cols="$cols, touches_migrations"
+        db -line "SELECT $cols FROM tasks WHERE id='$(sqlesc "$id")';"
+        links="$(db "SELECT rel || ' -> ' || child_id FROM task_links WHERE parent_id='$(sqlesc "$id")'
+                     UNION ALL SELECT rel || ' <- ' || parent_id FROM task_links WHERE child_id='$(sqlesc "$id")';" 2>/dev/null)"
+        [ -n "$links" ] && { echo; echo "links:"; printf '%s\n' "$links" | sed 's/^/  /'; }
+        echo; echo "notes:"; db "SELECT COALESCE(NULLIF(notes,''),'(none)') FROM tasks WHERE id='$(sqlesc "$id")';" ;;
       add)
         proj="${1:?usage: dais task add <project> \"title\" [--id X] [--priority P] [--status S] [--assignee A] [--notes \"...\"] [--depends-on ID]}"; shift
         id=""; title=""; pri="medium"; st=""; asg=""; notes=""; dep=""

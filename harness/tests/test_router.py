@@ -362,6 +362,15 @@ class TestLintTransitionWarnings(unittest.TestCase):
         _, warns = router.lint_project(self.root, "demo")
         self.assertTrue(any("ghost" in w and "machine" in w for w in warns))
 
+    def test_warns_on_oversized_context(self):
+        # a bloated CONTEXT.md is injected into EVERY agent run and silently truncated by
+        # the Read cap — the log miners found 25K tokens/run burned on a file agents could
+        # only half-read. Lint catches it before it taxes every run.
+        with open(os.path.join(self.pdir, "CONTEXT.md"), "w") as f:
+            f.write("x" * 40000)
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("CONTEXT.md" in w and "every agent run" in w for w in warns))
+
     def test_warns_on_secret_shaped_value(self):
         self._agent("qa", "model: claude-opus-4-8\n")
         with open(os.path.join(self.pdir, "project.yaml"), "a") as f:

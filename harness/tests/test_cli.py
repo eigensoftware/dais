@@ -106,6 +106,25 @@ class TestAgentStateSurgery(CliTest):
         notes = q(self.root, "SELECT notes FROM tasks WHERE id='d-1'")[0]
         self.assertEqual(notes, "clean slate")
 
+    def test_task_show_is_the_full_record(self):
+        # one command answers "what is this task" — fields, links, the notes log — so
+        # agents stop spelunking dais.db with find/.schema (a third of QA tool calls).
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "The work", "--id", "d-1", "--notes", "SPEC: bar")
+        dais(self.root, "task", "set", "d-1", "--pr", "https://x/pull/9",
+             "--notes", "handoff: verify A", env={"DAIS_ACTOR": "engineer"})
+        r = dais(self.root, "task", "show", "d-1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for needle in ("The work", "proposed", "https://x/pull/9", "SPEC: bar",
+                       "handoff: verify A", "[engineer"):
+            self.assertIn(needle, r.stdout)
+
+    def test_task_show_unknown_id_fails(self):
+        dais(self.root, "scaffold", "demo")
+        r = dais(self.root, "task", "show", "nope-1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no task", r.stdout + r.stderr)
+
     def test_founder_status_set_still_works(self):
         dais(self.root, "scaffold", "demo")
         dais(self.root, "task", "add", "demo", "x", "--id", "d-1")

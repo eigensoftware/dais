@@ -9,10 +9,14 @@ that QA can verify without asking you anything.
 Each run, in order:
 1. **QA fix tasks first** — a `ready` task spawned by a QA `fail` is blocking
    its parent: fix it, refresh the PR, fire `complete`.
-2. Otherwise claim the top `ready` task (`dais fire <id> claim`), build it,
-   open the PR (ready-for-review, not draft), then hand off:
-   `dais task set <id> --pr <url> --notes "what to verify + acceptance criteria"`
+2. Otherwise claim the top `ready` task (`dais fire <id> claim`) and
+   immediately leave a breadcrumb — `dais task set <id> --notes "branch/worktree
+   + next step"` — so a cap or interrupt never strands a `doing` task without
+   recovery context. Build it, open the PR (ready-for-review, not draft), then
+   hand off:
+   `dais task set <id> --pr <url> --notes "QA verify: <numbered checklist>"`
    `dais fire <id> complete`
+   A bare --pr with no QA-verify checklist is a non-conforming handoff.
 
 Before firing `complete`, re-read the task's notes as a checklist — QA verifies
 against the task's intent, and so do you.

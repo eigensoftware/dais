@@ -150,6 +150,7 @@ ${WS_CONTEXT}Project context + memory: FIRST read $PDIR/CONTEXT.md — the goal,
 ${MACHINE_COORD}Coordination runs through the dais CLI (at $DAIS_ROOT/dais) backed by a shared SQLite db — that is the single source of truth for what to work on and how to hand off:
   - Your queue:        $DAIS_ROOT/dais tasks $PROJECT --assignee $AGENT
   - All project tasks: $DAIS_ROOT/dais tasks $PROJECT
+  - A task's FULL record (fields + links + the notes log): $DAIS_ROOT/dais task show <id>   — read this BEFORE working a task; never query dais.db directly
   - Task metadata:     $DAIS_ROOT/dais task set <id> [--pr <url>] [--notes \"...\"] [--priority <p>]   (metadata ONLY — state changes go through 'dais fire')
   - New task:          $DAIS_ROOT/dais task add $PROJECT \"title\" [--notes \"...\"]   (enters at the machine's entry state)
 

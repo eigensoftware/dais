@@ -233,8 +233,15 @@ def lint_project(root, project):
         if re.search(r"\bsk-(ant|proj)?-?[A-Za-z0-9_-]{16,}", text):
             warnings.append("possible secret in project.yaml — keys belong in the "
                             "environment (~/.dais/env), never in config files")
-    if not os.path.exists(os.path.join(root, "projects", project, "CONTEXT.md")):
+    ctx = os.path.join(root, "projects", project, "CONTEXT.md")
+    if not os.path.exists(ctx):
         warnings.append("no CONTEXT.md (agents read it first for project memory)")
+    elif os.path.getsize(ctx) > 24000:
+        warnings.append("CONTEXT.md is %dKB — it is read at the start of every agent run and a "
+                        "bloated one gets silently TRUNCATED by the reader's cap (agents pay the "
+                        "tokens and still miss the bottom half). Keep it a tight quick-reference; "
+                        "move bulk to on-demand docs the CONTEXT points at."
+                        % (os.path.getsize(ctx) // 1000))
 
     # THE invariant: each handled status maps to exactly one SCHEDULABLE role. Any role with `handles`
     # reactively owns those statuses (including a cadence role like the lead, which also runs on its
