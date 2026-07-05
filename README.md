@@ -36,31 +36,47 @@ tool can drive any number of independent workspaces.
 
 ## Install
 
+**1. Get the `dais` CLI** (Homebrew, recommended, or from source).
+
+Homebrew:
+
+```sh
+brew install eigensoftware/dais/dais       # or: brew tap eigensoftware/dais && brew install dais
+```
+
+Update later with `brew upgrade eigensoftware/dais/dais`.
+
+From source (a clone you can hack on):
+
 ```sh
 git clone https://github.com/eigensoftware/dais ~/dais
 mkdir -p ~/.local/bin && ln -s ~/dais/dais ~/.local/bin/dais   # put `dais` on your PATH (a pointer, not a copy)
-
-dais init ~/my-workspace                     # bootstrap a workspace: board + dais.yaml + CONTEXT.md + projects/
-mkdir -p ~/.dais && echo "home=$HOME/my-workspace" > ~/.dais/config   # make it your default DAIS_HOME
 ```
 
 `~/.local/bin` must be on your `PATH`. If `dais` isn't found after the symlink, add it (then restart
 the shell): `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc`. Or symlink into a dir already on
-your PATH (e.g. `/usr/local/bin`), or just call `~/dais/dais` directly.
+your PATH (e.g. `/usr/local/bin`), or just call `~/dais/dais` directly. Update any time with `git pull`
+in `~/dais`; the symlink reflects it instantly.
+
+**2. Bootstrap a workspace:**
+
+```sh
+dais init ~/my-workspace                     # board + dais.yaml + CONTEXT.md + projects/
+mkdir -p ~/.dais && echo "home=$HOME/my-workspace" > ~/.dais/config   # make it your default DAIS_HOME
+```
 
 `dais init` is the step that creates the workspace: without it you get a board and `projects/` but
 no `dais.yaml` or workspace `CONTEXT.md` (the latter is injected into every agent run). It's idempotent,
 so you can re-run it on an existing folder to backfill anything missing.
 
-Prefer a **self-contained** install (tool and workspace in one folder)? Run `dais init ~/dais` and skip
-the `~/.dais/config` line: with no config, `DAIS_HOME` falls back to the clone (`DAIS_ROOT`).
-
-Update the tool any time with `git pull` in `~/dais`; the symlink reflects it instantly.
+Prefer a **self-contained** install from source (tool and workspace in one folder)? Run `dais init ~/dais`
+and skip the `~/.dais/config` line: with no config, `DAIS_HOME` falls back to the clone (`DAIS_ROOT`).
 
 **Requirements:** `sqlite3`, `python3` (stdlib only), and the [Claude Code](https://claude.com/claude-code)
 CLI (`claude`) for the agents. Add OpenAI's [`codex`](https://github.com/openai/codex) CLI if any role
 sets `provider: openai`, and `gh` is recommended (the coding playbook has agents open PRs with it).
-Runs on macOS (bash 3.2+) and Linux.
+`brew install` alone won't run agents; those CLIs are what actually drive them. Runs on macOS
+(bash 3.2+) and Linux.
 
 ## Quickstart
 
