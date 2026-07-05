@@ -3,4 +3,3 @@ repo: __PROJECT__
 model: claude-opus-4-8
 effort: high
 stage_goal: Describe the current campaign/content milestone for __PROJECT__ here.
-active_agents: strategist writer editor

@@ -86,8 +86,10 @@ proposed ──submit──▶ proposal_review ──approve ◆──▶ spawns
    (lead specs it)      (front-door founder gate;  request_changes bounces it back)
 
 ready ──claim──▶ doing ──complete──▶ qa_review ──pass ✓tests──▶ approved (parked for a release)
-                                         └──fail──▶ blocked + a spawned fix task;
-                                                    auto-returns to qa_review when the fix lands
+   │                                     └──fail──▶ blocked + a spawned fix task;
+   │                                                auto-returns to qa_review when the fix lands
+   └──needs_design──▶ design ──design_done──▶ ready (spec in hand; review-only
+                        tasks close via review_done, findings in the notes)
 
 release_open ──assemble──▶ release_review ──greenlight ◆──▶ releasing ──shipped──▶ done
   (aggregates every        (back-door founder gate:         (the release and everything

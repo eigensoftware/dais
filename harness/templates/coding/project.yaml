@@ -4,4 +4,3 @@ github: your-org/__PROJECT__
 model: claude-opus-4-8
 effort: high
 stage_goal: Describe the current milestone for __PROJECT__ here.
-active_agents: lead engineer qa

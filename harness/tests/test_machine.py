@@ -58,6 +58,7 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(M.dispatch_role(m, "proposed"), "lead")
         self.assertEqual(M.dispatch_role(m, "ready"), "engineer")
         self.assertEqual(M.dispatch_role(m, "qa_review"), "qa")
+        self.assertEqual(M.dispatch_role(m, "design"), "designer")  # the design lane
         self.assertIsNone(M.dispatch_role(m, "proposal_review"))  # awaits founder (human)
         self.assertIsNone(M.dispatch_role(m, "done"))             # terminal
 
