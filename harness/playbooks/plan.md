@@ -22,3 +22,9 @@ notes: **WHAT** · **WHY NOW** · **EXPECTED IMPACT** · **SCOPE & COST** · **A
 title is not a proposal.
 
 Do ONE coherent planning unit this run, then stop.
+
+CONTEXT.md hygiene is yours: it is read at the start of EVERY agent run, so a bloated one taxes
+every run and gets silently truncated (`dais lint` warns when it grows too big). When the
+learnings log passes ~20 entries, distill it: promote recurring traps/rules into the Gotchas
+section (≤2 lines each), move the rest verbatim into the project's LEARNINGS.md archive, keep
+the last handful of recent entries. Never delete a learning — archive it.
