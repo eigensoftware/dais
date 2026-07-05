@@ -160,6 +160,8 @@ Notes are how agents communicate: the next agent — or the founder deciding at 
   - what's left / what to check next, as a checklist the next reader executes
 'dais task set --notes' APPENDS your entry to the task's log, attributed and timestamped — never repeat what's already there; add what's new. Task-scoped info belongs in notes; durable lessons belong in 'dais learn', never buried in one task's notes.
 
+Each shell command starts in a FRESH working directory — use absolute paths everywhere; never rely on a prior 'cd' having stuck.
+
 Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, fire the edge that hands the work on per your role.${PLAYBOOK}"
 
 # The persona injected into the prompt is the BODY only — frontmatter is config, not prompt.

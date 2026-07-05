@@ -679,9 +679,21 @@ def _apply_effect(conn, m, task, edge, result, ctx):
 
 
 def _effect_spawn(conn, task, sp, result):
-    """spawn: create a linked child task (a fix, an impl from a proposal, a rollback)."""
+    """spawn: create a linked child task (a fix, an impl from a proposal, a rollback).
+    The child INHERITS the parent's notes — the spec the founder approved travels to the
+    [impl] task, and QA-fail findings travel to the fix task — so nobody ever pulls a bare
+    title from `ready` (notes column arrives by base schema; degrade gracefully without it)."""
     title = f"[{sp.get('template','task')}] {task['title']}"
-    cid = _insert_task(conn, task["project"], title, sp["initial"], sp.get("by"))
+    extra = {}
+    try:
+        row = conn.execute("SELECT notes FROM tasks WHERE id=?", (task["id"],)).fetchone()
+        inherited = f"[inherited from {task['id']}]"
+        if row and row[0]:
+            inherited += "\n" + row[0]
+        extra["notes"] = inherited
+    except sqlite3.OperationalError:
+        pass                                   # unmigrated db without a notes column
+    cid = _insert_task(conn, task["project"], title, sp["initial"], sp.get("by"), extra=extra)
     rel = {"from_proposal": "spawned_from", "blocks_parent": "blocks_parent",
            "part_of": "part_of"}.get(sp.get("rel"), "spawned_from")
     conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,?)",

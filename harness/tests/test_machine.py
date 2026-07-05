@@ -407,6 +407,40 @@ class TestPromptsFor(unittest.TestCase):
         self.assertEqual(ps, [{"kind": "verify", "check": "tests_pass", "declared": True}])
 
 
+class TestSpawnInheritsNotes(unittest.TestCase):
+    """A spawn effect copies the parent's notes into the child: the spec the founder approved
+    travels to the [impl] build task, and QA-fail findings travel to the spawned fix task —
+    the engineer never pulls a bare title (the lead-miner's empty-ready-notes finding)."""
+    def setUp(self):
+        self.conn = _db()
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT")
+        self.m = M.load(CODING)
+
+    def test_approve_spawn_carries_the_spec(self):
+        p = M.create_task(self.conn, self.m, "proj", "big idea", notes="WHAT: x\nACCEPTANCE: y")
+        M.fire(self.conn, self.m, p, "submit", "lead")
+        r = M.fire(self.conn, self.m, p, "approve", "founder", {"confirm": True})
+        child = r["spawned"][0]["id"]
+        notes = self.conn.execute("SELECT notes FROM tasks WHERE id=?", (child,)).fetchone()[0]
+        self.assertIn("ACCEPTANCE: y", notes)
+        self.assertIn(p, notes)                    # provenance: names the parent
+
+    def test_noteless_parent_spawns_clean(self):
+        p = M.create_task(self.conn, self.m, "proj", "bare")
+        M.fire(self.conn, self.m, p, "submit", "lead")
+        r = M.fire(self.conn, self.m, p, "approve", "founder", {"confirm": True})
+        child = r["spawned"][0]["id"]
+        notes = self.conn.execute("SELECT notes FROM tasks WHERE id=?", (child,)).fetchone()[0]
+        self.assertIn(p, notes or "")              # provenance survives even without a spec
+
+    def test_unmigrated_db_spawns_without_notes(self):
+        conn = _db()                               # no notes column at all
+        p = M.create_task(conn, self.m, "proj", "idea")
+        M.fire(conn, self.m, p, "submit", "lead")
+        r = M.fire(conn, self.m, p, "approve", "founder", {"confirm": True})
+        self.assertTrue(r["spawned"])              # degrade gracefully, never crash
+
+
 class TestIdPrefixes(unittest.TestCase):
     """Auto-id prefixes are unique per project: a project KEEPS the prefix it owns (has the
     oldest task using it — ids are identity, history never re-labels), a collision loser
