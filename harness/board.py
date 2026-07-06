@@ -167,15 +167,14 @@ def project_field(root, name, key):
 
 
 def agent_model(root, project, agent):
-    """The (model, effort) run-agent.sh will resolve for this project's agent: a per-role
-    `model_<agent>:` / `effort_<agent>:` beats the project-wide `model:` / `effort:`; the tool
-    default is claude-opus-4-8, effort '' (the CLI default). Mirrors run-agent.sh so what the
-    panel shows is what a run actually uses."""
-    model = (project_field(root, project, "model_" + agent)
-             or project_field(root, project, "model") or "claude-opus-4-8")
-    effort = (project_field(root, project, "effort_" + agent)
-              or project_field(root, project, "effort"))
-    return model, effort
+    """The (model, effort) a run will actually use — reads through router.agent_setup, THE
+    resolution authority (frontmatter -> legacy roles file -> project.yaml -> defaults), so
+    the panel can't drift from what run-agent.sh resolves. (The old body re-implemented the
+    pre-frontmatter project.yaml scheme and showed the stale default once a role's .md
+    frontmatter overrode `model:`.)"""
+    import router
+    s = router.agent_setup(root, project, agent)
+    return s["model"], s["effort"]
 
 
 def stage_goal(root, name):
