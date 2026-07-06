@@ -122,6 +122,36 @@ class TestBandsAndActions(unittest.TestCase):
         self.assertEqual(acts["__start"]["by"], "engineer")
 
 
+class TestAssigneeStamp(unittest.TestCase):
+    """The first AGENT to fire an edge on an unassigned task stamps itself as assignee, so
+    archived tasks record their worker. Explicit assignments are never overwritten; founder
+    edges don't claim authorship."""
+    def setUp(self):
+        self.conn = _db()
+        self.m = M.load(CODING)
+
+    def _row(self, tid):
+        return self.conn.execute("SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()
+
+    def test_agent_fire_stamps_empty_assignee(self):
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) "
+                          "VALUES('t1','proj','x','ready')")
+        M.fire(self.conn, self.m, "t1", "claim", "engineer")
+        self.assertEqual(self._row("t1")["assignee"], "engineer")
+
+    def test_explicit_assignee_is_not_overwritten(self):
+        self.conn.execute("INSERT INTO tasks(id,project,title,status,assignee) "
+                          "VALUES('t2','proj','x','ready','designer')")
+        M.fire(self.conn, self.m, "t2", "claim", "engineer")
+        self.assertEqual(self._row("t2")["assignee"], "designer")
+
+    def test_founder_fire_does_not_stamp(self):
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) "
+                          "VALUES('t3','proj','x','ready')")
+        M.fire(self.conn, self.m, "t3", "defer", "founder")
+        self.assertFalse((self._row("t3")["assignee"] or "").strip())
+
+
 class TestHistoryPark(unittest.TestCase):
     """deferred is a HISTORY state: undefer returns a task to wherever it was parked from —
     a proposal back to proposed (never skipping the front gate), a build task back to ready."""

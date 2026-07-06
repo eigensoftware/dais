@@ -633,6 +633,12 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         if cas.rowcount != 1:                       # someone else moved it between read and write
             raise GuardFailure(f"task {tid} left state {task['status']!r} concurrently — "
                                f"re-check with: dais edges {tid}")
+        # Log WHO worked it: the first AGENT to fire an edge on an unassigned task stamps itself
+        # as assignee, so archived tasks record their worker even when filing skipped --assignee.
+        # Explicit assignments are never overwritten; founder/system edges (approve/defer/cancel)
+        # are gate/surgery actions, not authorship. (Routing ignores assignee — display only.)
+        if actor not in ("founder", "system") and not (task["assignee"] or "").strip():
+            conn.execute("UPDATE tasks SET assignee=? WHERE id=?", (actor, tid))
         if (m or {}).get("states", {}).get(to, {}).get("history"):
             try:  # entering a history state — remember where from, so @history can return there
                 conn.execute("UPDATE tasks SET parked_from=? WHERE id=?", (task["status"], tid))
