@@ -79,6 +79,7 @@ class Run:
     log_path: str = None
     dur_min: int = None
     project: str = None
+    model: str = None         # the model the run launched with (runs.model, migration 0006); None pre-migration
     id: int = None            # runs.id — needed to join the authoritative run_tasks links
     task_ids: tuple = ()      # tasks this run touched (from run_tasks); () when unlinked/pre-migration
     claim: str = None         # the task this run picked up (verb='claim'), if any — else None
@@ -248,6 +249,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
     now = now or utc_now()
     projects = []
     dep = ",blocked_on" if _has_column(conn, "tasks", "blocked_on") else ""
+    mcol = ",model" if _has_column(conn, "runs", "model") else ""    # migration 0006
     # Projects to render = those configured on disk (a dir under projects/ with a project.yaml —
     # the marker lint requires; the roles file is legacy and optional) UNIONed with any project
     # referenced by a task. The union keeps a configured-but-taskless project visible in the
@@ -271,11 +273,12 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 pr_url=r["pr_url"], notes=r["notes"], updated_at=r["updated_at"],
                 blocked_on=(r["blocked_on"] if dep else None)))
         run_rows = conn.execute(
-            "SELECT id,started_at,ended_at,agent,status,summary,log_path FROM runs "
+            "SELECT id,started_at,ended_at,agent,status,summary,log_path" + mcol + " FROM runs "
             "WHERE project=? ORDER BY id DESC LIMIT ?", (name, recent)).fetchall()
         proj_runs = [Run(id=r["id"], started_at=r["started_at"], agent=r["agent"],
                          status=r["status"], summary=r["summary"],
                          log_path=r["log_path"], project=name,
+                         model=(r["model"] if mcol else None),
                          dur_min=minutes_between(r["started_at"], r["ended_at"]))
                      for r in run_rows]
         attach_run_tasks(conn, proj_runs)
@@ -301,12 +304,13 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 t.blocked = bool(t.blocked_on) and \
                     status_by_id.get(t.blocked_on) not in (None, "done", "cancelled")
     grows = conn.execute(
-        "SELECT id,started_at,ended_at,project,agent,status,summary,log_path FROM runs "
+        "SELECT id,started_at,ended_at,project,agent,status,summary,log_path" + mcol + " FROM runs "
         "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()
     recent_runs = [Run(id=r["id"], started_at=r["started_at"],
                        agent=f"{r['project']}/{r['agent']}",
                        status=r["status"], summary=r["summary"],
                        log_path=r["log_path"], project=r["project"],
+                       model=(r["model"] if mcol else None),
                        dur_min=minutes_between(r["started_at"], r["ended_at"]))
                    for r in grows]
     attach_run_tasks(conn, recent_runs)
@@ -327,13 +331,15 @@ def load_runs(conn, limit=200):
     """Org-wide run history (newest first) for the RUNS view — the full record, deeper than the
     snapshot's small FEED slice. Includes task-LESS runs (e.g. a lead planning pass) so completed
     work doesn't just flash by in the ticker and vanish."""
+    mcol = ",model" if _has_column(conn, "runs", "model") else ""    # migration 0006
     rows = conn.execute(
-        "SELECT started_at,ended_at,project,agent,status,summary,log_path FROM runs "
+        "SELECT started_at,ended_at,project,agent,status,summary,log_path" + mcol + " FROM runs "
         "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     return [Run(started_at=r["started_at"],
                 agent=f"{r['project']}/{r['agent']}",
                 status=r["status"], summary=r["summary"],
                 log_path=r["log_path"], project=r["project"],
+                model=(r["model"] if mcol else None),
                 dur_min=minutes_between(r["started_at"], r["ended_at"]))
             for r in rows]
 

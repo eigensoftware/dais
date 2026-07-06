@@ -80,7 +80,10 @@ echo $$ > "$LOCK"
 
 mkdir -p "$PDIR/logs"
 TS="$(date +%Y%m%d-%H%M%S)"; LOG="$PDIR/logs/$AGENT-$TS.log"
-RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")'); SELECT last_insert_rowid();")"
+# record the resolved model with the run (migration 0006); fall back to the legacy shape on a
+# dais.db that hasn't run `dais migrate` yet — run recording must never break on a schema gap.
+RUNID="$(db "INSERT INTO runs(project,agent,log_path,model) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")'); SELECT last_insert_rowid();" 2>/dev/null)"
+[ -n "$RUNID" ] || RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")'); SELECT last_insert_rowid();")"
 # Publish the run id to the agent's environment. The agent coordinates by shelling out to `dais
 # task ...`, and those calls inherit DAIS_RUN_ID — so every task the agent creates/changes is
 # recorded against THIS run in run_tasks (see link_run_task). Scoped to this process; child `dais`
