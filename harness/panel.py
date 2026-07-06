@@ -159,6 +159,14 @@ def _tag_attr(app, row):
 def render_work(scr, rect, app, focused):
     """Panel-native WORK: band bars + color-tagged selectable rows."""
     inner = render_pane_title(scr, rect, "WORK", focused)
+    # blocks_parent index: a QA-parked parent's row names the OPEN fix it waits on, so the
+    # blocker is identifiable at a glance (same treatment as the blocked_on dependency).
+    blk = {}
+    for (par, child, rel) in (app.snap.links if app.snap else []):
+        if rel == "blocks_parent" and par not in blk:
+            bt = _find_task(app.snap, child)
+            if bt and bt.status not in ("done", "cancelled"):
+                blk[par] = (child, bt.status)
     rows = app.left_rows()
     sel_i, sel_row = app._selected(rows)
     app.sel_id = sel_row["id"] if sel_row else None
@@ -196,6 +204,9 @@ def render_work(scr, rect, app, focused):
             who = getattr(r["task"], "blocked_on", None) or "?"       # show WHO it waits on and
             bst = getattr(r["task"], "blocked_status", None) or "?"   # where that predecessor sits
             title = f"⛓ [{who}·{bst.replace('_', ' ')}] {title}"
+        elif r["kind"] != "running" and r["id"] in blk:       # ⛓ parked parent (QA fail): name the open fix
+            bid, bst = blk[r["id"]]
+            title = f"⛓ [{bid}·{bst.replace('_', ' ')}] {title}"
         if r["kind"] != "running":
             # aging alarm: gated/parked work shows how long it has sat since its last change,
             # so a founder gate that's waited 2 days stops reading like one that just arrived
@@ -300,14 +311,17 @@ def _link_lines(app, task):
     out = []
     for (par, child, rel) in links:                      # this task as the CHILD
         if child == task.id:
-            out.append(f"  ↑ {_REL_AS_CHILD.get(rel, rel)} {par}")
+            pt = _find_task(app.snap, par)               # identify the parent, not just its id
+            ttl = f' "{d.truncate_words(pt.title, 34)}"' if pt else ""
+            out.append(f"  ↑ {_REL_AS_CHILD.get(rel, rel)} {par}{ttl}")
     blockers, spawned, enc = [], [], []
     for (par, child, rel) in links:                      # this task as the PARENT
         if par != task.id:
             continue
         if rel == "blocks_parent":
-            t = _find_task(app.snap, child)
-            blockers.append(f"{child} ({t.status})" if t else child)
+            t = _find_task(app.snap, child)              # identify the blocker, not just its id
+            blockers.append(f'{child} ({t.status}) "{d.truncate_words(t.title, 34)}"'
+                            if t else child)
         elif rel == "encompasses":
             enc.append(child)
         else:
@@ -346,8 +360,11 @@ def _panel_detail_lines(app, sel_row):
         # the gate is still open — the moment an edge lands, status moves and it disappears.
         since = d.to_local_hhmm(task.updated_at) if task.updated_at else "?"
         out.append(f"◆ waiting on YOU — in {task.status.replace('_', ' ')} since {since}; no edge has fired")
-    if getattr(task, "blocked", False):                 # waiting on an unfinished predecessor
-        out.append(f"⛓ blocked on {task.blocked_on} — won't run until it's done")
+    if getattr(task, "blocked", False):                 # waiting on an unfinished predecessor —
+        bt = _find_task(app.snap, task.blocked_on)      # name it AND identify it (id alone is a hunt)
+        bst = f" ({bt.status})" if bt else ""
+        ttl = f' "{d.truncate_words(bt.title, 34)}"' if bt else ""
+        out.append(f"⛓ blocked on {task.blocked_on}{bst}{ttl} — won't run until it's done")
     out.append("")
     nxt = _next_lines(app, task, p.name)
     if nxt:
