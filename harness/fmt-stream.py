@@ -17,6 +17,9 @@ C = {"reset":"\033[0m","cyan":"\033[36m","yellow":"\033[33m","dim":"\033[2m",
      "green":"\033[32m","red":"\033[31m"}
 
 def emit(plain, color=None):
+    # VS16 (U+FE0F) makes terminals paint a 2-col emoji glyph while advancing 1 col,
+    # overdrawing the next chars; strip it so agent text renders as narrow glyphs.
+    plain = plain.replace("\ufe0f", "")
     if LOG:
         try: LOG.write(plain + "\n"); LOG.flush()
         except Exception: pass

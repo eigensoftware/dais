@@ -227,6 +227,9 @@ MD
         # timestamped entry so a handoff can never clobber the spec the next reader needs;
         # --replace-notes rewrites outright (founder surgery).
         if [ -n "$notes_add" ]; then
+          # strip VS16 (U+FE0F, utf-8 EF B8 8F): it makes terminals paint a 2-col emoji
+          # glyph while advancing 1 col, so notes with ⚠️-style emoji overdraw the TUI
+          notes_add=${notes_add//$'\357\270\217'/}
           entry="[${DAIS_ACTOR:-founder} $(date -u '+%Y-%m-%d %H:%M')] $notes_add"
           sets="$sets, notes=CASE WHEN notes IS NULL OR notes='' THEN '$(sqlesc "$entry")' ELSE notes || char(10) || char(10) || '$(sqlesc "$entry")' END"
         fi

@@ -106,6 +106,19 @@ class TestDisplayWidth(unittest.TestCase):
         self.assertEqual(d.disp_width(d.clip_cols("a界界界", 4)), 3)
         self.assertTrue(d.disp_width(d.clip_cols("界界界", 3)) <= 3)
 
+    def test_vs16_is_zero_width_and_stripped(self):
+        # VS16 (U+FE0F) forces emoji presentation: terminals paint 2 cells while
+        # advancing 1, so ⚠️-style sequences overdraw whatever comes next. We count
+        # it as 0 and drop it in clip_cols so the base char renders narrow+aligned.
+        self.assertEqual(d._char_cols("\ufe0f"), 0)
+        warn = "\u26a0\ufe0f"             # ⚠️ = narrow base + VS16
+        self.assertEqual(d.disp_width(warn), 1)
+        self.assertNotIn("\ufe0f", d.clip_cols(warn + " x", 80))
+        self.assertEqual(d.clip_cols(warn + "abc", 2), "\u26a0a")
+        # inherently-wide emoji (EAW=W, no VS16 needed) are untouched
+        self.assertEqual(d.disp_width("✅"), 2)
+        self.assertEqual(d.disp_width(d.pad_cols(warn, 10)), 10)
+
     def test_clip_neutralises_control_chars(self):
         out = d.clip_cols("a\x1b[31mb\tc", 80)
         self.assertNotIn("\x1b", out)

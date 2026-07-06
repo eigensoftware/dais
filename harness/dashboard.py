@@ -399,6 +399,8 @@ def _wrap(text, width):
 def _char_cols(ch):
     """Display columns for one character: 0 for combining/zero-width/control,
     2 for East-Asian wide/fullwidth, else 1."""
+    if ch == "\ufe0f":  # VS16 emoji selector: combining class 0, so combining() misses it
+        return 0
     if unicodedata.combining(ch):
         return 0
     if unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Cn"):
@@ -421,6 +423,8 @@ def clip_cols(s, cols):
         return ""
     out, used = [], 0
     for ch in s:
+        if ch == "\ufe0f":  # VS16 makes terminals paint 2 cells while advancing 1;
+            continue        # drop it so the base char renders as an aligned narrow glyph
         if ord(ch) < 32 or ord(ch) == 127:
             ch = " "
         cw = _char_cols(ch)
