@@ -580,6 +580,14 @@ class TestControl(unittest.TestCase):
         self.assertEqual(d.fmt_countdown(60), "1:00")
         self.assertEqual(d.fmt_countdown(893), "14:53")
 
+    def test_fmt_age(self):
+        self.assertEqual(d.fmt_age("2026-07-06 10:00:00", "2026-07-06 10:00:30"), "")   # <1m: quiet
+        self.assertEqual(d.fmt_age("2026-07-06 10:00:00", "2026-07-06 10:45:00"), "45m")
+        self.assertEqual(d.fmt_age("2026-07-06 10:00:00", "2026-07-06 17:00:00"), "7h")
+        self.assertEqual(d.fmt_age("2026-07-05 10:00:00", "2026-07-06 17:00:00"), "31h")  # <48h stays hours
+        self.assertEqual(d.fmt_age("2026-07-03 10:00:00", "2026-07-06 17:00:00"), "3d")
+        self.assertEqual(d.fmt_age(None, "2026-07-06 17:00:00"), "")                     # unparseable: quiet
+
     def test_fmt_model(self):
         self.assertEqual(d.fmt_model("claude-fable-5"), "fable-5")
         self.assertEqual(d.fmt_model("claude-opus-4-8[1m]"), "opus-4-8[1m]")

@@ -68,6 +68,7 @@ class Task:
     updated_at: str = None   # last status change — used to sort the archive newest-first
     blocked_on: str = None   # predecessor task id this task waits on (dependency)
     blocked: bool = False     # computed: blocked_on is set AND that predecessor isn't done/cancelled
+    blocked_status: str = None  # computed: the open predecessor's CURRENT state (shown on the row)
 
 
 @dataclass
@@ -303,6 +304,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
             for t in ts:
                 t.blocked = bool(t.blocked_on) and \
                     status_by_id.get(t.blocked_on) not in (None, "done", "cancelled")
+                t.blocked_status = status_by_id.get(t.blocked_on) if t.blocked else None
     grows = conn.execute(
         "SELECT id,started_at,ended_at,project,agent,status,summary,log_path" + mcol + " FROM runs "
         "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()

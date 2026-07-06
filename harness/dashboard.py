@@ -256,6 +256,37 @@ def fmt_model(model):
     return (model or "").removeprefix("claude-")
 
 
+def _age_str(secs):
+    if secs is None or secs < 60:
+        return ""
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 172800:                      # < 48h reads better in hours
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def fmt_age(utc_ts, now):
+    """Coarse 'how long has this sat' for WAITING/NEEDS-YOU rows: '' under a minute,
+    then '45m' / '7h' / '3d'. Deliberately coarse — it's an aging alarm, not a clock."""
+    return _age_str(seconds_between(utc_ts, now))
+
+
+def oldest_gate_age(snap, now):
+    """Age of the LONGEST-waiting founder gate across the workspace ('' if none): the vitals
+    alarm shows not just how many gates there are, but how stale the worst one has gone."""
+    oldest = None
+    for p in (snap.projects if snap else []):
+        for st, ts in p.tasks_by_status.items():
+            if not p.machine or MC.band_of(p.machine, st) != "NEEDS YOU":
+                continue
+            for t in ts:
+                s = seconds_between(t.updated_at, now)
+                if s is not None and (oldest is None or s > oldest):
+                    oldest = s
+    return _age_str(oldest)
+
+
 def fmt_countdown(left):
     """Compact countdown for the vitals bar: 'due' once the moment passes (the loop is
     dispatching or about to), '42s' under a minute, else 'm:ss'. Pure, for tests."""

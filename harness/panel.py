@@ -192,8 +192,19 @@ def render_work(scr, rect, app, focused):
             title = r["task"].title
             base_attr = _tag_attr(app, r)
             blocked = getattr(r["task"], "blocked", False)
-        if r["kind"] != "running" and blocked:                # ⛓ a task waiting on an unfinished predecessor
-            title = "⛓ " + title
+        if r["kind"] != "running" and blocked:                # ⛓ a task waiting on an unfinished predecessor:
+            who = getattr(r["task"], "blocked_on", None) or "?"       # show WHO it waits on and
+            bst = getattr(r["task"], "blocked_status", None) or "?"   # where that predecessor sits
+            title = f"⛓ [{who}·{bst.replace('_', ' ')}] {title}"
+        if r["kind"] != "running":
+            # aging alarm: gated/parked work shows how long it has sat since its last change,
+            # so a founder gate that's waited 2 days stops reading like one that just arrived
+            m = next((p.machine for p in (app.snap.projects if app.snap else [])
+                      if p.name == r["project"]), None)
+            if MC.band_of(m, r["task"].status) in ("NEEDS YOU", "WAITING"):
+                age = d.fmt_age(r["task"].updated_at, app._now())
+                if age:
+                    title = f"{title} · {age}"
         line = f"  {tag:<7} {tid:<8} {proj[:11]:<11} {title}"
         # selection is ONE uniform bright bar (same as the focused pane title), not the row's hue;
         # a blocked task dims (it won't be picked up until its predecessor is done).
@@ -565,7 +576,9 @@ def render_vitals(scr, rect, app):
     ident = f" DAIS {_BRAND} {ws}" if ws else " DAIS"     # honesty comes from the watch badge, not a literal "LIVE"
     run_dot = _DOT_RUN if threads else _DOT_IDLE
     run_tok = f"{run_dot} {len(threads)} running"
-    gate_tok = f"{_DOT_GATE} {ng} NEED YOU" if ng > 0 else f"{_DOT_IDLE} {ng} need you"
+    gage = d.oldest_gate_age(snap, now) if ng > 0 else ""     # how stale is the WORST gate
+    gate_tok = (f"{_DOT_GATE} {ng} NEED YOU" + (f" · {gage}" if gage else "")
+                if ng > 0 else f"{_DOT_IDLE} {ng} need you")
     ship = _shippable(app)
     ship_tok = ("⬆ ship " + " ".join(f"{n}·{c}" for n, c in ship)) if ship else ""
     pre = ident + "   "
