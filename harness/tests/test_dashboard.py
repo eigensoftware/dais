@@ -558,20 +558,23 @@ class TestControl(unittest.TestCase):
             state, interval, par = d.watch_state(root)
             self.assertEqual((state, interval, par), ("running", "900", "3"))
 
-    def test_watch_next_tick_reads_fourth_field(self):
+    def test_watch_next_tick_reads_epoch_and_sleep(self):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, "projects"))
             with open(os.path.join(root, "projects", ".watch.pid"), "w") as fh:
-                fh.write(f"{os.getpid()} 900 3 1751844000")
-            self.assertEqual(d.watch_next_tick(root), 1751844000)
+                fh.write(f"{os.getpid()} 900 3 1751844000 10")    # draining: 10s < 900s interval
+            self.assertEqual(d.watch_next_tick(root), (1751844000, 10))
+            with open(os.path.join(root, "projects", ".watch.pid"), "w") as fh:
+                fh.write(f"{os.getpid()} 900 3 1751844000")       # 4-field: epoch, no duration
+            self.assertEqual(d.watch_next_tick(root), (1751844000, None))
 
     def test_watch_next_tick_none_pre_countdown_or_absent(self):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, "projects"))
-            self.assertIsNone(d.watch_next_tick(root))            # no pidfile
+            self.assertEqual(d.watch_next_tick(root), (None, None))   # no pidfile
             with open(os.path.join(root, "projects", ".watch.pid"), "w") as fh:
-                fh.write(f"{os.getpid()} 900 3")                  # old 3-field shape
-            self.assertIsNone(d.watch_next_tick(root))
+                fh.write(f"{os.getpid()} 900 3")                      # old 3-field shape
+            self.assertEqual(d.watch_next_tick(root), (None, None))
 
     def test_fmt_countdown(self):
         self.assertEqual(d.fmt_countdown(-5), "due")

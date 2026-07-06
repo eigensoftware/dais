@@ -430,15 +430,18 @@ def watch_state(root):
 
 
 def watch_next_tick(root):
-    """Epoch seconds of the watch loop's next dispatch — the 4th `.watch.pid` field, stamped
-    by the loop each cycle just before it sleeps. None when watch isn't running, before the
-    first cycle completes, or for a pre-countdown pidfile (3 fields)."""
+    """(epoch, sleep_secs) of the watch loop's next dispatch — the 4th/5th `.watch.pid`
+    fields, stamped by the loop each cycle just before it sleeps. sleep_secs < interval means
+    the loop is DRAINING (work in flight → 10s re-checks), not idle-polling. (None, None)
+    when watch isn't running, before the first cycle, or for a pre-countdown pidfile."""
     try:
         with open(os.path.join(root, WATCH_PID)) as fh:
             parts = fh.read().split()
-        return int(parts[3])
+        epoch = int(parts[3])
+        dur = int(parts[4]) if len(parts) > 4 else None
+        return epoch, dur
     except (OSError, ValueError, IndexError):
-        return None
+        return None, None
 
 
 # --------------------------------------------------------------------------- #

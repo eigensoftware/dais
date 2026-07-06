@@ -261,6 +261,24 @@ class TestPaneRenderers(unittest.TestCase):
                             "detail_scroll had no effect on inspector render")
 
 
+class TestAggregateMap(unittest.TestCase):
+    """The derived swept-state → aggregator-state map: before assemble fires there is no
+    task_links row tying approved work to its release, so this map is how the panel names
+    the vehicle ('⇢ win-204') and flags the no-release-filed stranded case."""
+    def test_derives_from_aggregate_edges(self):
+        m = {"edges": [
+            {"from": "release_open", "to": "release_review", "by": "engineer",
+             "verb": "assemble", "effect": {"aggregate": {"select": "state=approved"}}},
+            {"from": "ready", "to": "doing", "by": "engineer", "verb": "claim"},
+        ]}
+        self.assertEqual(pn._aggregate_map(m), {"approved": "release_open"})
+
+    def test_empty_for_no_machine_or_no_aggregates(self):
+        self.assertEqual(pn._aggregate_map(None), {})
+        self.assertEqual(pn._aggregate_map({"edges": [
+            {"from": "ready", "to": "doing", "by": "engineer", "verb": "claim"}]}), {})
+
+
 class TestChromePanes(unittest.TestCase):
     def _app(self, rows):
         import tempfile

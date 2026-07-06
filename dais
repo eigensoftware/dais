@@ -516,8 +516,9 @@ effort: <optional low|medium|high, or blank>
       "$DAIS_ROOT/harness/dispatch.sh"; rc=$?
       if [ "$rc" -eq 0 ]; then next=10           # work in flight → drain: check back shortly
       else next="$interval"; fi                  # idle (10) or backed off (20) → poll on the interval
-      # 4th pidfile field: next-tick epoch, so `dais top` can show a live countdown
-      echo "$$ $interval $par $(( $(date +%s) + next ))" > "$PIDF"
+      # 4th/5th pidfile fields: next-tick epoch + the chosen sleep, so `dais top` can show a
+      # live countdown AND label it honestly ('drain 8s' while work is in flight vs 'next 4:32')
+      echo "$$ $interval $par $(( $(date +%s) + next )) $next" > "$PIDF"
       sleep "$next"
     done ;;
 

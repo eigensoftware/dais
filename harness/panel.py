@@ -208,10 +208,18 @@ def render_work(scr, rect, app, focused):
             bid, bst = blk[r["id"]]
             title = f"⛓ [{bid}·{bst.replace('_', ' ')}] {title}"
         if r["kind"] != "running":
+            p = next((pp for pp in (app.snap.projects if app.snap else [])
+                      if pp.name == r["project"]), None)
+            m = p.machine if p else None
+            # swept-state work (e.g. approved) names its VEHICLE: the open aggregator task that
+            # will ship it (⇢ win-204) — or flags that none is filed, the silently-stranded case
+            vst = _aggregate_map(m).get(r["task"].status)
+            if vst is not None:
+                vehicles = p.tasks_by_status.get(vst, []) if p else []
+                title = (f"{title} ⇢ {vehicles[0].id}" if vehicles
+                         else f"{title} ⇢ no {vst.replace('_', ' ')} filed")
             # aging alarm: gated/parked work shows how long it has sat since its last change,
             # so a founder gate that's waited 2 days stops reading like one that just arrived
-            m = next((p.machine for p in (app.snap.projects if app.snap else [])
-                      if p.name == r["project"]), None)
             if MC.band_of(m, r["task"].status) in ("NEEDS YOU", "WAITING"):
                 age = d.fmt_age(r["task"].updated_at, app._now())
                 if age:
@@ -297,6 +305,19 @@ def _next_lines(app, task, proj_name):
     return out
 
 
+def _aggregate_map(m):
+    """{swept_state: aggregator_state} derived from the machine's aggregate edges — e.g. the
+    coding lane's assemble edge (release_open, select state=approved) yields
+    {'approved': 'release_open'}. Before assemble fires there is NO task_links row tying parked
+    work to its release, so this derived map is the ONLY way to name the vehicle."""
+    out = {}
+    for e in (m or {}).get("edges", []):
+        sel = ((e.get("effect") or {}).get("aggregate") or {}).get("select", "")
+        if sel.startswith("state="):
+            out[sel[len("state="):]] = e["from"]
+    return out
+
+
 # how a link reads from the CHILD's side, per rel
 _REL_AS_CHILD = {"spawned_from": "spawned from", "blocks_parent": "fix for",
                  "part_of": "part of", "encompasses": "in release"}
@@ -365,6 +386,16 @@ def _panel_detail_lines(app, sel_row):
         bst = f" ({bt.status})" if bt else ""
         ttl = f' "{d.truncate_words(bt.title, 34)}"' if bt else ""
         out.append(f"⛓ blocked on {task.blocked_on}{bst}{ttl} — won't run until it's done")
+    vst = _aggregate_map(p.machine).get(task.status)    # parked in a swept state (e.g. approved):
+    if vst is not None:                                 # name the release vehicle that ships it
+        vehicles = p.tasks_by_status.get(vst, [])
+        if vehicles:
+            v = vehicles[0]
+            out.append(f"⛨ ships via {v.id} ({vst.replace('_', ' ')}) "
+                       f'"{d.truncate_words(v.title, 34)}" — its assemble sweeps this task')
+        else:
+            out.append(f"⛨ parked with NO open {vst.replace('_', ' ')} task — nothing will ship "
+                       f"this until one is filed")
     out.append("")
     nxt = _next_lines(app, task, p.name)
     if nxt:
@@ -579,8 +610,15 @@ def render_vitals(scr, rect, app):
     running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
     wstate, wint, wpar = d.watch_state(app.root)
     if wstate == "running":
-        nt = d.watch_next_tick(app.root)            # stamped by the loop each cycle
-        tick = f" · next {d.fmt_countdown(nt - _time.time())}" if nt else ""
+        nt, ndur = d.watch_next_tick(app.root)      # stamped by the loop each cycle
+        tick = ""
+        if nt:
+            cd = d.fmt_countdown(nt - _time.time())
+            try:                                    # a sub-interval sleep = draining in-flight
+                draining = ndur is not None and int(ndur) < int(wint or 0)
+            except ValueError:
+                draining = False
+            tick = f" · drain {cd}" if draining else f" · next {cd}"
         badge = f"watch {wint or '?'}s x{wpar or '?'}{tick}"
     else:
         badge = "PAUSED" if wstate == "paused" else "watch stopped"
