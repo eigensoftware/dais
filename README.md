@@ -203,6 +203,17 @@ You draft social copy and blog posts from the stage goal...
 frontmatter key; it's owned by `machine.json`'s `roles` block (see
 [machine-model.md](design/machine-model.md#roles)), since it's what `run-agent` enforces.
 
+**Role concurrency (`concurrency: N`, default 1):** how many runs of this role may live at
+once. By default every project runs ONE agent at a time (the repo is shared state); a role
+you declare `concurrency: 2..5` on may STACK — the dispatcher launches another run of the
+*already-live role* when it has slot headroom and there are more dispatchable tasks than live
+runs. It never launches a *second role* into a busy repo, and it never stacks onto a single
+task. Turn it up only where runs are truly independent per task (content drafting, review-only
+roles). Two cautions: roles whose agents run a shared test stack (a scratch DB) will collide —
+isolate that first; and roles whose agents *drain a queue* may duplicate the top task's work
+(the machine's compare-and-swap edges make duplicates harmless, but the spend is wasted).
+Cadence roles (`every:Nh`) should stay at 1 — they groom shared state; `dais lint` warns.
+
 **Let Claude design a role:** `dais role new <project> --desc "what it does"` proposes a
 persona + config from your project's existing roles; you confirm.
 

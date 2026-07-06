@@ -88,14 +88,17 @@ projects=()
 if [ -n "$PROJECT" ]; then projects=("$PROJECT")
 else for p in "$DAIS_HOME"/projects/*/; do [ -d "$p" ] && projects+=("$(basename "$p")"); done; fi
 
-# Build the eligible set: each NOT-busy project the router wants to run, as one line
-# `priority|last_run|project|agent`. At most one agent per project — the per-repo lock forbids
-# stacking two agents in the same repo. priority comes from project.yaml (default 100); last_run
-# is the project's most recent run start ('' = never run) for least-recently-run fairness.
+# Build the eligible set: each project the router wants to run, as one line
+# `priority|last_run|project|agent`. At most one NEW launch per project per tick. A busy
+# project is normally skipped — EXCEPT role-concurrency stacking: the router may return the
+# already-live role again when its frontmatter `concurrency:` has headroom and more
+# dispatchable tasks than live runs exist (never a second role into the same repo).
+# priority comes from project.yaml (default 100); last_run is the project's most recent run
+# start ('' = never run) for least-recently-run fairness.
 eligible=()
 for proj in "${projects[@]}"; do
   [ "$free" -le 0 ] && break   # pool full — no slot to fill, so don't bother polling the router
-  [ -n "$(live_lock_pids "$proj")" ] && continue   # already running its one agent — counted in `running` above
+  livespec="$(live_role_counts "$proj" | paste -sd, -)"   # '' = idle; 'qa=1' = stacking question
 
   # who runs next is decided by the project's roles config (see harness/router.py) — no role
   # names hardcoded here. The router returns a role to run, or nothing (idle). A role whose LAST
@@ -105,7 +108,7 @@ for proj in "${projects[@]}"; do
   # we re-ask the router with that role excluded, so ready work behind a cooled lead still runs.
   agent=""; excl=""
   while :; do
-    cand="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" "$excl" 2>/dev/null)"
+    cand="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" "$excl" "$livespec" 2>/dev/null)"
     [ -z "$cand" ] && break
     last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes'))
                          || '|' || (SELECT COUNT(*) FROM run_tasks rt
@@ -145,7 +148,8 @@ if [ "$free" -gt 0 ] && [ "${#eligible[@]}" -gt 0 ]; then
       tlog "launch $proj/$agent (serial)"
       echo "${CC}${CB}▸ tick[$proj]: running $agent${C0}"
       "$SELF/run-agent.sh" "$proj" "$agent" &
-      echo $! > "$DAIS_HOME/projects/$proj/.lock-$agent"
+      slot="$(free_lock_slot "$proj" "$agent")" || slot="$DAIS_HOME/projects/$proj/.lock-$agent"
+      echo $! > "$slot"
       wait $!; rc=$?
       # a nonzero exit here is a CONFIG failure before any run row exists (missing persona,
       # missing repo) — report idle (10), not work-in-flight (0), or `dais watch` hot-spins
@@ -162,7 +166,9 @@ if [ "$free" -gt 0 ] && [ "${#eligible[@]}" -gt 0 ]; then
     # which is the $$ it writes into this same lock later). run-agent only writes the lock AFTER its
     # slow `git fetch`, so without this the agent is invisible to the next tick's pool count during
     # that window — the dispatcher then sees a phantom-free slot and over-fills the pool (the 4/3).
-    echo $! > "$DAIS_HOME/projects/$proj/.lock-$agent"
+    # free_lock_slot picks the first non-live slot (slot 1 = the historical bare lock name).
+    slot="$(free_lock_slot "$proj" "$agent")" || slot="$DAIS_HOME/projects/$proj/.lock-$agent"
+    echo $! > "$slot"
     disown
     launched=$((launched+1))
     sleep 1

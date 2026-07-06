@@ -61,7 +61,7 @@ def frontmatter(path):
 
 
 AGENT_CONFIG_KEYS = ("model", "effort", "provider", "auth", "access",
-                     "trigger", "prec", "playbook", "playbook_file")
+                     "trigger", "prec", "playbook", "playbook_file", "concurrency")
 
 
 def _yaml_line(text, key):
@@ -114,10 +114,17 @@ def agent_setup(root, project, role):
     prec = fm.get("prec") or (legacy.get("prec_raw", "") if legacy else "") or "50"
     playbook = (fm.get("playbook") or str(legacy.get("playbook", "") if legacy else "")
                 or _yaml_line(ytext, "playbook") or "code")
+    # concurrency: how many runs of this role may live at once (frontmatter only; default 1 =
+    # the historical singleton). Anything unparseable or outside 1..5 degrades to 1 — a config
+    # typo must fall back to serial, never fan out by surprise.
+    conc = str(fm.get("concurrency") or "").strip()
+    if not (conc.isdigit() and 1 <= int(conc) <= 5):
+        conc = "1"
     return {"model": model, "effort": effort, "provider": provider, "auth": auth,
             "access": access, "trigger": trigger, "prec": str(prec),
             "playbook": playbook,
-            "playbook_file": _playbook_file(root, project, playbook)}
+            "playbook_file": _playbook_file(root, project, playbook),
+            "concurrency": conc}
 
 
 def cast(root, project):
@@ -155,10 +162,16 @@ def _machine_for(root, project):
     return MC.project_machine_path(root, project, ref)
 
 
-def decide(root, project, excluded=None):
+def decide(root, project, excluded=None, live=None):
     """Which role should run next for this project (or None = idle). `excluded` roles (the
     dispatcher's no-progress throttle) are skipped in BOTH reactive dispatch and cadence, but
-    other roles' work still surfaces — a cooled lead must not starve the engineer behind it."""
+    other roles' work still surfaces — a cooled lead must not starve the engineer behind it.
+
+    `live` ({role: live_run_count}, from the project's lock files) engages role-concurrency
+    stacking: a BUSY project may only launch MORE OF THE ALREADY-LIVE ROLE — never a second
+    role into the same repo — and only while that role has frontmatter `concurrency:` headroom
+    AND more dispatchable tasks than live runs (a duplicate launch onto the same task is pure
+    waste). live=None/{} = project idle = exactly the historical behavior."""
     excluded = excluded or set()
     roles = cast(root, project)
     if not roles:
@@ -166,13 +179,31 @@ def decide(root, project, excluded=None):
     db = sqlite3.connect(os.path.join(root, "dais.db"))
     db.row_factory = sqlite3.Row
 
+    import machine as MC
+    dormant = {r["name"] for r in roles if r["trigger"] == "none"}
+
+    if live:
+        if len(live) != 1:
+            return None            # >1 distinct role live can't happen via dispatch; be conservative
+        role, n = next(iter(live.items()))
+        if role in excluded or role in dormant:
+            return None
+        try:
+            conc = int(agent_setup(root, project, role)["concurrency"])
+        except (ValueError, TypeError, KeyError):
+            conc = 1
+        if n >= conc:
+            return None            # the role is at its declared capacity
+        m = MC.load(_machine_for(root, project))
+        if MC.pending_for(db, m, project, role) <= n:
+            return None            # no EXTRA dispatchable task beyond what live runs cover
+        return role
+
     # 1) reactive dispatch — ALWAYS via the project's machine: the dispatch role of the top pending
     #    task (the machine's edges own state->role; next_role skips blocked/parked states and open
     #    dependencies). Cadence roles (2) still run on their clock for periodic discovery.
     #    trigger=none is DORMANCY and outranks the machine: a shelved role (e.g. a parked project's
     #    lead) is never scheduled even when an edge would dispatch it — none means never scheduled.
-    import machine as MC
-    dormant = {r["name"] for r in roles if r["trigger"] == "none"}
     role = MC.next_role(db, MC.load(_machine_for(root, project)), project,
                         excluded=excluded | dormant)
     if role:
@@ -284,6 +315,14 @@ def lint_project(root, project):
             warnings.append("role '%s': playbook '%s' has no file (looked in projects/%s/playbooks/ "
                             "and harness/playbooks/); falls back to no conventions"
                             % (r["name"], s["playbook"], project))
+        raw_conc = str(frontmatter(persona).get("concurrency") or "").strip()
+        if raw_conc and s["concurrency"] == "1" and raw_conc != "1":
+            warnings.append("role '%s': concurrency '%s' is not an integer 1..5 — treated as 1 "
+                            "(serial)" % (r["name"], raw_conc))
+        if int(s["concurrency"]) > 1 and s["trigger"].startswith("every:"):
+            warnings.append("role '%s': concurrency %s on a CADENCE role — cadence roles groom "
+                            "shared state (queues, digests); parallel runs duplicate and conflict. "
+                            "Keep cadence roles at 1" % (r["name"], s["concurrency"]))
         if known_roles and r["name"] not in known_roles and os.path.exists(persona):
             warnings.append("agents/%s.md: role '%s' appears in no machine role — dead cast "
                             "member (typo, or add it to machine.json roles)" % (r["name"], r["name"]))
@@ -368,7 +407,13 @@ if __name__ == "__main__":
         sys.exit(lint(root, project))
     try:
         excl = set(sys.argv[3].split(",")) - {""} if len(sys.argv) > 3 else set()
-        name = decide(sys.argv[1], sys.argv[2], excluded=excl)
+        live = {}                  # optional 4th arg: 'role=N,role=N' from the project's live locks
+        if len(sys.argv) > 4 and sys.argv[4]:
+            for part in sys.argv[4].split(","):
+                k, _, v = part.partition("=")
+                if k and v.isdigit():
+                    live[k] = int(v)
+        name = decide(sys.argv[1], sys.argv[2], excluded=excl, live=live or None)
         if name:
             print(name)
     except Exception:

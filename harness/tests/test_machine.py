@@ -122,6 +122,29 @@ class TestBandsAndActions(unittest.TestCase):
         self.assertEqual(acts["__start"]["by"], "engineer")
 
 
+class TestPendingFor(unittest.TestCase):
+    """pending_for — next_role's scan as a count; the role-concurrency gate reads it."""
+    def setUp(self):
+        self.conn = _db()
+        self.m = M.load(CODING)
+
+    def test_counts_dispatchable_tasks_for_role(self):
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('a','proj','x','ready')")
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('b','proj','y','ready')")
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('c','proj','z','qa_review')")
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('d','proj','w','approved')")
+        self.assertEqual(M.pending_for(self.conn, self.m, "proj", "engineer"), 2)
+        self.assertEqual(M.pending_for(self.conn, self.m, "proj", "qa"), 1)
+        self.assertEqual(M.pending_for(self.conn, self.m, "proj", "lead"), 0)
+
+    def test_dep_blocked_tasks_do_not_count(self):
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN blocked_on TEXT")  # migration 0001
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('open','proj','x','doing')")
+        self.conn.execute("INSERT INTO tasks(id,project,title,status,blocked_on) "
+                          "VALUES('kid','proj','y','ready','open')")
+        self.assertEqual(M.pending_for(self.conn, self.m, "proj", "engineer"), 1)  # 'doing' only
+
+
 class TestAssigneeStamp(unittest.TestCase):
     """The first AGENT to fire an edge on an unassigned task stamps itself as assignee, so
     archived tasks record their worker. Explicit assignments are never overwritten; founder

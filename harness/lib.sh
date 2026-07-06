@@ -127,6 +127,34 @@ reap_stale_locks(){
   done
 }
 
+# Role concurrency (frontmatter `concurrency: N`) slots a role's lock: slot 1 keeps the
+# historical bare name `.lock-<role>` (so concurrency:1 is byte-identical to the old singleton),
+# slots 2..N are `.lock-<role>.<n>`. The dot separator keeps role names unambiguous.
+
+# live_role_counts <project> — print 'role=N' (one per line) for the project's LIVE locks,
+# slot-suffix aware. Empty output = project idle. Feeds the router's stacking decision.
+live_role_counts(){
+  local lk pid r
+  for lk in "$DAIS_HOME"/projects/$1/.lock-*; do
+    [ -e "$lk" ] || continue
+    pid="$(cat "$lk" 2>/dev/null)"; kill -0 "$pid" 2>/dev/null || continue
+    r="$(basename "$lk")"; r="${r#.lock-}"; r="$(printf '%s' "$r" | sed 's/\.[0-9][0-9]*$//')"
+    echo "$r"
+  done | sort | uniq -c | awk '{print $2"="$1}'
+}
+
+# free_lock_slot <project> <role> — path of the first non-live slot file for the role (may be
+# a stale file to overwrite). Prints nothing when all 5 possible slots are live.
+free_lock_slot(){
+  local i f pid
+  for i in 1 2 3 4 5; do
+    f="$DAIS_HOME/projects/$1/.lock-$2"; [ "$i" -gt 1 ] && f="$f.$i"
+    pid="$(cat "$f" 2>/dev/null)"
+    if ! kill -0 "$pid" 2>/dev/null; then echo "$f"; return 0; fi
+  done
+  return 1
+}
+
 # kill_tree <pid> — TERM a process and all its descendants (wrapper → claude → children).
 # Tree-walk (not process groups) so it needs no job control; the agent's EXIT trap then marks
 # its run interrupted and the task stays put, resuming on the next start.

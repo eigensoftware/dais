@@ -72,9 +72,20 @@ fi
 # concurrency guard: skip only if a DIFFERENT live process already holds the lock. The parallel
 # dispatcher pre-writes this lock with OUR pid to reserve the slot at launch (before the slow path
 # above), so a lock holding our own $$ is that reservation — claim/confirm it, don't skip ourselves.
-LOCK="$PDIR/.lock-$AGENT"
-if [ -e "$LOCK" ] && [ "$(cat "$LOCK" 2>/dev/null)" != "$$" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
-  echo "[$PROJECT/$AGENT] already running (pid $(cat "$LOCK")) — skipping"; exit 0
+# Claim a lock slot (frontmatter `concurrency: N`; slot 1 = the historical bare `.lock-<role>`,
+# so concurrency:1 is byte-identical to the old singleton). Prefer the slot the dispatcher
+# pre-claimed with our pid; otherwise the first free/stale one; none free = at capacity.
+CONC="$(cfg concurrency)"; [[ "$CONC" =~ ^[1-5]$ ]] || CONC=1
+LOCK=""
+for i in $(seq 1 "$CONC"); do
+  f="$PDIR/.lock-$AGENT"; [ "$i" -gt 1 ] && f="$f.$i"
+  pid="$(cat "$f" 2>/dev/null)"
+  if [ "$pid" = "$$" ]; then LOCK="$f"; break; fi              # dispatcher pre-claimed for us
+  if [ -e "$f" ] && kill -0 "$pid" 2>/dev/null; then continue; fi   # live peer holds this slot
+  [ -z "$LOCK" ] && LOCK="$f"                                  # first free slot (keep scanning for a pre-claim)
+done
+if [ -z "$LOCK" ]; then
+  echo "[$PROJECT/$AGENT] all $CONC slot(s) running — skipping"; exit 0
 fi
 echo $$ > "$LOCK"
 

@@ -50,6 +50,53 @@ def _ws(tasks, roles=ROLES_REACTIVE, with_dep_col=True):
     return root
 
 
+def _with_frontmatter(root, role, fm_lines):
+    """Write projects/p/agents/<role>.md with the given frontmatter lines."""
+    adir = os.path.join(root, "projects", "p", "agents")
+    os.makedirs(adir, exist_ok=True)
+    with open(os.path.join(adir, role + ".md"), "w") as f:
+        f.write("---\n" + "\n".join(fm_lines) + "\n---\n# " + role + "\n")
+
+
+class TestConcurrencyStacking(unittest.TestCase):
+    """decide(live=...) — a busy project may only launch MORE OF THE LIVE ROLE, gated on
+    frontmatter concurrency headroom and pending > live. live=None is the historical path."""
+
+    def test_busy_project_default_concurrency_stays_serial(self):
+        root = _ws([("a", "qa_review"), ("b", "qa_review")])
+        self.assertIsNone(router.decide(root, "p", live={"qa": 1}))
+
+    def test_stacks_live_role_with_headroom_and_extra_pending(self):
+        root = _ws([("a", "qa_review"), ("b", "qa_review")])
+        _with_frontmatter(root, "qa", ["concurrency: 2"])
+        self.assertEqual(router.decide(root, "p", live={"qa": 1}), "qa")
+
+    def test_no_stack_at_declared_capacity(self):
+        root = _ws([("a", "qa_review"), ("b", "qa_review"), ("c", "qa_review")])
+        _with_frontmatter(root, "qa", ["concurrency: 2"])
+        self.assertIsNone(router.decide(root, "p", live={"qa": 2}))
+
+    def test_no_stack_without_extra_pending_task(self):
+        # one qa_review task, one live qa run: a second launch would duplicate the same task
+        root = _ws([("a", "qa_review")])
+        _with_frontmatter(root, "qa", ["concurrency: 3"])
+        self.assertIsNone(router.decide(root, "p", live={"qa": 1}))
+
+    def test_never_launches_a_second_role_into_a_busy_repo(self):
+        # engineer live; top pending work wants qa — cross-role stacking stays off
+        root = _ws([("a", "qa_review"), ("b", "ready")])
+        _with_frontmatter(root, "qa", ["concurrency: 2"])
+        self.assertIsNone(router.decide(root, "p", live={"engineer": 1}))
+
+    def test_agent_setup_sanitizes_concurrency(self):
+        root = _ws([])
+        _with_frontmatter(root, "qa", ["concurrency: 3"])
+        _with_frontmatter(root, "engineer", ["concurrency: nine"])
+        self.assertEqual(router.agent_setup(root, "p", "qa")["concurrency"], "3")
+        self.assertEqual(router.agent_setup(root, "p", "engineer")["concurrency"], "1")
+        self.assertEqual(router.agent_setup(root, "p", "lead")["concurrency"], "1")  # unset
+
+
 class TestMachineDispatch(unittest.TestCase):
     def test_ready_task_schedules_engineer(self):
         self.assertEqual(router.decide(_ws([("a", "ready")]), "p"), "engineer")

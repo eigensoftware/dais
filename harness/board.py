@@ -141,6 +141,9 @@ def running_agents(project_dir, is_alive=_pid_alive):
         if not n.startswith(".lock-"):
             continue
         agent = n[len(".lock-"):]
+        base, dot, tail = agent.rpartition(".")
+        if dot and tail.isdigit():
+            agent = base           # slot suffix (.2..) from role concurrency — same role
         try:
             with open(os.path.join(project_dir, n)) as fh:
                 pid = int(fh.read().strip())

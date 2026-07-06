@@ -317,6 +317,22 @@ def next_role(conn, m, project, excluded=frozenset()):
     return best[1] if best else ""
 
 
+def pending_for(conn, m, project, role):
+    """How many tasks are dispatchable to `role` right now — next_role's scan as a count
+    (same skips: no dispatch role, open dependency). The role-concurrency gate reads this:
+    a second run of a live role only launches when pending > live, so stacking never
+    duplicates a lone task."""
+    rows = conn.execute("SELECT id, status FROM tasks "
+                        "WHERE project=? AND status NOT IN ('done','cancelled')", (project,)).fetchall()
+    n = 0
+    for r in rows:
+        rid = r["id"] if hasattr(r, "keys") else r[0]
+        status = r["status"] if hasattr(r, "keys") else r[1]
+        if dispatch_role(m, status) == role and not _dep_open(conn, rid):
+            n += 1
+    return n
+
+
 # --------------------------------------------------------------------------- #
 # display derivation — so `top` configures itself from the machine (no per-model wiring)
 # --------------------------------------------------------------------------- #
