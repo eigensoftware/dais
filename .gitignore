@@ -9,3 +9,5 @@ __pycache__/
 # dev scratch
 .superpowers/
 .pytest_cache/
+# macOS
+.DS_Store
