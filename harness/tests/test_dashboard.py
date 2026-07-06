@@ -549,6 +549,43 @@ class TestControl(unittest.TestCase):
             self.assertEqual(interval, "900")
             self.assertEqual(par, "3")
 
+    def test_watch_state_tolerates_next_tick_field(self):
+        # the loop stamps a 4th field (next-tick epoch) each cycle — the 3-tuple parse must not care
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "projects"))
+            with open(os.path.join(root, "projects", ".watch.pid"), "w") as fh:
+                fh.write(f"{os.getpid()} 900 3 1751844000")
+            state, interval, par = d.watch_state(root)
+            self.assertEqual((state, interval, par), ("running", "900", "3"))
+
+    def test_watch_next_tick_reads_fourth_field(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "projects"))
+            with open(os.path.join(root, "projects", ".watch.pid"), "w") as fh:
+                fh.write(f"{os.getpid()} 900 3 1751844000")
+            self.assertEqual(d.watch_next_tick(root), 1751844000)
+
+    def test_watch_next_tick_none_pre_countdown_or_absent(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "projects"))
+            self.assertIsNone(d.watch_next_tick(root))            # no pidfile
+            with open(os.path.join(root, "projects", ".watch.pid"), "w") as fh:
+                fh.write(f"{os.getpid()} 900 3")                  # old 3-field shape
+            self.assertIsNone(d.watch_next_tick(root))
+
+    def test_fmt_countdown(self):
+        self.assertEqual(d.fmt_countdown(-5), "due")
+        self.assertEqual(d.fmt_countdown(0), "due")
+        self.assertEqual(d.fmt_countdown(42), "42s")
+        self.assertEqual(d.fmt_countdown(60), "1:00")
+        self.assertEqual(d.fmt_countdown(893), "14:53")
+
+    def test_fmt_model(self):
+        self.assertEqual(d.fmt_model("claude-fable-5"), "fable-5")
+        self.assertEqual(d.fmt_model("claude-opus-4-8[1m]"), "opus-4-8[1m]")
+        self.assertEqual(d.fmt_model("gpt-5.1-codex-mini"), "gpt-5.1-codex-mini")
+        self.assertEqual(d.fmt_model(None), "")
+
     def test_watch_state_paused_wins(self):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, "projects"))

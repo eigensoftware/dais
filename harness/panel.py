@@ -11,6 +11,7 @@ from collections import namedtuple
 import curses
 import re
 import textwrap
+import time as _time
 
 import dashboard as d
 import machine as MC   # bands/edge_actions — so a machine project's board derives itself
@@ -549,8 +550,12 @@ def render_vitals(scr, rect, app):
     threads = d.running_threads(snap, now, app.root) if snap else []
     running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
     wstate, wint, wpar = d.watch_state(app.root)
-    badge = (f"watch {wint or '?'}s x{wpar or '?'}" if wstate == "running"
-             else "PAUSED" if wstate == "paused" else "watch stopped")
+    if wstate == "running":
+        nt = d.watch_next_tick(app.root)            # stamped by the loop each cycle
+        tick = f" · next {d.fmt_countdown(nt - _time.time())}" if nt else ""
+        badge = f"watch {wint or '?'}s x{wpar or '?'}{tick}"
+    else:
+        badge = "PAUSED" if wstate == "paused" else "watch stopped"
     nproj = len(snap.projects) if snap else 0
     ng = d.gate_count(snap, running_ids) if snap else 0
     cool = " · COOLING" if (snap and snap.cap_state) else ""

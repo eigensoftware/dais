@@ -514,8 +514,11 @@ effort: <optional low|medium|high, or blank>
     while true; do
       printf '\n[%s] ─────────────────────────────────\n' "$(date '+%H:%M:%S')"
       "$DAIS_ROOT/harness/dispatch.sh"; rc=$?
-      if [ "$rc" -eq 0 ]; then sleep 10          # work in flight → drain: check back shortly
-      else sleep "$interval"; fi                 # idle (10) or backed off (20) → poll on the interval
+      if [ "$rc" -eq 0 ]; then next=10           # work in flight → drain: check back shortly
+      else next="$interval"; fi                  # idle (10) or backed off (20) → poll on the interval
+      # 4th pidfile field: next-tick epoch, so `dais top` can show a live countdown
+      echo "$$ $interval $par $(( $(date +%s) + next ))" > "$PIDF"
+      sleep "$next"
     done ;;
 
   pause)

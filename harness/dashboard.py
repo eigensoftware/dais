@@ -250,6 +250,23 @@ def filter_rows(rows, term, key):
     return [r for r in rows if term in (key(r) or "").lower()]
 
 
+def fmt_model(model):
+    """Compact display of a run's model id for history rows: drop the family prefix
+    ('claude-fable-5' → 'fable-5') so columns stay narrow; '' for pre-migration NULLs."""
+    return (model or "").removeprefix("claude-")
+
+
+def fmt_countdown(left):
+    """Compact countdown for the vitals bar: 'due' once the moment passes (the loop is
+    dispatching or about to), '42s' under a minute, else 'm:ss'. Pure, for tests."""
+    left = int(left)
+    if left <= 0:
+        return "due"
+    if left < 60:
+        return f"{left}s"
+    return f"{left // 60}:{left % 60:02d}"
+
+
 def short_summary(summary, limit=1):
     """Collapse a comma-joined run summary to first item + ' (+N more)', spacing arrows."""
     if not summary:
@@ -379,6 +396,18 @@ def watch_state(root):
     if alive:
         return ("running", interval, par)
     return ("stopped", interval, par)
+
+
+def watch_next_tick(root):
+    """Epoch seconds of the watch loop's next dispatch — the 4th `.watch.pid` field, stamped
+    by the loop each cycle just before it sleeps. None when watch isn't running, before the
+    first cycle completes, or for a pre-countdown pidfile (3 fields)."""
+    try:
+        with open(os.path.join(root, WATCH_PID)) as fh:
+            parts = fh.read().split()
+        return int(parts[3])
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -614,7 +643,8 @@ class App:
             for r in p.recent_runs:
                 dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
                 out.append(f"  {to_local_hhmm(r.started_at):<5} {r.agent:<10} "
-                           f"{r.status:<11} {dur:<4} {short_summary(r.summary)}")
+                           f"{r.status:<11} {dur:<4} {fmt_model(r.model):<14} "
+                           f"{short_summary(r.summary)}")
             return out
         task = row["task"]
         p = by_name[row["project"]]
@@ -631,7 +661,7 @@ class App:
         for r in runs_touching(p.recent_runs, task.id):
             dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
             out.append(f"  {to_local_hhmm(r.started_at):<5} {r.agent:<10} "
-                       f"{r.status:<11} {dur:<4}")
+                       f"{r.status:<11} {dur:<4} {fmt_model(r.model)}")
         return out
 
     def running_header(self, row, now):
