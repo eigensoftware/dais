@@ -58,8 +58,14 @@ if [ "$DRY" = 0 ]; then
   done
 fi
 
-# --- capacity gate: cool down after a recent cap hit (window resets every ~5h) ---
-capped_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='capped' AND started_at > datetime('now','-90 minutes');")"
+# --- capacity gate: cool down after a recent cap hit (window resets every ~5h). A run that
+#     SUCCEEDED after the last capped run is proof the window is back — e.g. a manual
+#     `dais run` after the reset — so only caps newer than the latest success count; without
+#     this the loop sat parked up to 90m past an already-reset window. ---
+capped_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='capped'
+                     AND started_at > datetime('now','-90 minutes')
+                     AND started_at > COALESCE((SELECT MAX(started_at) FROM runs
+                                                WHERE status='succeeded'), '');")"
 if [ "${capped_recent:-0}" -gt 0 ]; then
   tlog "cap cooldown ($capped_recent capped run(s) in 90m)"
   echo "${CY}tick: hit the subscription cap within 90 min — cooling down until the window frees up${C0}"; exit 20
