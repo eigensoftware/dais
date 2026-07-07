@@ -71,8 +71,14 @@ if [ "${capped_recent:-0}" -gt 0 ]; then
   echo "${CY}tick: hit the subscription cap within 90 min — cooling down until the window frees up${C0}"; exit 20
 fi
 
-# --- error backoff: don't spin on a persistent failure (Execution error, transient outage) ---
-fail_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='failed' AND started_at > datetime('now','-30 minutes');")"
+# --- error backoff: don't spin on a persistent failure (Execution error, transient outage). A run
+#     that SUCCEEDED after the last failure is proof the fault cleared (e.g. an out-of-credits model
+#     was swapped back to a working one) — only failures newer than the latest success count, so a
+#     recovered loop resumes at once instead of sitting parked the full 30m. ---
+fail_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='failed'
+                   AND started_at > datetime('now','-30 minutes')
+                   AND started_at > COALESCE((SELECT MAX(started_at) FROM runs
+                                              WHERE status='succeeded'), '');")"
 if [ "${fail_recent:-0}" -ge 2 ]; then
   tlog "error backoff ($fail_recent failed run(s) in 30m)"
   echo "${CY}tick: 2+ failed runs in last 30 min — backing off (check the latest log; will retry later)${C0}"; exit 20
