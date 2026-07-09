@@ -60,7 +60,7 @@ def frontmatter(path):
     return {}          # unterminated block -> treat as no frontmatter
 
 
-AGENT_CONFIG_KEYS = ("model", "effort", "provider", "auth", "access",
+AGENT_CONFIG_KEYS = ("model", "fallback_model", "effort", "provider", "auth", "access",
                      "trigger", "prec", "playbook", "playbook_file", "concurrency")
 
 
@@ -97,6 +97,14 @@ def agent_setup(root, project, role):
         (_yaml_line(ytext, "model_" + role) or _yaml_line(ytext, "model")
          or provider_default_model) if provider == project_provider
         else provider_default_model)
+    # Optional backup model for run-agent.sh's auto-fallback. Resolved like `model`:
+    # frontmatter `fallback_model` -> project.yaml `fallback_model_<role>` / `fallback_model`.
+    # Same-provider only (the fallback runs on the same CLI). Empty = single-model (historical)
+    # behavior — the fallback only fires for subscription auth, where models have independent
+    # allocations; run-agent.sh scopes that (api shares one credit balance, so a swap is futile).
+    fallback_model = fm.get("fallback_model") or (
+        (_yaml_line(ytext, "fallback_model_" + role) or _yaml_line(ytext, "fallback_model"))
+        if provider == project_provider else "")
     effort = (fm.get("effort") or _yaml_line(ytext, "effort_" + role)
               or _yaml_line(ytext, "effort"))
     auth = fm.get("auth") or _yaml_line(ytext, "auth") or "subscription"
@@ -120,7 +128,8 @@ def agent_setup(root, project, role):
     conc = str(fm.get("concurrency") or "").strip()
     if not (conc.isdigit() and 1 <= int(conc) <= 5):
         conc = "1"
-    return {"model": model, "effort": effort, "provider": provider, "auth": auth,
+    return {"model": model, "fallback_model": fallback_model,
+            "effort": effort, "provider": provider, "auth": auth,
             "access": access, "trigger": trigger, "prec": str(prec),
             "playbook": playbook,
             "playbook_file": _playbook_file(root, project, playbook),

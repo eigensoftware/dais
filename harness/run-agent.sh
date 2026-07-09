@@ -21,6 +21,8 @@ MODEL="$(cfg model)"; EFF="$(cfg effort)"
 PROVIDER="$(cfg provider)"; AUTH="$(cfg auth)"
 ACCESS="$(cfg access)"; PB="$(cfg playbook)"; PB_FILE="$(cfg playbook_file)"
 TRIG="$(cfg trigger)"; PREC="$(cfg prec)"
+FALLBACK="$(cfg fallback_model)"   # optional backup model for the usage-limit auto-fallback
+[ "$FALLBACK" = "$MODEL" ] && FALLBACK=""   # a fallback == primary is a no-op; disable it
 EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
 
 # Secrets transport (auth: api): the provider's standard env var, from the process env,
@@ -249,18 +251,65 @@ run_agent(){
   esac
 }
 
-if [ "$QUIET" = 1 ]; then
-  echo "  ${CC}${CB}▶ $PROJECT · $AGENT${C0} ${CD}started (parallel) · log: $LOG${C0}"
-  if run_agent >/dev/null; then STATUS=succeeded; else STATUS=failed; fi
-else
-  echo "${CC}${CB}  ▶ $PROJECT · $AGENT${C0}  ${CD}live · full log: $LOG${C0}"
-  echo "${CD}  ──────────────────────────────────────────────────────${C0}"
-  if run_agent; then STATUS=succeeded; else STATUS=failed; fi
-  echo "${CD}  ──────────────────────────────────────────────────────${C0}"
+# --- run with auto-fallback ------------------------------------------------------------------
+# Try the primary model; if it hits the provider usage limit AND a fallback model is configured,
+# retry on the fallback. The retry ITSELF is the discriminator: if the fallback clears the cap it
+# was a model-specific exhaustion (e.g. the subscription's Fable allotment ran out while Opus still
+# works) -> stick to the backup for the window; if the fallback ALSO caps it's an account-wide
+# window cap -> no stick, normal cooldown. Subscription-only: auth:api shares ONE credit balance,
+# so a model swap can't help. Marker file = the "prefer the backup" runtime state.
+MARKER="$PDIR/.model-$AGENT.exhausted"
+MARKER_TTL=18000                          # ~5h subscription window; after this, retry the primary
+
+start_on_backup=0
+if [ -n "$FALLBACK" ] && [ -f "$MARKER" ]; then
+  m_ts="$(cut -d' ' -f1 "$MARKER" 2>/dev/null)"
+  if [ -n "$m_ts" ] && [ "$(( $(date +%s) - m_ts ))" -lt "$MARKER_TTL" ]; then start_on_backup=1
+  else rm -f "$MARKER"; fi                # window reset — give the primary another shot
 fi
-# A capped, empty, or "Execution error" run is NOT success.
-if is_capped "$LOG" "$PROVIDER"; then STATUS=capped
-elif [ ! -s "$LOG" ] || grep -qiE "^[[:space:]]*execution error[[:space:]]*$" "$LOG"; then STATUS=failed; fi
+
+if [ -n "$FALLBACK" ] && [ "$AUTH" != "api" ]; then
+  if [ "$start_on_backup" = 1 ]; then ATTEMPTS=("$FALLBACK"); else ATTEMPTS=("$MODEL" "$FALLBACK"); fi
+else
+  ATTEMPTS=("$MODEL")
+fi
+
+run_one(){   # $1 = model id — one attempt: sets STATUS, records the model actually used
+  MODEL="$1"
+  db "UPDATE runs SET model='$(sqlesc "$MODEL")' WHERE id=$RUNID;" 2>/dev/null
+  : > "$LOG"   # fresh log per attempt so is_capped + the summary reflect THIS model, not a prior cap
+  if [ "$QUIET" = 1 ]; then
+    echo "  ${CC}${CB}▶ $PROJECT · $AGENT${C0} ${CD}($MODEL) started (parallel) · log: $LOG${C0}"
+    if run_agent >/dev/null; then STATUS=succeeded; else STATUS=failed; fi
+  else
+    echo "${CC}${CB}  ▶ $PROJECT · $AGENT${C0}  ${CD}($MODEL) live · full log: $LOG${C0}"
+    echo "${CD}  ──────────────────────────────────────────────────────${C0}"
+    if run_agent; then STATUS=succeeded; else STATUS=failed; fi
+    echo "${CD}  ──────────────────────────────────────────────────────${C0}"
+  fi
+  # A capped, empty, or "Execution error" run is NOT success.
+  if is_capped "$LOG" "$PROVIDER"; then STATUS=capped
+  elif [ ! -s "$LOG" ] || grep -qiE "^[[:space:]]*execution error[[:space:]]*$" "$LOG"; then STATUS=failed; fi
+}
+
+fell_from=""
+for idx in "${!ATTEMPTS[@]}"; do
+  run_one "${ATTEMPTS[$idx]}"
+  nxt="${ATTEMPTS[$((idx+1))]:-}"
+  if [ "$STATUS" = capped ] && [ -n "$nxt" ]; then
+    echo "  ${CY}⤳ ${ATTEMPTS[$idx]} hit the usage limit — falling back to $nxt${C0}"
+    fell_from="${ATTEMPTS[$idx]}"
+    continue
+  fi
+  break
+done
+
+# Marker maintenance: stick to the backup ONLY when a fallback actually escaped the cap
+# (model-specific). If the fallback also capped, it's account-wide -> drop the marker, let cooldown run.
+if [ -n "$fell_from" ]; then
+  if [ "$STATUS" != capped ]; then printf '%s %s\n' "$(date +%s)" "$fell_from" > "$MARKER"
+  else rm -f "$MARKER"; fi
+fi
 
 # Summarize what the run actually changed: tasks it touched during the run, with their new status.
 TOUCHED="$(db "SELECT group_concat(id||'→'||status,', ') FROM tasks WHERE project='$(sqlesc "$PROJECT")' AND updated_at >= '$START_TS';")"
@@ -269,4 +318,7 @@ db "UPDATE runs SET ended_at=datetime('now'), status='$STATUS', summary='$(sqles
 case "$STATUS" in succeeded) sc="$CG";; capped|failed) sc="$CR";; interrupted) sc="$CY";; *) sc="$C0";; esac
 echo "  ${sc}${CB}[$STATUS]${C0} $PROJECT/$AGENT ${CD}—${C0} $TOUCHED"
 [ "$STATUS" = capped ] && echo "  (hit the $PROVIDER usage limit — back off until it resets)"
+if [ -f "$MARKER" ] && [ "$STATUS" != capped ]; then
+  echo "  ${CY}⚑ $PROJECT/$AGENT ran on BACKUP model ($MODEL) — $(cut -d' ' -f2 "$MARKER" 2>/dev/null) exhausted; auto-retries the primary ~5h after exhaustion, or force now: rm $MARKER${C0}"
+fi
 exit 0

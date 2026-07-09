@@ -176,6 +176,10 @@ is_capped(){
   case "${2:-anthropic}" in
     openai) pats="$pats|rate limit reached|you'?ve hit your usage limit" ;;
   esac
-  pats="$pats|insufficient_quota|credit balance is too low|error.*429"
+  # "out of usage credits" is the Claude CLI's metered-model exhaustion (e.g. Fable 5 on the
+  # subscription: "You're out of usage credits. Run /usage-credits ... or /model to switch");
+  # phrased nothing like the subscription-window limit above, so match it explicitly — without
+  # this a Fable-dry run is mis-scored (often "success 0s") and the auto-fallback never fires.
+  pats="$pats|insufficient_quota|credit balance is too low|error.*429|out of usage credits"
   grep -qiE "$pats" "${1:-/dev/null}" 2>/dev/null
 }
