@@ -10,6 +10,7 @@
   },
   "states": {
     "proposed":         {"initial": true},
+    "note":              {"initial": true},
     "proposal_review":  {},
     "ready":            {},
     "design":           {},
@@ -27,6 +28,7 @@
   },
   "edges": [
     {"from": "proposed",        "to": "proposal_review", "by": "lead",     "verb": "submit"},
+    {"from": "note", "to": "done", "by": "founder", "verb": "acknowledge", "note": "lead->founder communication (digest/FYI/decision-ask); acknowledging archives it — no spawn, never on the build rail. Parks in NEEDS YOU."},
     {"from": "proposal_review", "to": "done",            "by": "founder",  "verb": "approve",
        "guards": ["confirm"],
        "effect": {"spawn": {"template": "impl", "initial": "ready", "by": "engineer", "rel": "from_proposal"}}},
