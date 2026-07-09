@@ -140,6 +140,26 @@ def render_plain(snap, color=None):
         if snap.cap_state:
             P(f"  {c['CY']}⏸ cooling down — recent cap "
               f"(resumes when the window frees){c['C0']}")
+        # auto-fallback: a role whose primary model (e.g. Fable) hit the usage limit runs on its
+        # backup until the window resets — surface it so it's clear you're off the primary model.
+        pdir = os.path.join(HOME, "projects", p.name)
+        try:
+            marks = sorted(f for f in os.listdir(pdir)
+                           if f.startswith(".model-") and f.endswith(".exhausted"))
+        except OSError:
+            marks = []
+        for mk in marks:
+            mp = os.path.join(pdir, mk)
+            try:
+                if time.time() - os.path.getmtime(mp) > 21600:   # ~6h stale (loop idle) -> skip
+                    continue
+                parts = open(mp).read().split()
+            except OSError:
+                continue
+            role = mk[len(".model-"):-len(".exhausted")]
+            exm = parts[1] if len(parts) > 1 else "primary"
+            P(f"  {c['CY']}⚑ {role} on backup model — {exm} exhausted "
+              f"(retries the primary at the next window){c['C0']}")
         # phases in the machine's declared (flow) order; ◆ marks founder-gate phases (NEEDS YOU).
         m = p.machine or {}
         states = m.get("states", {})
@@ -1241,10 +1261,25 @@ class App:
         self._init_colors()
         self.scr.timeout(250)
         self.refresh()
+        last_tick = time.monotonic()
         while True:
-            if time.monotonic() - self.last_fetch >= self.interval:
+            now = time.monotonic()
+            # Gap-detection: getch() blocks at most 250ms, so a much larger gap means we were
+            # suspended (terminal tab switch / macOS App Nap throttling our output). While
+            # suspended the terminal's backing store can be damaged, but curses can't tell and
+            # only ships diffs — so on wake it repaints just the ticking clock and leaves a
+            # stale/blank body until a keypress forces a full retransmit. Detect the wake and
+            # force that retransmit ourselves. clearok is one-shot (reset right after the paint)
+            # so steady-state frames still diff normally — no flicker.
+            woke = now - last_tick > 1.0
+            last_tick = now
+            if woke:
+                self.scr.clearok(True)
+            if now - self.last_fetch >= self.interval:
                 self.refresh()
             self.draw()
+            if woke:
+                self.scr.clearok(False)
             ch = self.scr.getch()
             if ch == -1:
                 continue

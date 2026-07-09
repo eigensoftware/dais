@@ -319,9 +319,14 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                        dur_min=minutes_between(r["started_at"], r["ended_at"]))
                    for r in grows]
     attach_run_tasks(conn, recent_runs)
+    # Mirror the dispatcher's cap gate (dispatch.sh): a success AFTER the last cap proves the
+    # window is back, so only count caps newer than the latest success. Without this the badge
+    # shows COOLING for the full 90m even after the loop has already resumed dispatching.
     capped = conn.execute(
         "SELECT COUNT(*) c FROM runs WHERE status='capped' "
-        "AND started_at > datetime(?, '-90 minutes')", (now,)).fetchone()["c"]
+        "AND started_at > datetime(?, '-90 minutes') "
+        "AND started_at > COALESCE((SELECT MAX(started_at) FROM runs "
+        "WHERE status='succeeded'), '')", (now,)).fetchone()["c"]
     try:                        # composition graph (task_links, migration 0003); [] pre-migration
         links = [(r["parent_id"], r["child_id"], r["rel"]) for r in
                  conn.execute("SELECT parent_id, child_id, rel FROM task_links ORDER BY id")]
