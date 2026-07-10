@@ -223,6 +223,10 @@ def render_plain(snap, color=None):
           f"{c['CD']}{dur:<4}{c['C0']} {summ}")
     P(f"  {c['CD']}history: git -C <project repo> log --oneline | head"
       f"   ·   a run: dais logs <project>{c['C0']}")
+    if getattr(snap, "archived", None):
+        # discoverable, not forgotten: hidden projects are named, with the way back
+        P(f"  {c['CD']}archived: {', '.join(snap.archived)}   "
+          f"(dais unarchive <name> to restore){c['C0']}")
     P(f"{c['CB']}{c['CM']}"
       f"═══════════════════════════════════════════════{c['C0']}")
     return "\n".join(out)

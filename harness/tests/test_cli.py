@@ -1191,5 +1191,57 @@ class TestStartVerb(CliTest):
         self.assertIn("starting demo2/lead", r.stdout)
 
 
+class TestArchive(CliTest):
+    """dais archive/unarchive: a project.yaml flag hides the project from the board and
+    dispatch; nothing in the db is touched, and unarchive is a full restore."""
+
+    def _yaml(self, name="demo"):
+        with open(os.path.join(self.root, "projects", name, "project.yaml")) as fh:
+            return fh.read()
+
+    def test_archive_round_trip(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "old work", "--id", "d-1")
+        r = dais(self.root, "archive", "demo")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("archived: true", self._yaml())
+        # data survives; the board hides it but names it
+        self.assertEqual(q(self.root, "SELECT COUNT(*) FROM tasks WHERE project='demo'")[0], 1)
+        out = dais(self.root, "status").stdout
+        self.assertNotIn("▌ demo", out)
+        self.assertIn("archived: demo", out)
+        r = dais(self.root, "unarchive", "demo")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("archived", self._yaml())
+        self.assertIn("▌ demo", dais(self.root, "status").stdout)
+
+    def test_archive_is_idempotent(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "archive", "demo")
+        r = dais(self.root, "archive", "demo")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self._yaml().count("archived:"), 1)   # never stacks flag lines
+
+    def test_archive_unknown_project_fails(self):
+        r = dais(self.root, "archive", "ghost")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_tick_refuses_an_archived_project(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "w", "--id", "d-2", "--status", "ready")
+        dais(self.root, "archive", "demo")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("archived", r.stdout + r.stderr)
+        self.assertNotIn("starting", r.stdout)
+
+    def test_start_refuses_an_archived_project(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "w", "--id", "d-3", "--status", "ready")
+        dais(self.root, "archive", "demo")
+        r = dais(self.root, "start", "d-3")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("archived", r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

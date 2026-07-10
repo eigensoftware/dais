@@ -27,6 +27,8 @@ dais — your agent company control panel
   dais schedule install|uninstall|status   run the interval in the background (cross-platform)
   dais pause | resume                 park/un-park the loop (honored by watch + schedule)
   dais cancel <project>               stop the project's in-flight agent (marks it interrupted)
+  dais archive <project>              hide a finished project from the board + dispatch (data stays in the db)
+  dais unarchive <project>            restore an archived project to the board
   dais start <id>                      run the role the machine dispatches for this task's state, now
   dais run <project> <agent>          run a specific agent now (headless claude)
   dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify; --notes rides along)
@@ -273,6 +275,9 @@ MD
     exit 1 ;;
 
   run)
+    if [ -n "${1:-}" ] && [ "$(pcfg "$1" archived)" = "true" ]; then
+      echo "run: $1 is archived — dais unarchive $1 first"; exit 1
+    fi
     exec "$DAIS_ROOT/harness/run-agent.sh" "$@" ;;
 
   start)
@@ -285,6 +290,9 @@ MD
     row="$(db -separator '|' "SELECT status,project FROM tasks WHERE id='$(sqlesc "$id")';")"
     [ -n "$row" ] || { echo "no such task: $id"; exit 1; }
     st="${row%%|*}"; proj="${row##*|}"
+    if [ "$(pcfg "$proj" archived)" = "true" ]; then
+      echo "start: $proj is archived — dais unarchive $proj first"; exit 1
+    fi
     # honor the dependency chain — the scheduler skips dep-blocked tasks, and a manual start
     # must not silently jump the queue (that's how a review ran against a moving target once).
     dep="$(db "SELECT t.blocked_on FROM tasks t JOIN tasks p ON p.id=t.blocked_on
@@ -536,6 +544,30 @@ effort: <optional low|medium|high, or blank>
     for pid in $(live_lock_pids "$proj"); do kill_tree "$pid"; n=$((n+1)); done
     [ "$n" -gt 0 ] && echo "■ cancelled $n in-flight agent(s) in $proj — marked interrupted; task stays put" \
                    || echo "nothing running in $proj" ;;
+
+  archive)
+    # hide a finished project: off the rail/status/dispatch, but nothing is deleted — tasks,
+    # runs and notes stay in the db, and `dais project|tasks <name>` still answer by name.
+    # The flag is a project.yaml line (`archived: true`) so it's config, not db surgery.
+    proj="${1:?usage: dais archive <project>}"
+    py="$DAIS_HOME/projects/$proj/project.yaml"
+    [ -f "$py" ] || { echo "archive: no project '$proj' (projects/$proj/project.yaml missing)"; exit 1; }
+    [ "$(pcfg "$proj" archived)" = "true" ] && { echo "$proj is already archived"; exit 0; }
+    if [ -n "$(live_lock_pids "$proj")" ]; then
+      echo "archive: $proj has a live agent — dais cancel $proj first"; exit 1
+    fi
+    printf 'archived: true\n' >> "$py"
+    counts="$(db "SELECT status || ' ' || COUNT(*) FROM tasks WHERE project='$(sqlesc "$proj")' GROUP BY status ORDER BY status;" | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
+    echo "🗄 archived $proj — off the board and out of dispatch; its data stays in the db (${counts:-no tasks})"
+    echo "   inspect any time: dais tasks $proj   ·   restore: dais unarchive $proj" ;;
+
+  unarchive)
+    proj="${1:?usage: dais unarchive <project>}"
+    py="$DAIS_HOME/projects/$proj/project.yaml"
+    [ -f "$py" ] || { echo "unarchive: no project '$proj' (projects/$proj/project.yaml missing)"; exit 1; }
+    [ "$(pcfg "$proj" archived)" = "true" ] || { echo "$proj is not archived"; exit 0; }
+    tmp="$py.tmp.$$"; grep -v '^archived:' "$py" > "$tmp" && mv "$tmp" "$py"
+    echo "restored $proj — back on the board and eligible for dispatch" ;;
 
   schedule)
     sub="${1:-status}"; PLIST="$HOME/Library/LaunchAgents/com.dais.dispatch.plist"

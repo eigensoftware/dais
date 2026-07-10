@@ -282,6 +282,52 @@ class TestDataLayer(unittest.TestCase):
             self.assertIn("newstyle", [p.name for p in snap.projects])
 
 
+class TestArchivedProjects(unittest.TestCase):
+    """`archived: true` in project.yaml removes a project from the derived board — rail, WORK,
+    status — without touching the db. The names ride Snapshot.archived so renderers can say
+    what's hidden and how to get it back."""
+
+    def _root(self, **projects):
+        root = tempfile.mkdtemp(prefix="dais-arch-")
+        self.addCleanup(__import__("shutil").rmtree, root, ignore_errors=True)
+        for name, yaml in projects.items():
+            pdir = os.path.join(root, "projects", name)
+            os.makedirs(pdir)
+            with open(os.path.join(pdir, "project.yaml"), "w") as fh:
+                fh.write(yaml)
+        return root
+
+    def test_archived_project_leaves_the_snapshot(self):
+        # the flag must beat the disk∪tasks union: acme HAS tasks in the seeded db, and the
+        # orphan-rescue path (tasks but no dir) must not resurface an explicitly archived project
+        root = self._root(acme="project: acme\narchived: true\n",
+                          live="project: live\n")
+        snap = d.load_snapshot(_seed(), root=root, now="2026-06-26 20:45:00")
+        names = [p.name for p in snap.projects]
+        self.assertNotIn("acme", names)
+        self.assertIn("live", names)
+        self.assertEqual(snap.archived, ["acme"])
+
+    def test_archiving_never_touches_the_db(self):
+        conn = _seed()
+        root = self._root(acme="project: acme\narchived: true\n")
+        d.load_snapshot(conn, root=root, now="2026-06-26 20:45:00")
+        n = conn.execute("SELECT COUNT(*) FROM tasks WHERE project='acme'").fetchone()[0]
+        self.assertEqual(n, 4)                       # every seeded task still there
+
+    def test_status_footer_names_the_hidden(self):
+        root = self._root(acme="project: acme\narchived: true\n")
+        snap = d.load_snapshot(_seed(), root=root, now="2026-06-26 20:45:00")
+        text = d.render_plain(snap, color=False)
+        self.assertNotIn("▌ acme", text)             # the project block is gone
+        self.assertIn("archived: acme", text)        # ...but discoverable, with the way back
+        self.assertIn("dais unarchive", text)
+
+    def test_no_archived_projects_no_footer(self):
+        snap = d.load_snapshot(_seed(), root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertNotIn("archived:", d.render_plain(snap, color=False))
+
+
 class TestWorkspaceName(unittest.TestCase):
     """workspace_name reads the `workspace:` value from a workspace's dais.yaml
     (the line-based reader mirrors stage_goal), or None when absent."""

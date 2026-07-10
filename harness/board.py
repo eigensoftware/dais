@@ -105,6 +105,8 @@ class Snapshot:
     workspace: str = None          # workspace identity (dais.yaml `workspace:`), or None
     links: list = field(default_factory=list)   # composition graph: (parent_id, child_id, rel)
                                                 # rows from task_links; [] pre-migration
+    archived: list = field(default_factory=list)  # projects hidden from the board (`archived: true`
+                                                  # in project.yaml) — data stays in the db
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +159,14 @@ def running_agents(project_dir, is_alive=_pid_alive):
 # --------------------------------------------------------------------------- #
 # project config readers
 # --------------------------------------------------------------------------- #
+def project_archived(root, name):
+    """True when the project opted off the board (`archived: true` in project.yaml). Archiving
+    hides — it never deletes: tasks/runs/notes stay in the db, `dais project|tasks <name>` still
+    answer by name, and `dais unarchive` restores. The flag must be POSITIVE (not a moved dir):
+    load_snapshot's disk∪tasks union would resurface a moved project from its lingering tasks."""
+    return project_field(root, name, "archived").lower() in ("true", "yes", "1")
+
+
 def project_field(root, name, key):
     """First-line value of `key:` from a project's project.yaml ('' if absent). Line-based, matching
     the bash `pcfg` reader — used for stage_goal, deploy, etc."""
@@ -266,6 +276,10 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                if os.path.isdir(pdir) else [])
     tasked = [r["project"] for r in conn.execute("SELECT DISTINCT project FROM tasks")]
     names = sorted(set(on_disk) | set(tasked))
+    # archived projects (project.yaml `archived: true`) leave the board entirely — rail, WORK,
+    # status — but their names ride the snapshot so renderers can say what's hidden.
+    archived = [n for n in names if project_archived(root, n)]
+    names = [n for n in names if n not in archived]
     for name in names:
         rows = conn.execute(
             "SELECT id,title,status,priority,assignee,pr_url,notes,updated_at" + dep + " FROM tasks "
@@ -335,7 +349,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
         links = []
     return Snapshot(projects=projects, recent_runs=recent_runs,
                     cap_state=capped > 0, ts=now, workspace=workspace_name(root),
-                    links=links)
+                    links=links, archived=archived)
 
 
 def load_runs(conn, limit=200):

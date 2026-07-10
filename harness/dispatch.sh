@@ -37,6 +37,7 @@ if [ "$DRY" = 0 ]; then
     db "UPDATE runs SET status='interrupted', ended_at=datetime('now') WHERE status='running';"
     for p in "$DAIS_HOME"/projects/*/; do
       [ -d "$p" ] || continue; pj="$(basename "$p")"
+      [ "$(pcfg "$pj" archived)" = "true" ] && continue   # archived: the dispatcher never touches it
       mp="$(machine_path "$pj")"; [ -n "$mp" ] || continue
       python3 "$SELF/machine.py" recover "$DB" "$mp" "$pj" 2>/dev/null || true
     done
@@ -57,6 +58,7 @@ fi
 if [ "$DRY" = 0 ]; then
   for p in "$DAIS_HOME"/projects/*/; do
     [ -d "$p" ] || continue; pj="$(basename "$p")"
+    [ "$(pcfg "$pj" archived)" = "true" ] && continue     # archived: no maintenance either
     mp="$(machine_path "$pj")"; [ -n "$mp" ] || continue
     python3 "$SELF/machine.py" advance "$DB" "$mp" "$pj" 2>/dev/null | while IFS= read -r t; do
       [ -n "$t" ] && echo "${CD}tick[$pj]: unblocked $t${C0}"
@@ -101,10 +103,22 @@ MAX="${DAIS_MAX_PARALLEL:-1}"
 running="$(live_lock_pids | wc -l | tr -d ' ')"
 free=$((MAX - running))
 
-# which projects to consider
+# which projects to consider — archived projects never dispatch (hiding a project from the
+# board while the watch loop kept spending agents on it would be the worst of both worlds)
 projects=()
-if [ -n "$PROJECT" ]; then projects=("$PROJECT")
-else for p in "$DAIS_HOME"/projects/*/; do [ -d "$p" ] && projects+=("$(basename "$p")"); done; fi
+if [ -n "$PROJECT" ]; then
+  if [ "$(pcfg "$PROJECT" archived)" = "true" ]; then
+    tlog "tick[$PROJECT]: archived — skipped"
+    echo "${CY}tick: $PROJECT is archived — dais unarchive $PROJECT to resume dispatch${C0}"; exit 0
+  fi
+  projects=("$PROJECT")
+else
+  for p in "$DAIS_HOME"/projects/*/; do
+    [ -d "$p" ] || continue; pj="$(basename "$p")"
+    [ "$(pcfg "$pj" archived)" = "true" ] && continue
+    projects+=("$pj")
+  done
+fi
 
 # Build the eligible set: each project the router wants to run, as one line
 # `priority|last_run|project|agent`. At most one NEW launch per project per tick. A busy
