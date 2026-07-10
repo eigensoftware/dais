@@ -653,6 +653,13 @@ def render_vitals(scr, rect, app):
     line = pre + run_tok + sep + gate_tok + (sep + ship_tok if ship_tok else "") + ctx
     bar = app._cp(_VITALS) | curses.A_BOLD                 # the readout's own bar (bold white on blue)
     _add(scr, rect.y, rect.x, pad_cols(line, rect.w), rect.x + rect.w, bar)
+    # the build, flush RIGHT on the strip (which machine runs which dais at a glance — the
+    # tool_version() result is computed once per process). Dropped when a narrow terminal
+    # would run it into the readout: the operational tokens outrank identity.
+    ver_tok = d.tool_version()
+    vx = rect.x + rect.w - disp_width(ver_tok) - 1         # one breathing cell off the edge
+    if vx > rect.x + disp_width(line) + 1:
+        _add(scr, rect.y, vx, ver_tok, rect.x + rect.w, app._cp(_VITALS))
     if threads:                                            # the run token glows green while agents are live
         _add(scr, rect.y, rect.x + disp_width(pre), run_tok, rect.x + rect.w,
              app._cp(_LIVE) | curses.A_REVERSE | curses.A_BOLD)

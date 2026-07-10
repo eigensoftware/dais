@@ -352,6 +352,26 @@ class TestChromePanes(unittest.TestCase):
         self.assertNotIn("LIVE", text)        # no hardcoded LIVE contradicting the watch badge
         self.assertNotIn("5h", text)          # NO fake budget bar
 
+    def test_vitals_shows_the_build_top_right(self):
+        from unittest import mock
+        app = self._app([("cou-1", "acme", "x", "proposed", "high", None)])
+        scr = FakeScr(40, 200)
+        with mock.patch.object(pn.d, "tool_version", return_value="v9.9-test"):
+            pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        ver = [(x, s) for (_y, x, s, _a) in scr.calls if "v9.9-test" in s]
+        self.assertTrue(ver, "version token missing from the vitals strip")
+        x, s = ver[-1]
+        self.assertEqual(x + pn.disp_width(s), 199)   # flush right, one breathing cell off the edge
+
+    def test_vitals_drops_the_build_on_a_narrow_strip(self):
+        from unittest import mock
+        app = self._app([("cou-1", "acme", "x", "proposed", "high", None)])
+        scr = FakeScr(40, 70)
+        with mock.patch.object(pn.d, "tool_version", return_value="v9.9-test"):
+            pn.render_vitals(scr, pn.Rect(0, 0, 1, 70), app)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertNotIn("v9.9-test", text)           # never overwrites the readout
+
     def test_rail_lists_projects(self):
         app = self._app([("cou-1", "acme", "x", "proposed", "high", None),
                          ("lyr-1", "beacon", "y", "ready", "high", None)])
