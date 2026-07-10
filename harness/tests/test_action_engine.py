@@ -133,9 +133,14 @@ class TestActionBar(unittest.TestCase):
     def test_terminal_status_minimal_set(self):
         bar = self.app.action_bar(task_row(status="done"))
         self.assertNotIn("+/- priority", bar)   # priority is a no-op on a terminal task
-        self.assertIn("e edit", bar)            # only edit-title remains
+        self.assertIn("e edit", bar)            # only edit-title + add-note remain
         self.assertIn("n new", bar)
         self.assertNotIn("a ", bar)
+
+    def test_note_key_shown_on_task_rows(self):
+        # notes are the founder↔agent channel — the bar must advertise the key on any task
+        for status in ("ready", "proposal_review", "done"):
+            self.assertIn("N note", self.app.action_bar(task_row(status=status)), status)
 
 
 # --------------------------------------------------------------------------- #
@@ -231,11 +236,56 @@ class TestDoAction(unittest.TestCase):
         self.sub.call.assert_called_once_with(
             ["dais", "task", "set", "cou-1", "--title", "renamed"])
 
+    def test_add_note_prompts_then_appends(self):
+        self.app._prompt = lambda *a: "FOUNDER CHANGE REQUEST: tighten §8"
+        self.app.do_action("add_note", task_row(status="proposal_review"))
+        self.sub.call.assert_called_once_with(
+            ["dais", "task", "set", "cou-1", "--notes",
+             "FOUNDER CHANGE REQUEST: tighten §8"])
+
+    def test_add_note_cancelled_prompt_sets_nothing(self):
+        self.app._prompt = lambda *a: ""       # esc / empty
+        self.app.do_action("add_note", task_row(status="ready"))
+        self.sub.call.assert_not_called()
+
     def test_set_priority_menu(self):
         self.app._menu = lambda *a, **k: 2     # PRIORITIES[2] == "high"
         self.app.do_action("set_priority", task_row(status="ready", priority="low"))
         self.sub.call.assert_called_once_with(
             ["dais", "task", "set", "cou-1", "--priority", "high"])
+
+    def _note_machine(self, guards=("note",)):
+        """The coding machine with request_changes guarded `note` (deep-copied: _machine() caches)."""
+        import copy
+        m = copy.deepcopy(_machine())
+        for e in m["edges"]:
+            if e["verb"] == "request_changes":
+                e["guards"] = list(guards)
+        return m
+
+    def test_note_guard_prompts_in_panel_then_rides_the_fire(self):
+        self.app._machine_of = lambda row: self._note_machine()
+        self.app._prompt = lambda *a: "tighten §8, drop the Thunes ask"
+        self.app.do_action("request_changes", task_row(status="proposal_review"))
+        self._fired(["dais", "fire", "cou-1", "request_changes", "--by", "founder",
+                     "--notes", "tighten §8, drop the Thunes ask"])
+
+    def test_note_guard_empty_prompt_aborts_the_fire(self):
+        self.app._machine_of = lambda row: self._note_machine()
+        self.app._prompt = lambda *a: ""       # esc
+        self.app.do_action("request_changes", task_row(status="proposal_review"))
+        self.sub.run.assert_not_called()
+        self.assertIn("DID NOT FIRE", self.app.flash)
+
+    def test_typed_note_counts_as_the_confirmation(self):
+        # guards ["note","confirm"]: typing the note IS deliberate — --confirm rides
+        # along without a second ask (same rule as typed_confirm)
+        self.app._machine_of = lambda row: self._note_machine(["note", "confirm"])
+        self.app._confirm = lambda *a: self.fail("must not double-ask after a typed note")
+        self.app._prompt = lambda *a: "redo the header"
+        self.app.do_action("request_changes", task_row(status="proposal_review"))
+        self._fired(["dais", "fire", "cou-1", "request_changes", "--by", "founder",
+                     "--notes", "redo the header", "--confirm"])
 
 
 class TestKeyWiring(unittest.TestCase):
@@ -277,6 +327,13 @@ class TestKeyWiring(unittest.TestCase):
         self._press(ord("-"), task_row(status="ready", priority="high"))
         self.sub.call.assert_called_once_with(
             ["dais", "task", "set", "cou-1", "--priority", "medium"])
+
+    def test_shift_n_adds_note(self):
+        # 'N' routes through the generic action-key path (distinct from 'n' = new task)
+        self.app._prompt = lambda *a: "drop the Thunes ask"
+        self._press(ord("N"), task_row(status="ready"))
+        self.sub.call.assert_called_once_with(
+            ["dais", "task", "set", "cou-1", "--notes", "drop the Thunes ask"])
 
     def test_a_on_project_row_is_noop(self):
         self._press(ord("a"), project_row())

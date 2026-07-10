@@ -495,6 +495,86 @@ class TestSpawnInheritsNotes(unittest.TestCase):
         self.assertTrue(r["spawned"])              # degrade gracefully, never crash
 
 
+class TestNoteGuard(unittest.TestCase):
+    """The `note` guard marks an edge that CARRIES founder input (an answer, a change request):
+    fire demands --notes, and the note is appended to the task's log atomically with the
+    transition — before effects, so a spawn's notes-inheritance carries it. --notes also rides
+    any UNguarded edge as an optional content channel."""
+    def setUp(self):
+        self.conn = _db()
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT")
+        self.m = M.load(CODING)
+        for e in self.m["edges"]:
+            if e["verb"] == "request_changes":
+                e["guards"] = ["note"]
+
+    def _notes(self, tid):
+        return self.conn.execute("SELECT notes FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+
+    def _in_review(self, notes=None):
+        p = M.create_task(self.conn, self.m, "proj", "idea", notes=notes)
+        M.fire(self.conn, self.m, p, "submit", "lead")
+        return p
+
+    def test_lint_accepts_the_note_guard(self):
+        errors, _ = M.lint(self.m)
+        self.assertEqual(errors, [])
+
+    def test_noteless_fire_is_blocked(self):
+        p = self._in_review()
+        with self.assertRaises(M.GuardFailure):
+            M.fire(self.conn, self.m, p, "request_changes", "founder")
+        self.assertEqual(_status(self.conn, p), "proposal_review")   # unmoved
+
+    def test_whitespace_note_does_not_satisfy(self):
+        p = self._in_review()
+        with self.assertRaises(M.GuardFailure):
+            M.fire(self.conn, self.m, p, "request_changes", "founder", {"notes": "   "})
+
+    def test_note_rides_the_fire_attributed_and_appended(self):
+        p = self._in_review(notes="WHAT: x")
+        M.fire(self.conn, self.m, p, "request_changes", "founder", {"notes": "tighten §8"})
+        self.assertEqual(_status(self.conn, p), "proposed")
+        notes = self._notes(p)
+        self.assertIn("WHAT: x", notes)            # append, never clobber the spec
+        self.assertRegex(notes, r"\[founder \d{4}-\d{2}-\d{2} \d{2}:\d{2}\] tighten §8")
+
+    def test_notes_ride_an_unguarded_edge_too(self):
+        p = M.create_task(self.conn, self.m, "proj", "idea")
+        M.fire(self.conn, self.m, p, "submit", "lead", {"notes": "flagging: needs the API key"})
+        self.assertRegex(self._notes(p), r"\[lead .*\] flagging: needs the API key")
+
+    def test_note_lands_before_spawn_inheritance(self):
+        # a note riding `approve` must travel INTO the spawned [impl] child, so the input the
+        # transition delivers reaches whoever the effect hands the work to
+        p = self._in_review()
+        r = M.fire(self.conn, self.m, p, "approve", "founder",
+                   {"confirm": True, "notes": "ship with the header fix"})
+        child = r["spawned"][0]["id"]
+        self.assertIn("ship with the header fix", self._notes(child))
+
+    def test_vs16_stripped_from_the_note(self):
+        p = self._in_review()
+        M.fire(self.conn, self.m, p, "request_changes", "founder", {"notes": "⚠️ risky"})
+        self.assertIn("⚠ risky", self._notes(p))
+        self.assertNotIn("\ufe0f", self._notes(p))
+
+    def test_unmigrated_db_fails_loud_not_silent(self):
+        # losing founder input silently is worse than blocking: no notes column -> the whole
+        # fire rolls back with a pointer to `dais migrate` (unlike spawn's best-effort inherit)
+        conn = _db()                               # no notes column at all
+        p = M.create_task(conn, self.m, "proj", "idea")
+        M.fire(conn, self.m, p, "submit", "lead")
+        with self.assertRaises(M.GuardFailure):
+            M.fire(conn, self.m, p, "approve", "founder", {"confirm": True, "notes": "x"})
+        self.assertEqual(_status(conn, p), "proposal_review")        # transition rolled back too
+
+    def test_prompts_for_includes_note(self):
+        edge = next(e for e in M.edges_from(self.m, "proposal_review")
+                    if e["verb"] == "request_changes")
+        self.assertEqual(M.prompts_for(self.m, edge, None), [{"kind": "note"}])
+
+
 class TestIdPrefixes(unittest.TestCase):
     """Auto-id prefixes are unique per project: a project KEEPS the prefix it owns (has the
     oldest task using it — ids are identity, history never re-labels), a collision loser

@@ -15,9 +15,10 @@ import json
 import os
 import sqlite3
 import sys
+import time
 
 IMPLICIT_ACTORS = {"founder", "system"}          # never scheduled as agents
-GUARD_ATOMS = {"confirm", "typed_confirm", "unblocked"}
+GUARD_ATOMS = {"confirm", "typed_confirm", "unblocked", "note"}
 GUARD_PREFIXES = ("verify:", "attest:", "role:")
 EFFECT_KINDS = {"spawn", "aggregate", "script", "then"}
 
@@ -557,6 +558,9 @@ def prompts_for(m, edge, task):
       {"kind": "verify", "check": c, "declared": b} — b: the machine declares a checker command
                                                       (fire runs it); False = only an explicit
                                                       --verify self-assertion passes (fails closed)
+      {"kind": "note"}                              — the edge CARRIES founder input (an answer,
+                                                      a change request): supply the note text
+                                                      (--notes), appended to the task's log
     """
     out, checks = [], (m or {}).get("checks", {})
     for g in edge.get("guards", []):
@@ -564,6 +568,8 @@ def prompts_for(m, edge, task):
             out.append({"kind": "typed"})
         elif g == "confirm":
             out.append({"kind": "confirm"})
+        elif g == "note":
+            out.append({"kind": "note"})
         elif g.startswith("attest:"):
             fact = attest_fact(g, task)
             if fact:
@@ -601,6 +607,12 @@ def _check_guards(conn, m, edge, task, ctx):
         elif g.startswith("role:"):
             if task["assignee"] != g[len("role:"):]:
                 raise GuardFailure(f"guard `role:` unmet")
+        elif g == "note":
+            # this edge CARRIES information (an answer, a change request) — moving the state
+            # without the message would hand the next actor a transition with no payload.
+            if not (ctx.get("notes") or "").strip():
+                raise GuardFailure('guard `note` unmet (this edge carries founder input — '
+                                   'add --notes "the answer / change request")')
 
 
 def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
@@ -663,6 +675,11 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         # record the ACTUAL verb: run<->task attribution ('claim' marks pickup) AND the
         # dispatcher's no-progress throttle both read this — a fire IS progress, 'touch' is not.
         _link_run(conn, tid, verb)
+        # a note riding the fire (--notes; mandatory under the `note` guard) is appended BEFORE
+        # effects run, so a spawn's notes-inheritance carries the input this transition delivers
+        # (the change request travels with the bounced proposal, the answer with the resumed work).
+        if (ctx.get("notes") or "").strip():
+            _append_note(conn, tid, actor, ctx["notes"].strip())
         result = {"task": tid, "from": task["status"], "to": to, "verb": verb, "spawned": [], "encompassed": []}
         _apply_effect(conn, m, task, edge, result, ctx)
     except BaseException:
@@ -674,6 +691,22 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         conn.execute("RELEASE SAVEPOINT dais_fire")
         conn.commit()
     return result
+
+
+def _append_note(conn, tid, actor, text):
+    """Append an attributed, timestamped entry to the task's notes log — the engine's twin of
+    the CLI's `task set --notes` append (same entry format, same append-never-clobber CASE), so
+    a note that rides a fire reads identically to one added standalone. VS16 is stripped for the
+    same reason as the CLI seam: it makes terminals overdraw TUI panes."""
+    text = text.replace("\ufe0f", "")
+    entry = f"[{actor} {time.strftime('%Y-%m-%d %H:%M', time.gmtime())}] {text}"
+    try:
+        conn.execute("UPDATE tasks SET notes=CASE WHEN notes IS NULL OR notes='' THEN ? "
+                     "ELSE notes || char(10) || char(10) || ? END WHERE id=?", (entry, entry, tid))
+    except sqlite3.OperationalError:
+        # unlike spawn's inheritance (best-effort), a note given with a fire is founder input —
+        # losing it silently is worse than blocking, so fail LOUD (rolls the whole fire back).
+        raise GuardFailure("this db has no notes column — run `dais migrate`, then re-fire")
 
 
 def _link_run(conn, tid, verb):
@@ -919,6 +952,8 @@ def _main(argv):
                 ctx.setdefault("attest", {})[rest[i + 1]] = True; i += 2
             elif a == "--verify":
                 ctx.setdefault("verifiers", {})[rest[i + 1]] = True; i += 2
+            elif a == "--notes":
+                ctx["notes"] = rest[i + 1]; i += 2
             else:
                 i += 1
         conn = open_db(db)

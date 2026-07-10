@@ -29,7 +29,7 @@ dais — your agent company control panel
   dais cancel <project>               stop the project's in-flight agent (marks it interrupted)
   dais start <id>                      run the role the machine dispatches for this task's state, now
   dais run <project> <agent>          run a specific agent now (headless claude)
-  dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify)
+  dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify; --notes rides along)
   dais edges <task-id>                the fireable edges from a task's current state
   dais logs <project> [N]             recent runs
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md
@@ -456,8 +456,9 @@ effort: <optional low|medium|high, or blank>
   fire)
     # machine-driven transition: fire the (state,verb) edge for a task. Actor defaults to the founder
     # (your shell) or $DAIS_ACTOR (an agent run); --by overrides. Guards: --confirm --typed X
-    # --attest fact --verify check. See design/machine-model.md.
-    id="${1:?usage: dais fire <task-id> <verb> [--by role] [--confirm] [--typed X] [--attest fact] [--verify check]}"
+    # --attest fact --verify check. --notes "..." appends to the task's log with the transition
+    # (mandatory on edges guarded `note`). See design/machine-model.md.
+    id="${1:?usage: dais fire <task-id> <verb> [--by role] [--confirm] [--typed X] [--attest fact] [--verify check] [--notes \"...\"]}"
     verb="${2:?usage: dais fire <task-id> <verb> [...]}"; shift 2 2>/dev/null || true
     proj="$(db "SELECT project FROM tasks WHERE id='$(sqlesc "$id")';")"
     [ -n "$proj" ] || { echo "no task: $id"; exit 1; }

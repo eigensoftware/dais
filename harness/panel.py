@@ -886,6 +886,7 @@ _HELP_LINES = [
     "  + / -             raise / lower priority",
     "  o                 open the PR in a browser",
     "  n                 new task",
+    "  N                 add a note to the selected task's log (e.g. a change request)",
     "  C                 cut a release — assembles everything approved, then your greenlight",
     "  P                 project setup — cast + models, machine dispatch map, config",
     "  enter             action menu for the selection",

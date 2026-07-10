@@ -225,6 +225,7 @@ def _machine_actions(m, state):
     if not (m or {}).get("states", {}).get(state, {}).get("terminal"):
         acts.append(Action("set_priority", "set priority", "", "menu", False))   # no-op on a terminal task
     acts.append(Action("edit_title", "edit title", "e", "menu", False))          # metadata, orthogonal
+    acts.append(Action("add_note", "add note", "N", "menu", False))              # appends to the notes log
     return acts
 
 

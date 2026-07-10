@@ -241,6 +241,7 @@ BAR_LABEL = {
     "request_changes": "request-changes", "start": "start",
     "undefer": "un-defer", "unblock": "unblock",
     "defer": "defer", "cancel": "cancel", "cancel_run": "cancel-run",
+    "add_note": "note",
 }
 
 
@@ -1040,6 +1041,8 @@ class App:
             self._priority_menu(row)
         elif action_id == "edit_title":
             self._edit_title(row)
+        elif action_id == "add_note":
+            self._add_note(row)
         else:
             self.flash = f"no handler for {action_id}"
 
@@ -1052,6 +1055,8 @@ class App:
             return self._priority_menu(row)
         if verb == "edit_title":
             return self._edit_title(row)
+        if verb == "add_note":
+            return self._add_note(row)
         if verb == "__start":
             # the launch is detached (a foreground claude stream would corrupt curses), so this
             # flash claims INTENT, not success — the RUNNING band / watch log is the truth.
@@ -1092,6 +1097,14 @@ class App:
                     self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — attestation not given"
                     return
                 cmd += ["--attest", p["fact"]]; prompted = True
+            elif p["kind"] == "note":
+                # this edge CARRIES founder input (an answer / change request) — the note rides
+                # the fire and lands in the task's log atomically with the transition.
+                note = self._prompt(f"{verb} {t['id']} — note (the input this edge carries)")
+                if not note:
+                    self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — this edge requires a note"
+                    return
+                cmd += ["--notes", note]; prompted = True   # typing a note IS deliberate — no double-confirm
         if any(p["kind"] == "confirm" for p in prompts):
             # the typed prompt IS the confirmation when one just happened — don't double-ask
             if not prompted and not self._confirm(f"{verb} {t['id']}?"):
@@ -1157,6 +1170,21 @@ class App:
         rc = self._dispatch(["task", "set", t["id"], "--title", title])
         self.refresh()
         self.flash = (f"retitled {t['id']}" if rc == 0 else f"retitle failed (exit {rc})")
+
+    def _add_note(self, row):
+        """Append a note to the task's log from the panel — the same attributed, timestamped
+        append as `dais task set --notes` (it IS that command), so a change request can be
+        recorded without dropping to a shell. One line; long feedback still reads better
+        typed at the CLI."""
+        t = self._task_of(row)
+        if not t or not t.get("id"):
+            return
+        note = self._prompt(f"note for {t['id']} (appends to its log)")
+        if not note:
+            return
+        rc = self._dispatch(["task", "set", t["id"], "--notes", note])
+        self.refresh()
+        self.flash = (f"noted {t['id']}" if rc == 0 else f"note failed (exit {rc})")
 
     def _new_task(self, row):
         proj = row.get("project") if row else None
