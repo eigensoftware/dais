@@ -477,12 +477,23 @@ def render_inspector_live_log(scr, inner, app, sel_row):
         return
     # WRAP each log line to the pane width (no more cut-off), coloring continuation rows like their
     # source line; then the inspector's detail_scroll scrolls UP from the tail through this history.
-    raw = d.tail_lines(sel_row.get("log_path"), 400) if sel_row.get("log_path") else []
-    wrapped = []
-    for ln in raw:
-        a = app._log_attr(ln)
-        for piece in (d.wrap_cols(ln, inner.w) or [ln]):
-            wrapped.append((piece, a))
+    # The wrap is CACHED on (path, file_sig, width): width-aware wrapping of a 400-line tail is
+    # ~14ms of pure-python unicode math, and redoing it per scroll keypress (when neither the file
+    # nor the pane changed) is what made inspector scrolling lag. A streaming log changes its sig
+    # on every write, so the tail still updates live — the cache only skips identical rebuilds.
+    log_path = sel_row.get("log_path")
+    key = (log_path, d.file_sig(log_path) if log_path else None, inner.w)
+    cached = getattr(app, "_livelog_cache", None)
+    if cached and cached[0] == key:
+        wrapped = cached[1]
+    else:
+        raw = d.tail_lines(log_path, 400) if log_path else []
+        wrapped = []
+        for ln in raw:
+            a = app._log_attr(ln)
+            for piece in (d.wrap_cols(ln, inner.w) or [ln]):
+                wrapped.append((piece, a))
+        app._livelog_cache = (key, wrapped)
     offset = max(0, min(getattr(app, "detail_scroll", 0), max(0, len(wrapped) - log_h)))
     app.detail_scroll = offset                      # clamp (so j past the tail / k past the top stick)
     head = "─ live log ─" if offset == 0 else f"─ live log · ↑{offset} (j → follow) ─"

@@ -115,6 +115,57 @@ import dashboard as d
 from test_action_engine import FakeScr, _conn, make_app   # reuse the wired-App helpers
 
 
+class TestLiveLogWrapCache(unittest.TestCase):
+    """The live-log inspector re-wraps its 400-line tail ONLY when the file or the pane width
+    changes (file_sig is the change token). Re-wrapping identical content on every frame —
+    ~14ms of width math per scroll keypress — was the inspector-scrolling lag."""
+
+    def setUp(self):
+        import tempfile, shutil
+        root = tempfile.mkdtemp(prefix="dais-llc-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn()
+        self.app = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        self.app.snap = pn.d.load_snapshot(conn, root=root)
+        self.app._cp = lambda n: 0
+        fd, self.log = tempfile.mkstemp(suffix=".log")
+        with os.fdopen(fd, "w") as fh:
+            fh.write("".join(f"  💬 line {i} of streaming agent output\n" for i in range(40)))
+        self.addCleanup(os.unlink, self.log)
+
+    def _render(self, w=60):
+        scr = FakeScr(40, 200)
+        row = {"kind": "running", "id": "run::p/eng", "project": "p", "agent": "eng",
+               "since": "2026-07-10 18:00:00", "task_id": None, "task": None,
+               "status": "doing", "sel": True, "log_path": self.log}
+        pn.render_inspector_live_log(scr, pn.Rect(2, 5, 30, w), self.app, row)
+        return "\n".join(c[2] for c in scr.calls)
+
+    def _wrap_calls(self, fn):
+        from unittest import mock
+        real = pn.d.wrap_cols
+        with mock.patch.object(pn.d, "wrap_cols", side_effect=real) as wc:
+            fn()
+            return wc.call_count
+
+    def test_identical_frame_skips_the_wrap(self):
+        self.assertGreater(self._wrap_calls(self._render), 0)   # first frame wraps
+        self.assertEqual(self._wrap_calls(self._render), 0)     # unchanged frame: cache hit
+        self.assertIn("line 39", self._render())                # ...and still renders the tail
+
+    def test_file_growth_rebuilds_and_streams(self):
+        self._render()
+        with open(self.log, "a") as fh:
+            fh.write("  💬 fresh output after the cache filled\n")
+        self.assertGreater(self._wrap_calls(self._render), 0)   # sig changed -> re-wrap
+        self.assertIn("fresh output", self._render())           # the tail still streams
+
+    def test_width_change_rebuilds(self):
+        self._render(w=60)
+        self.assertGreater(self._wrap_calls(lambda: self._render(w=45)), 0)
+
+
 def _seed(conn, rows):
     conn.executemany(
         "INSERT INTO tasks(id,project,title,status,priority,pr_url) VALUES(?,?,?,?,?,?)",

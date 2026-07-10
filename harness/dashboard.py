@@ -1332,12 +1332,24 @@ class App:
             ch = self.scr.getch()
             if ch == -1:
                 continue
-            if ch == curses.KEY_RESIZE:
-                continue
-            rows = self.left_rows()
-            sel_i, sel_row = self._selected(rows)
-            if not self.handle(ch, rows, sel_i, sel_row):
-                break
+            # Drain the whole input queue before redrawing. Scroll input arrives in BURSTS —
+            # held j/k autorepeats at ~30Hz, and a trackpad/wheel gesture translates to dozens
+            # of queued arrow keys — while a frame costs milliseconds. Drawing between every
+            # two queued keys let the queue outrun the frames, so the pane kept scrolling
+            # after the fingers stopped (the "laggy scrolling" rubber-band). One draw per
+            # BATCH keeps the screen pinned to the final position instead.
+            while ch != -1:
+                if ch != curses.KEY_RESIZE:
+                    rows = self.left_rows()
+                    sel_i, sel_row = self._selected(rows)
+                    if not self.handle(ch, rows, sel_i, sel_row):
+                        return
+                # modal handlers (_prompt/_menu/_confirm) run their own blocking getch loops
+                # and restore timeout(250) on exit, so this poll is only ever reached with
+                # the queue in its normal state.
+                self.scr.timeout(0)
+                ch = self.scr.getch()
+                self.scr.timeout(250)
 
 
 # --------------------------------------------------------------------------- #
