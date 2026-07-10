@@ -90,17 +90,22 @@ dais watch                  # run the loop: agents drain the queue, parking at y
 ## The machine: how work flows
 
 Each project owns its lifecycle as an authored state machine:
-`projects/<name>/machine.json`, seeded from a template by `dais scaffold` and yours to edit.
-States are the board's bands; **edges own every transition**: a verb, the role that may fire
-it (`by`), optional guards, and optional effects. Nothing writes a status directly; every
-change is `dais fire <task> <verb>`, and `dais edges <task>` shows what's fireable from where
-a task sits. (Full model: [`design/machine-model.md`](design/machine-model.md).)
+`projects/<name>/machine.json`, seeded from a stock template by `dais scaffold` and yours to
+edit. Two templates ship with the tool: **coding** (the full propose, build, QA, release
+lifecycle below) and **marketing** (a content lane: draft, review, founder publish). Start
+from one, then edit your copy; the machine is data, not code. States are the board's bands;
+**edges own every transition**: a verb, the role that may fire it (`by`), optional guards,
+and optional effects. Nothing writes a status directly; every change is
+`dais fire <task> <verb>`, and `dais edges <task>` shows what's fireable from where a task
+sits. (Full model: [`design/machine-model.md`](design/machine-model.md).)
 
-The default **coding** machine:
+The stock **coding** machine:
 
 ```
 proposed ──submit──▶ proposal_review ──approve ◆──▶ spawns the build task, ready
-   (lead specs it)      (front-door founder gate;  request_changes bounces it back)
+   │ (lead specs it)    (front-door founder gate;  request_changes bounces it back)
+   └──promote──▶ ready   (the routine lane: bugfixes, QA cleanups, and follow-ups of
+                          already-approved work skip the gate; only NEW direction gates)
 
 ready ──claim──▶ doing ──complete──▶ qa_review ──pass ✓tests──▶ approved (parked for a release)
    │                                     └──fail──▶ blocked + a spawned fix task;
@@ -116,6 +121,12 @@ release_open ──assemble──▶ release_review ──greenlight ◆──�
 Plus founder parking (`defer` / `undefer` returns a task to where it was parked from), an
 engineer self-retire edge (`invalidate`), and a rollback lane (`release_error` spawns a fix,
 founder `retry`s or `give_up`s).
+
+Why `promote` is safe where it is, and the rule if you author your own edges: it is
+**inward-only**. Everything the routine lane feeds still passes QA and still cannot ship
+without the founder's release greenlight. Routine-*inward* work can self-serve; anything
+*outward* (publish, deploy, send, spend) stays a founder gate no matter how routine it looks.
+Do not copy the promote pattern onto an outward edge.
 
 **Guards** are the gate mechanism, declared per edge:
 
