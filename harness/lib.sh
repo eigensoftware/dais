@@ -96,11 +96,16 @@ machine_path(){
 # packaged install (e.g. Homebrew, where DAIS_ROOT is the read-only Cellar) still resolves repos
 # next to the workspace; set DAIS_AGENT_REPOS to override.
 repo_path(){
-  local r; r="$(pcfg "$1" repo)"
+  local r base; r="$(pcfg "$1" repo)"
   case "$r" in
     /*) printf '%s' "$r" ;;
     "~"/*|"~") printf '%s' "$(expand "$r")" ;;
-    *)  printf '%s/%s' "${DAIS_AGENT_REPOS:-$(dirname "$DAIS_HOME")}" "$r" ;;
+    *)
+      # relative repo: env override > dais.yaml `agent_repos:` (init writes it and its comment
+      # promises it works — it must actually be read) > the workspace's parent dir.
+      base="${DAIS_AGENT_REPOS:-}"
+      [ -z "$base" ] && base="$(expand "$(sed -n 's/^agent_repos:[[:space:]]*//p' "$DAIS_HOME/dais.yaml" 2>/dev/null | sed 's/[[:space:]]*#.*$//' | head -1)")"
+      printf '%s/%s' "${base:-$(dirname "$DAIS_HOME")}" "$r" ;;
   esac
 }
 
@@ -180,6 +185,10 @@ is_capped(){
   # subscription: "You're out of usage credits. Run /usage-credits ... or /model to switch");
   # phrased nothing like the subscription-window limit above, so match it explicitly — without
   # this a Fable-dry run is mis-scored (often "success 0s") and the auto-fallback never fires.
-  pats="$pats|insufficient_quota|credit balance is too low|error.*429|out of usage credits"
+  # The 429 arm is anchored to the API's actual error shapes ("API Error: 429", '"status": 429',
+  # "429 {"type":"error"...) — a bare `error.*429` matched an agent merely DISCUSSING a 429 in
+  # its log, and one false positive parks the whole loop in the 90m cap cooldown.
+  pats="$pats|insufficient_quota|credit balance is too low|out of usage credits"
+  pats="$pats|api error: *429|\"status\" *: *429|[^0-9]429[^0-9].{0,40}(rate.?limit|too many requests|overloaded)"
   grep -qiE "$pats" "${1:-/dev/null}" 2>/dev/null
 }

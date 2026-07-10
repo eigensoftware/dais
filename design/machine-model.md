@@ -97,8 +97,11 @@ protection mechanism; danger is declared per-edge, not coded per-action.
 - `spawn: { template, initial, by, rel }` — create task(s). `rel ∈
   {from_proposal, blocks_parent, part_of}`.
 - `aggregate: { select }` — pull matching tasks into this task's `encompasses`.
-- `script: { name, outward: bool }` — run an external script (merge/deploy/
-  publish). `outward` flags irreversible/outward effects for lint W3.
+- `script: { name, outward: bool }` — DECLARATIVE metadata only: it marks that this
+  edge's actor performs an external action (merge/deploy/publish), and `outward` is
+  what lint W3 reads to demand a human gate on the edge. The engine does NOT execute
+  anything (machine.py `_apply_effect` deliberately ignores it) — the named actor
+  does the action per the repo's own docs, then fires the edge.
 - `then: "encompassed:<state>-><state>"` — fire an edge on related tasks.
 
 ## Lint — coherence only, never policy

@@ -8,7 +8,13 @@ set -uo pipefail
 SELF="$(cd "$(dirname "$0")" && pwd)"; source "$SELF/lib.sh"
 
 DRY=0; PROJECT=""
-for a in "$@"; do [ "$a" = "--dry-run" ] && DRY=1 || PROJECT="$a"; done
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY=1 ;;
+    --*) echo "dispatch: unknown flag: $a" >&2; exit 1 ;;   # a typo'd --dryrun must not run a REAL tick
+    *) PROJECT="$a" ;;
+  esac
+done
 
 # --- tick journal: every REAL tick's outcome is appended to projects/.watch.log (rotated),
 #     so "why didn't that tick launch anything?" is answerable after the fact — the console
@@ -130,7 +136,10 @@ for proj in "${projects[@]}"; do
   # marker also gates) from going fully dark. `dais status` surfaces the marker.
   agent=""; excl=""
   while :; do
-    cand="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" "$excl" "$livespec" 2>/dev/null)"
+    # stderr goes to the tick journal, not /dev/null: decide-mode reports any internal failure
+    # as "idle", and with stderr muzzled too a malformed machine.json idled a project forever
+    # with zero diagnostics anywhere. The journal is exactly the "why didn't it launch?" record.
+    cand="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" "$excl" "$livespec" 2>>"$TLOG")"
     [ -z "$cand" ] && break
     sm="$DAIS_HOME/projects/$proj/.stalled-$cand"
     if [ -f "$sm" ]; then

@@ -148,7 +148,7 @@ MD
     while [ $# -gt 0 ]; do case "$1" in
       --assignee) where="$where AND assignee='$(sqlesc "$2")'"; shift 2;;
       --status)   where="$where AND status='$(sqlesc "$2")'"; shift 2;;
-      *) shift;; esac; done
+      *) echo "tasks: unknown arg: $1 (a typo'd filter would list EVERYTHING)"; exit 1;; esac; done
     if has_blocked_on; then
       db -separator ' | ' "SELECT t.id, t.status, t.priority, COALESCE(t.assignee,'-'),
         CASE WHEN t.blocked_on IS NOT NULL AND t.blocked_on<>'' AND EXISTS(
@@ -185,7 +185,8 @@ MD
           --assignee)   asg="$2"; shift 2;;
           --notes)      notes="$2"; shift 2;;
           --depends-on) dep="$2"; shift 2;;
-          *) [ -z "$title" ] && title="$1"; shift;;
+          --*) echo "task add: unknown flag: $1 (a typo'd --depends-on would drop the dependency silently)"; exit 1;;
+          *) [ -n "$title" ] && { echo "task add: unexpected arg: $1"; exit 1; }; title="$1"; shift;;
         esac; done
         [ -n "$title" ] || { echo "need a title"; exit 1; }
         # the ENGINE creates the task (machine.py create): entry-state resolution, state
@@ -222,7 +223,7 @@ MD
                         esac; shift 2;;
           --depends-on) dep="$2"; depset=1                       # '' clears the dependency
                         sets="$sets, blocked_on=$([ -n "$2" ] && echo "'$(sqlesc "$2")'" || echo NULL)"; shift 2;;
-          *) shift;; esac; done
+          *) echo "task set: unknown arg: $1 (a typo'd flag would silently change nothing)"; exit 1;; esac; done
         # Notes are the task's LOG — the agents' only channel. --notes APPENDS an attributed,
         # timestamped entry so a handoff can never clobber the spec the next reader needs;
         # --replace-notes rewrites outright (founder surgery).

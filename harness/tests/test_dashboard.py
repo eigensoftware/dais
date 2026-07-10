@@ -251,12 +251,20 @@ class TestDataLayer(unittest.TestCase):
                          ["cou-5a", "cou-9"])
         self.assertEqual(len(proj.tasks_by_status["done"]), 1)
 
-    def test_snapshot_cap_state_within_90min(self):
+    def test_snapshot_cap_state_mirrors_dispatcher_gate(self):
         conn = _seed()
+        # seeded: cap at 20:10, success at 20:38. A success AFTER the last cap proves the window
+        # is back (the badge mirrors dispatch.sh's gate), so NO cooling even within 90m of the cap.
         snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
-        self.assertTrue(snap.cap_state)
-        snap2 = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 23:59:00")
-        self.assertFalse(snap2.cap_state)
+        self.assertFalse(snap.cap_state)
+        # a cap NEWER than the latest success -> cooling ...
+        conn.execute("INSERT INTO runs(project,agent,status,log_path,started_at) "
+                     "VALUES('acme','qa','capped','/tmp/c2.log','2026-06-26 20:44:00')")
+        snap2 = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertTrue(snap2.cap_state)
+        # ... but only for 90 minutes
+        snap3 = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 23:59:00")
+        self.assertFalse(snap3.cap_state)
 
     def test_snapshot_run_duration(self):
         conn = _seed()

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # router.py — config-driven scheduler decision + roles linter.
-#   router.py <dais_root> <project>         -> prints the role to run next (nothing = idle)
-#   router.py --lint <dais_root> [project]  -> validates roles config(s); exit 1 on any error
+#   router.py <dais_root> <project>              -> prints the role to run next (nothing = idle)
+#   router.py --lint <dais_root> [project]       -> validates roles config(s); exit 1 on any error
+#   router.py --agent-config <root> <p> <role>   -> resolved per-agent config (run-agent.sh's seam)
+#   router.py --dispatch-set <root> <p> <role>   -> the role's dispatchable tasks (stall fingerprint)
 #
-# Model (status-driven board): a status maps to exactly ONE schedulable role (its `handles`); that
-# role REACTIVELY owns the status. Reactive handling runs first, by precedence (verify -> build ->
-# plan, generalized from config) — this includes a cadence role like the lead, which reactively owns
-# needs_scoping AND still runs on its every:Nh clock for periodic discovery. When no reactive work is
-# pending, cadence roles run on their interval; else idle.
+# Model (machine-driven dispatch): reactive work first — the MACHINE names the role for the top
+# pending task's state (machine.next_role; edges own state->role, nothing is hardcoded here).
+# When no reactive work is pending, cadence roles (`trigger: every:Nh`) run on their clock for
+# periodic discovery; `trigger: none` is dormancy and outranks both. Else idle.
 import sys, os, sqlite3, re
 
 VALID_ACCESS = {"edit", "review", "draft", "none"}
@@ -185,10 +186,11 @@ def decide(root, project, excluded=None, live=None):
     roles = cast(root, project)
     if not roles:
         return None
-    db = sqlite3.connect(os.path.join(root, "dais.db"))
-    db.row_factory = sqlite3.Row
-
     import machine as MC
+    # machine.open_db, not a raw connect: the 10s busy timeout matters most HERE — an agent
+    # holding a write lock made a raw-connect decide() throw "database is locked", which
+    # decide-mode reports as idle (the project sat out the tick for no reason).
+    db = MC.open_db(os.path.join(root, "dais.db"))
     dormant = {r["name"] for r in roles if r["trigger"] == "none"}
 
     if live:
@@ -426,7 +428,7 @@ if __name__ == "__main__":
         states = sorted(st for st in (m or {}).get("states", {})
                         if MC.dispatch_role(m, st) == role)
         if states:
-            db = sqlite3.connect(os.path.join(root, "dais.db"))
+            db = MC.open_db(os.path.join(root, "dais.db"))
             q = ("SELECT id||'|'||status FROM tasks WHERE project=? AND status IN (%s) "
                  "ORDER BY id" % ",".join("?" * len(states)))
             for (line,) in db.execute(q, [project] + states):
@@ -444,4 +446,8 @@ if __name__ == "__main__":
         if name:
             print(name)
     except Exception:
-        pass  # decide-mode must never crash the scheduler -> any error means idle
+        # decide-mode must never crash the scheduler -> any error means idle. But SILENT idle is
+        # its own failure mode (one malformed machine.json idled a project forever with zero
+        # diagnostics), so say why on stderr — dispatch.sh journals it; stdout stays empty.
+        import traceback
+        traceback.print_exc(file=sys.stderr)

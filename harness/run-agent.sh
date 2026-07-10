@@ -34,7 +34,10 @@ load_env(){
   while IFS= read -r line; do
     case "$line" in ''|\#*) continue;; esac
     k="${line%%=*}"
-    [ -n "$k" ] && [ -z "$(eval "printf '%s' \"\${$k:-}\"")" ] && export "$k"="${line#*=}"
+    # bash indirect expansion, NOT eval: these files are data, and an eval here executes shell
+    # woven into a key by whoever can write the file. Require a sane var name for the same reason.
+    [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    [ -z "${!k:-}" ] && export "$k"="${line#*=}"
   done < "$f"
 }
 load_env "$HOME/.dais/env"
@@ -53,7 +56,7 @@ if [ "$AUTH" = "api" ]; then
     openai)    KEYVAR="OPENAI_API_KEY";;
     *)         KEYVAR="";;
   esac
-  if [ -n "$KEYVAR" ] && [ -z "$(eval "printf '%s' \"\${$KEYVAR:-}\"")" ]; then
+  if [ -n "$KEYVAR" ] && [ -z "${!KEYVAR:-}" ]; then
     echo "[$PROJECT/$AGENT] auth: api but \$$KEYVAR is not set — put it in your environment," \
          "~/.dais/env, or $DAIS_HOME/.env"; exit 1
   fi
@@ -97,6 +100,9 @@ TS="$(date +%Y%m%d-%H%M%S)"; LOG="$PDIR/logs/$AGENT-$TS.log"
 # dais.db that hasn't run `dais migrate` yet — run recording must never break on a schema gap.
 RUNID="$(db "INSERT INTO runs(project,agent,log_path,model) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")'); SELECT last_insert_rowid();" 2>/dev/null)"
 [ -n "$RUNID" ] || RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")'); SELECT last_insert_rowid();")"
+# No run row = no attribution and malformed UPDATEs downstream (WHERE id=;) — fail loud instead
+# of running unrecorded (db locked past the busy timeout, disk full, broken schema).
+[ -n "$RUNID" ] || { echo "[$PROJECT/$AGENT] could not record the run in dais.db — aborting (is the db locked or full?)"; rm -f "$LOCK"; exit 1; }
 # Publish the run id to the agent's environment. The agent coordinates by shelling out to `dais
 # task ...`, and those calls inherit DAIS_RUN_ID — so every task the agent creates/changes is
 # recorded against THIS run in run_tasks (see link_run_task). Scoped to this process; child `dais`

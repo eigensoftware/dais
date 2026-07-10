@@ -696,8 +696,10 @@ def _apply_effect(conn, m, task, edge, result, ctx):
         _effect_aggregate(conn, m, task, eff["aggregate"], result)
     if "then" in eff:
         _effect_then(conn, m, task, eff["then"], ctx)
-    # eff["script"] would run an external effect script here (merge/deploy/publish) — out of scope
-    # for the engine prototype; the transition + guards above are what make it safe.
+    # eff["script"] is DELIBERATELY not executed: it's declarative metadata — "this edge's actor
+    # performs an external action (merge/deploy/publish)" — whose `outward` flag lint W3 reads to
+    # demand a human gate. The named actor does the action per the repo's own docs, then fires the
+    # edge; the engine executing side-effect scripts itself would bypass exactly those gates.
 
 
 def _effect_spawn(conn, task, sp, result):

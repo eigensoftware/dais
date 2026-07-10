@@ -9,21 +9,24 @@ never re-verify a drained board lane by lane.
 A re-rank only exists if the `priority` field moved — a ranking written as prose in your run
 summary is invisible to the builder. Write it into the board.
 
-SCOPING is your first job each run. Sparse tasks the founder hands you sit in `needs_scoping`
-(`dais tasks <project> --status needs_scoping`). These are one-liners to turn into real work:
+SCOPING is your first job each run. Sparse tasks land in the machine's entry state (usually
+`proposed` — check `dais tasks <project> --status proposed`). These are one-liners to turn into
+real work:
 - Flesh each into a proper spec in its notes — **WHAT** (the concrete change), **acceptance criteria**
   (how we know it's done), and any context/constraints the builder needs.
-- Then route it: routine forward work → promote it yourself
-  (`dais task set <id> --status ready --priority <p> --notes "<spec>"`); genuinely new direction /
-  scope change → file it as `proposed` instead (the founder greenlights). Default to `proposed` when
-  unsure.
-- Never leave a task sitting in `needs_scoping` once you've scoped it.
+- Then MOVE it: state changes fire edges, never `--status`. `dais edges <id>` shows exactly what
+  you can fire from where the task sits; for a scoped proposal that's normally
+  `dais fire <id> submit` (→ the founder's review gate).
+- Never leave a task sitting scoped-but-unsubmitted — a stranded draft costs the next run.
 
 Two lanes for everything you produce:
 - **Routine forward work** (bugfixes, QA-flagged cleanups, the next step of an already-approved
-  initiative) → promote to `ready` yourself, with WHY + acceptance criteria.
-- **New initiatives / launches / scope or direction changes** → file as `proposed`, NOT ready; the
-  Engineer won't touch it until the founder approves (`dais approve <id>` → ready).
+  initiative): if your project's machine gives you an edge that routes it to the builder directly,
+  fire it; if not, submit it with a ONE-READ frame ("routine follow-up of <approved parent>") so
+  the founder can approve it in seconds.
+- **New initiatives / launches / scope or direction changes** → scope it and fire `submit`; the
+  Engineer won't touch it until the founder approves at the review gate (approval spawns the
+  build task automatically).
 
 Every `proposed` item must justify itself so the founder can decide in one read — put this in the
 notes: **WHAT** · **WHY NOW** · **EXPECTED IMPACT** · **SCOPE & COST** · **ALTERNATIVES** ·
