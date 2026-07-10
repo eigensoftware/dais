@@ -1,0 +1,36 @@
+{
+  "name": "advisory",
+  "entry": "raised",
+  "roles": {
+    "founder": {"human": true},
+    "analyst": {"access": "draft"}
+  },
+  "states": {
+    "raised":      {"initial": true},
+    "analyzing":   {},
+    "needs_you":   {},
+    "recommended": {},
+    "deferred":    {"band": "WAITING", "history": true},
+    "done":        {"terminal": true},
+    "cancelled":   {"terminal": true}
+  },
+  "edges": [
+    {"from": "raised",      "to": "analyzing",   "by": "analyst", "verb": "claim"},
+    {"from": "analyzing",   "to": "recommended", "by": "analyst", "verb": "recommend",
+       "note": "the deliverable parks for the founder: options, tradeoffs, and ONE recommendation with its reasoning — in the task notes or a linked draft. The analyst never acts on it."},
+    {"from": "analyzing",   "to": "needs_you",   "by": "analyst", "verb": "need_input",
+       "note": "blocked on a fact only the founder has — put the CONCRETE questions in the notes, then stop. Vague 'need more context' is not a need_input."},
+    {"from": "needs_you",   "to": "analyzing",   "by": "founder", "verb": "answer"},
+    {"from": "analyzing",   "to": "raised",      "by": "system",  "verb": "interrupt"},
+
+    {"from": "recommended", "to": "done",        "by": "founder", "verb": "accept",
+       "note": "accepting a recommendation is a decision, not an execution — anything outward the decision implies (send, sign, spend) is the founder's to do, outside the board. This machine has ZERO outward edges by design."},
+    {"from": "recommended", "to": "analyzing",   "by": "founder", "verb": "dig_deeper"},
+
+    {"from": "raised",      "to": "cancelled",   "by": "founder", "verb": "cancel", "guards": ["confirm"]},
+    {"from": "raised",      "to": "deferred",    "by": "founder", "verb": "defer"},
+    {"from": "recommended", "to": "deferred",    "by": "founder", "verb": "defer"},
+    {"from": "deferred",    "to": "@history",    "by": "founder", "verb": "undefer", "default": "raised"},
+    {"from": "deferred",    "to": "cancelled",   "by": "founder", "verb": "cancel", "guards": ["confirm"]}
+  ]
+}

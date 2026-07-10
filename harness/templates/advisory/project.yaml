@@ -1,0 +1,5 @@
+project: __PROJECT__
+repo: __PROJECT__          # any working directory for the analyst's drafts (create it; git optional)
+model: claude-opus-4-8
+effort: high
+stage_goal: Describe what this advisory lane is for (the standing question it helps you answer).

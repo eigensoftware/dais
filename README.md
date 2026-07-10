@@ -91,9 +91,16 @@ dais watch                  # run the loop: agents drain the queue, parking at y
 
 Each project owns its lifecycle as an authored state machine:
 `projects/<name>/machine.json`, seeded from a stock template by `dais scaffold` and yours to
-edit. Two templates ship with the tool: **coding** (the full propose, build, QA, release
-lifecycle below) and **marketing** (a content lane: draft, review, founder publish). Start
-from one, then edit your copy; the machine is data, not code. States are the board's bands;
+edit. Four templates ship with the tool, distilled from workspaces we actually run:
+
+| Template | Cast | Shape |
+|---|---|---|
+| **coding** | lead, engineer, designer, qa | the full lifecycle below: propose, build, QA, batched founder-gated releases |
+| **lean** | engineer | the smallest start: you file work, one builder PRs it, you review and merge; grow it toward coding when you need more |
+| **advisory** | analyst | decisions, not code: raise a question, get options + tradeoffs + one recommendation; zero outward edges by design |
+| **marketing** | strategist, writer, editor | a content lane: draft, review, founder publish |
+
+Start from one, then edit your copy; the machine is data, not code. States are the board's bands;
 **edges own every transition**: a verb, the role that may fire it (`by`), optional guards,
 and optional effects. Nothing writes a status directly; every change is
 `dais fire <task> <verb>`, and `dais edges <task>` shows what's fireable from where a task

@@ -1,0 +1,32 @@
+{
+  "name": "lean",
+  "entry": "ready",
+  "roles": {
+    "founder":  {"human": true},
+    "engineer": {"access": "edit"}
+  },
+  "states": {
+    "ready":     {"initial": true},
+    "doing":     {},
+    "review":    {},
+    "deferred":  {"band": "WAITING", "history": true},
+    "done":      {"terminal": true},
+    "cancelled": {"terminal": true}
+  },
+  "edges": [
+    {"from": "ready",    "to": "doing",     "by": "engineer", "verb": "claim"},
+    {"from": "doing",    "to": "review",    "by": "engineer", "verb": "complete"},
+    {"from": "doing",    "to": "ready",     "by": "system",   "verb": "interrupt"},
+
+    {"from": "review",   "to": "done",      "by": "founder",  "verb": "merge", "guards": ["confirm"],
+       "note": "the founder merges (and on a merge==deploy repo this IS the deploy) — in the lean shape there is no QA agent, so this review is the whole gate: read the PR, run it if it matters, then merge. The engineer never merges."},
+    {"from": "review",   "to": "ready",     "by": "founder",  "verb": "request_changes"},
+
+    {"from": "ready",    "to": "cancelled", "by": "founder",  "verb": "cancel", "guards": ["confirm"]},
+    {"from": "ready",    "to": "cancelled", "by": "engineer", "verb": "invalidate", "guards": ["attest:invalid"]},
+    {"from": "ready",    "to": "deferred",  "by": "founder",  "verb": "defer"},
+    {"from": "review",   "to": "deferred",  "by": "founder",  "verb": "defer"},
+    {"from": "deferred", "to": "@history",  "by": "founder",  "verb": "undefer"},
+    {"from": "deferred", "to": "cancelled", "by": "founder",  "verb": "cancel", "guards": ["confirm"]}
+  ]
+}

@@ -36,7 +36,7 @@ dais — your agent company control panel
   dais lint [project]                 validate a project (roles + project.yaml + required files)
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
   dais migrate [--config <project>]     apply DB migrations | convert a project to frontmatter config
-  dais scaffold <project> [--template coding|marketing]  bootstrap a project (agents/ + machine) from a workflow template
+  dais scaffold <project> [--template coding|lean|advisory|marketing]  bootstrap a project (agents/ + machine) from a workflow template
   dais role new <project> [--desc "..."] [--yes]  Claude designs a new role (persona + routing); you confirm
   dais version                        which build this machine runs (git tag/commit of the tool checkout)
 U
