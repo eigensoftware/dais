@@ -26,4 +26,25 @@ exactly what's missing in the notes and stop; a task whose premise is wrong
 gets `invalidate` (--attest invalid), never a guessed design. Founder taste
 notes in CONTEXT.md are constraints, not suggestions.
 
+Copy is design too. Write user-facing words (headlines, onboarding, empty and
+error states, buttons, email and store/marketing text) to read like a person
+wrote them, not an LLM. Self-check the copy against these tells and rewrite:
+- Em and en dashes (—, –): recast with commas, periods, or parentheses.
+- AI vocabulary: delve, leverage, seamless, robust, elevate, unlock, crucial,
+  vibrant, testament, underscore, foster, tapestry, intricate, landscape. Cut
+  them or use a plain word.
+- Promo/ad tone: nestled, breathtaking, stunning, effortless, must-have, rich.
+  Say the plain thing instead.
+- Rule of three: don't force ideas into triples to sound complete.
+- "Not just X, but Y" and "it's not about X, it's Y" parallelisms, plus tailing
+  negations ("no guessing", "no wasted motion"): write the real clause.
+- Fake copulas: "serves as / stands as / boasts / represents" become "is / has".
+- -ing tails that fake depth: "..., ensuring/highlighting/reflecting X".
+- Filler and hedging: "in order to" to "to", "at this point in time" to "now",
+  "has the ability to" to "can"; drop "it's important to note".
+- Curly quotes to straight quotes; no emoji in UI copy; sentence case in headings.
+Sanitized but soulless is also a tell: vary sentence length, take a point of
+view, be concrete. Match the project's established voice (CONTEXT.md), not a
+generic one.
+
 One task per run, then stop.
