@@ -160,6 +160,23 @@ def render_plain(snap, color=None):
             exm = parts[1] if len(parts) > 1 else "primary"
             P(f"  {c['CY']}⚑ {role} on backup model — {exm} exhausted "
               f"(retries the primary at the next window){c['C0']}")
+        # stalled roles: the dispatcher parked a role after consecutive no-op runs on an unchanged
+        # world (dispatch.sh stall markers). Usually a task stuck in a state the role can't resolve
+        # (only a founder edge exits it) — surface WHICH tasks so the founder can retire/redirect.
+        try:
+            stalls = sorted(f for f in os.listdir(pdir) if f.startswith(".stalled-"))
+        except OSError:
+            stalls = []
+        for sk in stalls:
+            try:
+                world = open(os.path.join(pdir, sk)).read().split()
+            except OSError:
+                continue
+            role = sk[len(".stalled-"):]
+            what = ", ".join(w.replace("|", " in ") for w in world[:4]) or "its tasks"
+            more = f" (+{len(world) - 4} more)" if len(world) > 4 else ""
+            P(f"  {c['CY']}⚠ {role} STALLED on {what}{more} — no-op runs; "
+              f"needs you (fire an edge or cancel){c['C0']}")
         # phases in the machine's declared (flow) order; ◆ marks founder-gate phases (NEEDS YOU).
         m = p.machine or {}
         states = m.get("states", {})

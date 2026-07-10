@@ -414,6 +414,24 @@ if __name__ == "__main__":
         root = sys.argv[2]
         project = sys.argv[3] if len(sys.argv) > 3 else ""
         sys.exit(lint(root, project))
+    if len(sys.argv) > 1 and sys.argv[1] == "--dispatch-set":
+        # The role's visible world: `id|status` per task sitting in a state this role dispatches
+        # for. The dispatcher fingerprints this for stall markers (dispatch.sh): a role that keeps
+        # no-opping is parked until these lines CHANGE. Only id|status — notes edits don't appear
+        # here, so an agent can't un-stall itself by writing "please cancel me" every run. Empty
+        # output = no reactive work (cadence-only role), which the dispatcher treats as unstallable.
+        root, project, role = sys.argv[2], sys.argv[3], sys.argv[4]
+        import machine as MC
+        m = MC.load(_machine_for(root, project))
+        states = sorted(st for st in (m or {}).get("states", {})
+                        if MC.dispatch_role(m, st) == role)
+        if states:
+            db = sqlite3.connect(os.path.join(root, "dais.db"))
+            q = ("SELECT id||'|'||status FROM tasks WHERE project=? AND status IN (%s) "
+                 "ORDER BY id" % ",".join("?" * len(states)))
+            for (line,) in db.execute(q, [project] + states):
+                print(line)
+        sys.exit(0)
     try:
         excl = set(sys.argv[3].split(",")) - {""} if len(sys.argv) > 3 else set()
         live = {}                  # optional 4th arg: 'role=N,role=N' from the project's live locks

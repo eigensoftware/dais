@@ -118,16 +118,54 @@ for proj in "${projects[@]}"; do
   # — it already said "nothing actionable"; re-dispatching it every tick hot-loops (a lead burned
   # ~12 runs/20min on a proposal it wouldn't submit). Throttling skips the ROLE, not the project:
   # we re-ask the router with that role excluded, so ready work behind a cooled lead still runs.
+  #
+  # The throttle alone never ESCALATES: a task stuck in a state its role can't resolve (e.g. a
+  # superseded design task whose only exit is a founder cancel) wastes one run per 45m forever —
+  # death by a thousand cooldowns (a designer burned 9 runs/7h on one orphan). So on the 2nd
+  # consecutive no-op run the role is STALLED: projects/<p>/.stalled-<role> stores its dispatch-set
+  # fingerprint (router --dispatch-set: the id|status of the tasks it would run for), and the role
+  # is skipped until that world CHANGES — the founder cancelling the orphan, or new work arriving,
+  # clears it on the next tick with no ceremony. Notes edits don't change the fingerprint, so a
+  # role can't un-stall itself by writing notes. A 6h TTL heartbeat keeps cadence roles (which the
+  # marker also gates) from going fully dark. `dais status` surfaces the marker.
   agent=""; excl=""
   while :; do
     cand="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" "$excl" "$livespec" 2>/dev/null)"
     [ -z "$cand" ] && break
+    sm="$DAIS_HOME/projects/$proj/.stalled-$cand"
+    if [ -f "$sm" ]; then
+      if [ -n "$(find "$sm" -mmin +360 2>/dev/null)" ]; then
+        rm -f "$sm"      # TTL heartbeat: allow one probe run; it re-stalls if still fruitless
+      else
+        fp="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$proj" "$cand" 2>/dev/null)"
+        if [ "$fp" = "$(cat "$sm" 2>/dev/null)" ]; then
+          tlog "stalled $proj/$cand — world unchanged ($(paste -sd' ' "$sm" 2>/dev/null)); skipping"
+          excl="${excl:+$excl,}$cand"
+          continue
+        fi
+        rm -f "$sm"      # the role's world changed — un-stall and dispatch normally
+      fi
+    fi
     last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes'))
                          || '|' || (SELECT COUNT(*) FROM run_tasks rt
                                        WHERE rt.run_id=r.id AND rt.verb != 'touch')
                 FROM runs r WHERE r.project='$(sqlesc "$proj")' AND r.agent='$(sqlesc "$cand")'
                 ORDER BY r.id DESC LIMIT 1;" 2>/dev/null)"
     if [ "$last" = "succeeded|1|0" ]; then
+      streak="$(db "SELECT COUNT(*) FROM (
+                      SELECT r.status s, (SELECT COUNT(*) FROM run_tasks rt
+                                          WHERE rt.run_id=r.id AND rt.verb != 'touch') e
+                      FROM runs r WHERE r.project='$(sqlesc "$proj")'
+                        AND r.agent='$(sqlesc "$cand")'
+                      ORDER BY r.id DESC LIMIT 2)
+                    WHERE s='succeeded' AND e=0;" 2>/dev/null)"
+      if [ "${streak:-0}" -ge 2 ] && [ "$DRY" = 0 ]; then
+        fp="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$proj" "$cand" 2>/dev/null)"
+        if [ -n "$fp" ]; then    # empty set = cadence-only run, nothing to stall on
+          printf '%s\n' "$fp" > "$sm"
+          tlog "STALL $proj/$cand — $streak consecutive no-op runs; parked until its tasks change ($(paste -sd' ' "$sm"))"
+        fi
+      fi
       tlog "throttle $proj/$cand — last run was a recent no-op; cooling 45m (trying next role)"
       excl="${excl:+$excl,}$cand"
       continue
