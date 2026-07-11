@@ -935,6 +935,7 @@ _HELP_LINES = [
     "  t                 tick — run the project's next eligible agent once",
     "  p                 pause / resume the loop",
     "  c                 cancel the project's running agent",
+    "  Y                 yolo on/off — auto-approve this project's tagged founder gates (24h, confirms)",
     "",
     "",
     "  CONSISTENT KEYS",
@@ -1037,6 +1038,38 @@ class PanelApp(d.App):
             rows = [r for r in rows if r["kind"] in ("task", "running")]
             rows = d.filter_rows(rows, self.filter, key=_row_search_text)
         return rows
+
+    def _toggle_yolo(self, row):
+        """Y — toggle yolo mode for the selected row's project (design/yolo-mode.md). ON auto-fires
+        the founder gates the machine tags `"yolo": true`, time-boxed to 24h (the TUI's safe default;
+        use `dais yolo <p> on --for/--veto` for other windows). Refuses a machine that tags nothing
+        (yolo would be a silent no-op) and confirms both ways — it suspends a governance gate."""
+        proj = (row.get("project") if row else None) or self.project_filter
+        p = next((x for x in (self.snap.projects if self.snap else []) if x.name == proj), None)
+        if not p:
+            self.flash = "pick a project row first (yolo is per-project)"
+            return
+        on = os.path.exists(os.path.join(self.root, "projects", proj, ".yolo"))
+        if on:
+            if not self._confirm(f"turn yolo OFF for {proj}? (restores the founder gates)"):
+                return
+            rc = self._dispatch(["yolo", proj, "off"])
+            self.flash = f"yolo OFF for {proj}" if rc == 0 else f"yolo off failed (exit {rc})"
+        else:
+            m = p.machine or {}
+            humans = {r for r, v in (m.get("roles") or {}).items() if (v or {}).get("human")} | {"founder"}
+            verbs = sorted({e["verb"] for e in m.get("edges", [])
+                            if e.get("yolo") and e.get("by") in humans
+                            and not any(g != "confirm" for g in e.get("guards", []))})
+            if not verbs:
+                self.flash = f"{proj}'s machine tags no yolo edges — yolo would do nothing (tag one \"yolo\": true)"
+                return
+            if not self._confirm(f"YOLO ON for {proj}? auto-approves [{', '.join(verbs)}] for 24h, suspending your gate"):
+                return
+            rc = self._dispatch(["yolo", proj, "on", "--for", "24h"])
+            self.flash = (f"⚡ yolo ON for {proj} (24h) — {', '.join(verbs)} auto-fire"
+                          if rc == 0 else f"yolo on failed (exit {rc})")
+        self.refresh()
 
     def _cut_release(self, row):
         """C — cut a release for the selected row's project: create the release task at the
@@ -1200,6 +1233,9 @@ class PanelApp(d.App):
             return True
         if ch == ord("P"):                      # project setup for the selected row's project
             self._project_info(sel_row)
+            return True
+        if ch == ord("Y"):                      # toggle yolo mode for the selected row's project
+            self._toggle_yolo(sel_row)
             return True
         # global panel keys first
         if ch == ord("q"):
