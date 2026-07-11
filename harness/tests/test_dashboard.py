@@ -714,7 +714,7 @@ class TestActMachineConditionalAttest(unittest.TestCase):
     _MACHINE = {"edges": [{"from": "release_review", "to": "releasing", "by": "founder",
                            "verb": "greenlight",
                            "guards": ["typed_confirm",
-                                      "attest:migrations_applied when task:touches_migrations"]}]}
+                                      "attest:migration_reviewed when task:touches_migrations"]}]}
     _TASK = {"id": "rel-1", "status": "release_review"}
 
     def test_false_flag_skips_the_attest_prompt(self):
@@ -730,7 +730,7 @@ class TestActMachineConditionalAttest(unittest.TestCase):
         app._act_machine(self._MACHINE, "greenlight", None, self._TASK)
         self.assertTrue(any("attest" in p for p in app.prompts))
         self.assertIn("--attest", app.dispatched)
-        self.assertIn("migrations_applied", app.dispatched)
+        self.assertIn("migration_reviewed", app.dispatched)
 
 
 class TestRenderProjectCast(unittest.TestCase):

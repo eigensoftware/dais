@@ -177,12 +177,12 @@ class TestDoAction(unittest.TestCase):
     def test_strong_guards_prompt_in_panel_and_fire(self):
         # greenlight (typed_confirm + attest): the panel prompts for the SAME explicit input
         # the CLI flags require — type the task id, then the fact name — and fires with them.
-        answers = iter(["cou-1", "migrations_applied"])
+        answers = iter(["cou-1", "migration_reviewed"])
         self.app._prompt = lambda *a, **k: next(answers)
         self.app.do_action("greenlight", task_row(status="release_review"))
         self._fired(
             ["dais", "fire", "cou-1", "greenlight", "--by", "founder",
-             "--typed", "cou-1", "--attest", "migrations_applied"])
+             "--typed", "cou-1", "--attest", "migration_reviewed"])
 
     def test_typed_mismatch_cancels_without_firing(self):
         self.app._prompt = lambda *a, **k: "wrong-id"

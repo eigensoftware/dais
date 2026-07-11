@@ -179,7 +179,7 @@ edges:
   - { from: release_ready,  to: release_review, by: engineer, verb: assemble,
       effect: { aggregate: { select: "state=awaiting_release" } } }
   - { from: release_review, to: releasing, by: founder, verb: greenlight,      # the human gate
-      guards: ["typed_confirm", "attest:migrations_applied when task:touches_migrations"] }
+      guards: ["typed_confirm", "attest:migration_reviewed when task:touches_migrations"] }
   - { from: release_review, to: cancelled, by: founder, verb: abort, guards: [confirm] }
   - { from: releasing, to: done, by: engineer, verb: shipped,
       effect: { script: { name: release, outward: true }, then: "encompassed:awaiting_release->done" } }

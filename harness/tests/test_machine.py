@@ -286,7 +286,7 @@ class TestFlow(unittest.TestCase):
         rel = M.create_task(self.conn, self.m, "proj", "release", state="release_open", assignee="engineer")
         M.fire(self.conn, self.m, rel, "assemble", "engineer")
         M.fire(self.conn, self.m, rel, "greenlight", "founder",
-               {"typed": rel, "attest": {"migrations_applied": True}})
+               {"typed": rel, "attest": {"migration_reviewed": True}})
         M.fire(self.conn, self.m, rel, "shipped", "engineer")
         self.assertEqual(_status(self.conn, fix), "done")
         self.assertEqual(M.advance_unblocked(self.conn, self.m), [impl])
@@ -309,7 +309,7 @@ class TestFlow(unittest.TestCase):
         with self.assertRaises(M.GuardFailure):
             M.fire(self.conn, self.m, rel, "greenlight", "founder")  # missing typed_confirm/attest
         M.fire(self.conn, self.m, rel, "greenlight", "founder",
-               {"typed": rel, "attest": {"migrations_applied": True}})
+               {"typed": rel, "attest": {"migration_reviewed": True}})
         M.fire(self.conn, self.m, rel, "shipped", "engineer")        # effect fires each child's edge
         self.assertEqual(_status(self.conn, rel), "done")
         for t in impls:
@@ -319,14 +319,14 @@ class TestFlow(unittest.TestCase):
         rel = M.create_task(self.conn, self.m, "proj", "release", state="release_open", assignee="engineer")
         M.fire(self.conn, self.m, rel, "assemble", "engineer")
         M.fire(self.conn, self.m, rel, "greenlight", "founder",
-               {"typed": rel, "attest": {"migrations_applied": True}})
+               {"typed": rel, "attest": {"migration_reviewed": True}})
         r = M.fire(self.conn, self.m, rel, "release_error", "system")
         self.assertEqual(_status(self.conn, rel), "release_failed")
         self.assertEqual(r["spawned"][0]["rel"], "blocks_parent")    # a rollback task
 
 
 class TestConditionalMigrationsAttest(unittest.TestCase):
-    """`attest:migrations_applied when task:touches_migrations` — the release greenlight demands the
+    """`attest:migration_reviewed when task:touches_migrations` — the release greenlight demands the
     migrations attestation only when `assemble` recorded that the release touches migration files. An
     explicit false LIFTS it; true, NULL (unknown), and an unmigrated db all still REQUIRE it — the
     gate is never skipped by omission (fail-safe)."""
@@ -354,7 +354,7 @@ class TestConditionalMigrationsAttest(unittest.TestCase):
         with self.assertRaises(M.GuardFailure):
             M.fire(self.conn, self.m, rel, "greenlight", "founder", {"typed": rel})
         M.fire(self.conn, self.m, rel, "greenlight", "founder",
-               {"typed": rel, "attest": {"migrations_applied": True}})
+               {"typed": rel, "attest": {"migration_reviewed": True}})
         self.assertEqual(_status(self.conn, rel), "releasing")
 
     def test_null_flag_requires_the_attest(self):        # unknown -> still gated
@@ -382,22 +382,22 @@ class TestAttestFact(unittest.TestCase):
             "SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
 
     def test_unconditional_attest_always_required(self):
-        self.assertEqual(M.attest_fact("attest:migrations_applied", self.row("t-0")),
-                         "migrations_applied")
+        self.assertEqual(M.attest_fact("attest:migration_reviewed", self.row("t-0")),
+                         "migration_reviewed")
 
     def test_false_flag_lifts(self):
         self.assertIsNone(M.attest_fact(
-            "attest:migrations_applied when task:touches_migrations", self.row("t-0")))
+            "attest:migration_reviewed when task:touches_migrations", self.row("t-0")))
 
     def test_true_flag_requires(self):
         self.assertEqual(M.attest_fact(
-            "attest:migrations_applied when task:touches_migrations", self.row("t-1")),
-            "migrations_applied")
+            "attest:migration_reviewed when task:touches_migrations", self.row("t-1")),
+            "migration_reviewed")
 
     def test_null_flag_requires(self):
         self.assertEqual(M.attest_fact(
-            "attest:migrations_applied when task:touches_migrations", self.row("t-n")),
-            "migrations_applied")
+            "attest:migration_reviewed when task:touches_migrations", self.row("t-n")),
+            "migration_reviewed")
 
     def test_missing_column_requires(self):
         conn = sqlite3.connect(":memory:")
@@ -406,13 +406,13 @@ class TestAttestFact(unittest.TestCase):
         conn.execute("INSERT INTO tasks VALUES('t-x')")
         bare = conn.execute("SELECT * FROM tasks").fetchone()
         self.assertEqual(M.attest_fact(
-            "attest:migrations_applied when task:touches_migrations", bare),
-            "migrations_applied")
+            "attest:migration_reviewed when task:touches_migrations", bare),
+            "migration_reviewed")
 
     def test_no_task_row_requires(self):
         self.assertEqual(M.attest_fact(
-            "attest:migrations_applied when task:touches_migrations", None),
-            "migrations_applied")
+            "attest:migration_reviewed when task:touches_migrations", None),
+            "migration_reviewed")
 
     def test_non_attest_guard_is_none(self):
         self.assertIsNone(M.attest_fact("typed_confirm", self.row("t-1")))
@@ -445,7 +445,7 @@ class TestPromptsFor(unittest.TestCase):
     def test_unknown_flag_keeps_the_attest(self):
         ps = M.prompts_for(self.m, self._edge("release_review", "greenlight"), self._release(None))
         self.assertEqual([p["kind"] for p in ps], ["typed", "attest"])
-        self.assertEqual(ps[1]["fact"], "migrations_applied")
+        self.assertEqual(ps[1]["fact"], "migration_reviewed")
 
     def test_confirm_edge(self):
         ps = M.prompts_for(self.m, self._edge("proposal_review", "approve"), None)
@@ -692,7 +692,7 @@ class TestAtomicityAndConcurrency(unittest.TestCase):
         rel = M.create_task(self.conn, self.m, "proj", "rel", state="release_open", assignee="engineer")
         M.fire(self.conn, self.m, rel, "assemble", "engineer")
         M.fire(self.conn, self.m, rel, "greenlight", "founder",
-               {"typed": rel, "attest": {"migrations_applied": True}})
+               {"typed": rel, "attest": {"migration_reviewed": True}})
         return rel, kids
 
     def test_failing_nested_effect_rolls_back_the_whole_fire(self):
