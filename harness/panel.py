@@ -9,6 +9,7 @@ top readout), status dots, machine-derived bands, and an outlined inspector.
 from collections import namedtuple
 
 import curses
+import os
 import re
 import textwrap
 import time as _time
@@ -636,6 +637,11 @@ def render_vitals(scr, rect, app):
     nproj = len(snap.projects) if snap else 0
     ng = d.gate_count(snap, running_ids) if snap else 0
     cool = " · COOLING" if (snap and snap.cap_state) else ""
+    # yolo (design/yolo-mode.md): governance suspended somewhere -> say so on the always-visible
+    # strip, naming the projects. One-off marker read; folds into the snapshot signal unification.
+    _yp = [p.name for p in (snap.projects if snap else [])
+           if os.path.exists(os.path.join(app.root, "projects", p.name, ".yolo"))]
+    yolo_tok = (" · ⚡YOLO:" + ",".join(_yp)) if _yp else ""
     clk = d.to_local_hhmm(snap.ts, with_secs=True) if snap else ""
     pf = getattr(app, "project_filter", None)
     proj_seg = " · all projects" if pf is None else f" · {pf}"
@@ -649,7 +655,7 @@ def render_vitals(scr, rect, app):
     ship_tok = ("⬆ ship " + " ".join(f"{n}·{c}" for n, c in ship)) if ship else ""
     pre = ident + "   "
     sep = " · "                                            # between the two hero tokens
-    ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}  {clk}"
+    ctx = f"   {badge} · {nproj} proj{proj_seg}{cool}{yolo_tok}  {clk}"
     line = pre + run_tok + sep + gate_tok + (sep + ship_tok if ship_tok else "") + ctx
     bar = app._cp(_VITALS) | curses.A_BOLD                 # the readout's own bar (bold white on blue)
     _add(scr, rect.y, rect.x, pad_cols(line, rect.w), rect.x + rect.w, bar)

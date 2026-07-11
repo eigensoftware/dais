@@ -105,6 +105,13 @@ protection mechanism; danger is declared per-edge, not coded per-action.
   does the action per the repo's own docs, then fires the edge.
 - `then: "encompassed:<state>-><state>"` — fire an edge on related tasks.
 
+Edges may also carry `"yolo": true`: an authored opt-in marking this edge as the
+default action under yolo mode (`dais yolo <project> on`), where the dispatcher
+auto-fires it as the human actor. Only permission guards survive automation:
+yolo auto-satisfies `confirm` and nothing else, so a yolo tag on an edge with
+`typed_confirm`/`attest:`/`verify:` is a lint error (E6), and a yolo tag on an
+outward edge draws a warning (W4). Full design: `yolo-mode.md`.
+
 ## Lint — coherence only, never policy
 
 The structure imposes **no** inherent limits. Lint blocks only on incoherence;

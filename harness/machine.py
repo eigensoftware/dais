@@ -80,9 +80,11 @@ def lint(m):
     _lint_e3_dispatch(states, out, errors)
     _lint_e4_entry_exits(m, states, errors)
     _lint_e5_duplicate_edges(edges, errors)
+    _lint_e6_yolo_strong_guard(edges, errors)
     _lint_w1_reachability(states, edges, out, warns)
     _lint_w2_terminal_reach(states, edges, warns)
     _lint_w3_unguarded_outward(states, edges, warns)
+    _lint_w4_yolo_outward(edges, warns)
     return errors, warns
 
 
@@ -193,6 +195,32 @@ def _lint_w2_terminal_reach(states, edges, warns):
     for s in states:
         if s not in can_end:
             warns.append(f"W2 no exit: {s!r} cannot reach any terminal state")
+
+
+def _lint_e6_yolo_strong_guard(edges, errors):
+    """E6: a `"yolo": true` edge carrying a strong-human guard is a config contradiction —
+    yolo auto-satisfies `confirm` only (the honesty rule, design/yolo-mode.md); it can never
+    auto-satisfy testimony guards. The author must downgrade the guard consciously or untag."""
+    for e in edges:
+        if not e.get("yolo"):
+            continue
+        strong = [g for g in e.get("guards", []) if _is_strong_human(g) or g.startswith("verify:")]
+        if strong:
+            errors.append(f"E6 yolo contradiction: {e.get('from')}--{e.get('verb')}-->"
+                          f"{e.get('to')} is tagged yolo but guarded by {strong} — yolo cannot "
+                          f"auto-satisfy a strong-human/verify guard; downgrade the guard "
+                          f"consciously or untag the edge")
+
+
+def _lint_w4_yolo_outward(edges, warns):
+    """W4: a yolo-tagged edge with an outward script effect publishes/deploys with no human in
+    the loop while yolo is on. Legitimate (that is the point of the mode) but must be conscious."""
+    for e in edges:
+        sc = e.get("effect", {}).get("script")
+        if e.get("yolo") and isinstance(sc, dict) and sc.get("outward"):
+            warns.append(f"W4 yolo'd outward edge: {e.get('from')}--{e.get('verb')}-->"
+                         f"{e.get('to')} will publish/deploy with no human in the loop while "
+                         f"yolo mode is on")
 
 
 def _lint_w3_unguarded_outward(states, edges, warns):
@@ -838,6 +866,41 @@ def recover_interrupted(conn, m, project):
                               lambda e: e.get("verb") == "interrupt")
 
 
+def yolo_sweep(conn, m, project, veto_min=0):
+    """Yolo mode (design/yolo-mode.md): fire the human gates the machine explicitly tagged
+    `"yolo": true`, as if the human clicked through. THE HONESTY RULE: only permission guards
+    (none, or `confirm`) are auto-satisfiable — a tagged edge carrying typed_confirm / attest /
+    verify is skipped even here (and lint E6 flags the contradiction), because auto-satisfying
+    those would fabricate testimony ("a human verified this") that nobody gave. `veto_min` skips
+    tasks touched within the last N minutes, so the founder keeps a standing window to catch a
+    gate before it auto-fires (any task activity resets the clock — the safe direction).
+    Returns [(tid, verb), ...]; each fire appends an attributed [yolo] audit note and runs the
+    edge's effects atomically via the normal fire() path."""
+    humans = {r for r, meta in (m.get("roles") or {}).items()
+              if (meta or {}).get("human")} | {"founder"}
+    fired = []
+    for e in m.get("edges", []):
+        if not e.get("yolo") or e.get("by") not in humans:
+            continue
+        if any(g != "confirm" for g in e.get("guards", [])):
+            continue                    # fact/strong guard — never auto-satisfied (see docstring)
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE status=? AND project=? "
+            "AND updated_at <= datetime('now', ?)",
+            [e["from"], project, "-%d minutes" % max(0, int(veto_min or 0))]).fetchall()
+        for (tid,) in rows:
+            try:
+                fire(conn, m, tid, e["verb"], e["by"],
+                     ctx={"confirm": True,
+                          "notes": "[yolo] auto-fired %s — this founder gate was auto-approved "
+                                   "by yolo mode (dais yolo %s off to restore the gate)"
+                                   % (e["verb"], project)})
+                fired.append((tid, e["verb"]))
+            except GuardFailure:
+                continue
+    return fired
+
+
 # --------------------------------------------------------------------------- #
 # task creation (enters at an initial state)
 # --------------------------------------------------------------------------- #
@@ -887,7 +950,8 @@ def _main(argv):
               "[--assignee A] [--notes N] [--blocked-on ID] | "
               "fire <db> <machine> <task> <verb> <actor> [--confirm] [--typed X] "
               "[--attest fact] [--verify check] | "
-              "advance <db> <machine> <project> | recover <db> <machine> <project>", file=sys.stderr)
+              "advance <db> <machine> <project> | recover <db> <machine> <project> | "
+              "yolo <db> <machine> <project> [--veto-min N]", file=sys.stderr)
         return 2
     cmd = argv[0]
     if cmd in ("advance", "recover"):
@@ -897,6 +961,19 @@ def _main(argv):
         f = advance_unblocked if cmd == "advance" else recover_interrupted
         for tid in f(conn, load(argv[2]), argv[3]):
             print(tid)
+        return 0
+    if cmd == "yolo":
+        # dispatcher hook: yolo <db> <machine> <project> [--veto-min N] — fire the yolo-tagged
+        # human gates (design/yolo-mode.md). Prints `id:verb`, one per line.
+        conn = open_db(argv[1])
+        veto = 0
+        if "--veto-min" in argv:
+            try:
+                veto = int(argv[argv.index("--veto-min") + 1])
+            except (IndexError, ValueError):
+                print("yolo: --veto-min needs a number", file=sys.stderr); return 2
+        for tid, verb in yolo_sweep(conn, load(argv[2]), argv[3], veto):
+            print(f"{tid}:{verb}")
         return 0
     if cmd == "lint":
         errors, warns = lint(load(argv[1]))

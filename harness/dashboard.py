@@ -160,6 +160,22 @@ def render_plain(snap, color=None):
             exm = parts[1] if len(parts) > 1 else "primary"
             P(f"  {c['CY']}⚑ {role} on backup model — {exm} exhausted "
               f"(retries the primary at the next window){c['C0']}")
+        # yolo mode (design/yolo-mode.md): governance is suspended on this project's tagged gates.
+        # A mode that auto-approves the founder must be impossible to miss on the board.
+        ymark = os.path.join(pdir, ".yolo")
+        if os.path.exists(ymark):
+            try:
+                parts = open(ymark).read().split()
+                exp = int(parts[0]) if parts else 0
+                veto = f" · veto {parts[1]}m" if len(parts) > 1 else ""
+                left = ""
+                if exp:
+                    mins = max(0, int((exp - time.time()) // 60))
+                    left = f" · expires {mins // 60}h{mins % 60:02d}m" if mins >= 60 else f" · expires {mins}m"
+                P(f"  {c['CY']}{c['CB']}⚡ YOLO{c['C0']}{c['CY']} — tagged founder gates "
+                  f"auto-fire{left or ' · NO EXPIRY'}{veto} (dais yolo {p.name} off){c['C0']}")
+            except (OSError, ValueError):
+                pass
         # stalled roles: the dispatcher parked a role after consecutive no-op runs on an unchanged
         # world (dispatch.sh stall markers). Usually a task stuck in a state the role can't resolve
         # (only a founder edge exits it) — surface WHICH tasks so the founder can retire/redirect.

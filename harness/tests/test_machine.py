@@ -848,3 +848,76 @@ class TestSystemSweeps(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestYolo(unittest.TestCase):
+    """Yolo mode (design/yolo-mode.md): auto-fire tagged human gates, honestly."""
+
+    def _seed(self, conn, tid="t-1", status="proposal_review", age_min=0):
+        conn.execute("INSERT INTO tasks(id,project,title,status,updated_at) VALUES(?,?,?,?,"
+                     "datetime('now', ?))", (tid, "acme", "x", status, "-%d minutes" % age_min))
+        conn.commit()
+
+    def test_fires_tagged_confirm_edge_and_audits(self):
+        m, conn = M.load(CODING), _db()
+        self._seed(conn)                       # coding tags approve (confirm) yolo:true
+        fired = M.yolo_sweep(conn, m, "acme")
+        self.assertEqual(fired, [("t-1", "approve")])
+        self.assertEqual(_status(conn, "t-1"), "done")
+        # approve's spawn effect ran (the build task exists) — full fire() semantics held
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM task_links WHERE parent_id='t-1' AND rel='from_proposal'"
+        ).fetchone()[0], 1)
+
+    def test_never_satisfies_strong_guards_even_when_tagged(self):
+        m, conn = M.load(CODING), _db()
+        for e in m["edges"]:                   # adversarial machine: tag the greenlight
+            if e.get("verb") == "greenlight":
+                e["yolo"] = True
+        self._seed(conn, status="release_review")
+        self.assertEqual(M.yolo_sweep(conn, m, "acme"), [])
+        self.assertEqual(_status(conn, "t-1"), "release_review")   # still parked
+
+    def test_untagged_founder_edges_do_not_fire(self):
+        m, conn = M.load(CODING), _db()
+        self._seed(conn, status="proposed")    # proposed has founder reject/defer, untagged
+        self.assertEqual(M.yolo_sweep(conn, m, "acme"), [])
+        self.assertEqual(_status(conn, "t-1"), "proposed")
+
+    def test_veto_window_skips_recently_touched_tasks(self):
+        m, conn = M.load(CODING), _db()
+        self._seed(conn, tid="fresh", age_min=0)
+        self._seed(conn, tid="aged", age_min=45)
+        fired = M.yolo_sweep(conn, m, "acme", veto_min=30)
+        self.assertEqual(fired, [("aged", "approve")])
+        self.assertEqual(_status(conn, "fresh"), "proposal_review")
+
+    def test_scoped_to_project(self):
+        m, conn = M.load(CODING), _db()
+        conn.execute("INSERT INTO tasks(id,project,title,status) VALUES"
+                     "('other-1','other','x','proposal_review')")
+        conn.commit()
+        self.assertEqual(M.yolo_sweep(conn, m, "acme"), [])
+        self.assertEqual(_status(conn, "other-1"), "proposal_review")
+
+    def test_lint_e6_yolo_on_strong_guard_errors(self):
+        m = M.load(CODING)
+        for e in m["edges"]:
+            if e.get("verb") == "greenlight":
+                e["yolo"] = True
+        errors, _ = M.lint(m)
+        self.assertTrue(any("E6" in e for e in errors), errors)
+
+    def test_lint_w4_yolo_outward_warns(self):
+        m = M.load(CODING)
+        for e in m["edges"]:                   # `shipped` carries script.outward
+            if e.get("verb") == "shipped":
+                e["yolo"] = True
+                e["guards"] = []               # keep E6 out of the way; W4 is the point
+        _, warns = M.lint(m)
+        self.assertTrue(any("W4" in w for w in warns), warns)
+
+    def test_stock_coding_tag_is_lint_clean(self):
+        errors, warns = M.lint(M.load(CODING))
+        self.assertEqual(errors, [])
+        self.assertFalse(any("W4" in w for w in warns), warns)

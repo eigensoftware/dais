@@ -17,6 +17,11 @@ own build/tests green, and your review is the verification. Outgrowing this
 (you want proposals triaged, QA before you, releases batched)? Edit
 machine.json toward the `coding` template's lanes; the machine is yours.
 
+Want it FULLY autonomous (e.g. a prototype over a weekend)? Tag the merge edge
+`"yolo": true` in machine.json, then `dais yolo <project> on --for 48h` — the
+review gate auto-fires each tick. Deliberately NOT pre-tagged: on a repo where
+merge == deploy, that tag means unattended deploys. Your edit, your call.
+
 ## Founder decisions / gotchas
 
 (durable decisions agents must honor)

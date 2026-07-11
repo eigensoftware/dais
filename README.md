@@ -144,6 +144,16 @@ Do not copy the promote pattern onto an outward edge.
 | `attest:<fact>` | a human asserting an unverifiable fact, **strong human**. Conditional form `attest:<fact> when task:<flag>` is required unless the task's flag is explicitly false (fail-safe: unknown still gates) |
 | `verify:<check>` | the machine's declared `checks.<check>` command passing (or the firing role's explicit `--verify` self-assertion); fails closed |
 
+**Yolo mode** is the gates' dial turned to zero, deliberately: `dais yolo <project> on
+[--for 48h] [--veto 30m]` makes the dispatcher auto-fire the founder gates the machine
+explicitly tags `"yolo": true` (the stock coding machine tags `approve`, so yolo means
+full-speed inward: proposals flow, QA still verifies, releases still park). The honesty
+rule: yolo auto-satisfies `confirm` and nothing else; it never forges a `typed_confirm`
+or an `attest:` (those record human testimony, and the release greenlight stays yours
+even under yolo). The board shows a loud YOLO badge, every auto-fired gate leaves an
+attributed audit note on the task, and `--for` self-expires the mode. Design:
+[`design/yolo-mode.md`](design/yolo-mode.md).
+
 **Effects** keep composition inside the machine: an edge can `spawn` a task (QA-fail spawns
 the fix), `aggregate` a set (a release pulls in every `approved` task), or `then`-fire edges
 on what it encompasses (shipping a release closes its children); each nested change still a
@@ -223,14 +233,14 @@ frontmatter key; it's owned by `machine.json`'s `roles` block (see
 
 **Role concurrency (`concurrency: N`, default 1):** how many runs of this role may live at
 once. By default every project runs ONE agent at a time (the repo is shared state); a role
-you declare `concurrency: 2..5` on may STACK — the dispatcher launches another run of the
+you declare `concurrency: 2..5` on may STACK: the dispatcher launches another run of the
 *already-live role* when it has slot headroom and there are more dispatchable tasks than live
 runs. It never launches a *second role* into a busy repo, and it never stacks onto a single
 task. Turn it up only where runs are truly independent per task (content drafting, review-only
-roles). Two cautions: roles whose agents run a shared test stack (a scratch DB) will collide —
+roles). Two cautions: roles whose agents run a shared test stack (a scratch DB) will collide;
 isolate that first; and roles whose agents *drain a queue* may duplicate the top task's work
 (the machine's compare-and-swap edges make duplicates harmless, but the spend is wasted).
-Cadence roles (`every:Nh`) should stay at 1 — they groom shared state; `dais lint` warns.
+Cadence roles (`every:Nh`) should stay at 1 (they groom shared state); `dais lint` warns.
 
 **Let Claude design a role:** `dais role new <project> --desc "what it does"` proposes a
 persona + config from your project's existing roles; you confirm.

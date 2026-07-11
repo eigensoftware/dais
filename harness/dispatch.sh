@@ -54,7 +54,11 @@ fi
 
 # --- machine maintenance: fire each project's system `unblocked` edges whose blockers are all
 #     done (machine.py advance) — e.g. blocked → qa_review once the spawned fix lands — so freed
-#     work is dispatchable THIS tick instead of stranding in a waiting state. ---
+#     work is dispatchable THIS tick instead of stranding in a waiting state. Then the YOLO sweep
+#     (design/yolo-mode.md): a project with a live projects/<p>/.yolo marker gets its yolo-tagged
+#     human gates auto-fired (confirm-only edges; the engine refuses strong/fact guards), BEFORE
+#     eligibility so freed work dispatches this same tick. Marker: `<expiry-epoch|0> [veto-min]`;
+#     expired markers are removed here and journaled. ---
 if [ "$DRY" = 0 ]; then
   for p in "$DAIS_HOME"/projects/*/; do
     [ -d "$p" ] || continue; pj="$(basename "$p")"
@@ -63,6 +67,19 @@ if [ "$DRY" = 0 ]; then
     python3 "$SELF/machine.py" advance "$DB" "$mp" "$pj" 2>/dev/null | while IFS= read -r t; do
       [ -n "$t" ] && echo "${CD}tick[$pj]: unblocked $t${C0}"
     done
+    ym="$p/.yolo"
+    if [ -f "$ym" ]; then
+      y_exp="$(cut -d' ' -f1 "$ym" 2>/dev/null)"; y_veto="$(cut -d' ' -f2 -s "$ym" 2>/dev/null)"
+      if [ -n "$y_exp" ] && [ "$y_exp" != 0 ] && [ "$(date +%s)" -gt "$y_exp" ] 2>/dev/null; then
+        rm -f "$ym"; tlog "yolo[$pj]: expired — gates restored"
+        echo "${CY}tick[$pj]: yolo expired — founder gates restored${C0}"
+      else
+        python3 "$SELF/machine.py" yolo "$DB" "$mp" "$pj" ${y_veto:+--veto-min "$y_veto"} 2>>"$TLOG" \
+          | while IFS= read -r t; do
+          [ -n "$t" ] && { tlog "yolo[$pj]: auto-fired $t"; echo "${CY}tick[$pj]: ⚡ yolo auto-fired $t${C0}"; }
+        done
+      fi
+    fi
   done
 fi
 

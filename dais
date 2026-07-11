@@ -26,6 +26,7 @@ dais — your agent company control panel
   dais watch [seconds]                keep checking on an interval (default 900s); Ctrl-C to stop
   dais schedule install|uninstall|status   run the interval in the background (cross-platform)
   dais pause | resume                 park/un-park the loop (honored by watch + schedule)
+  dais yolo <project> [on|off] [--for 48h] [--veto 30m]  auto-approve the machine's yolo-tagged founder gates (confirm-only; never attest/typed)
   dais cancel <project>               stop the project's in-flight agent (marks it interrupted)
   dais archive <project>              hide a finished project from the board + dispatch (data stays in the db)
   dais unarchive <project>            restore an archived project to the board
@@ -544,6 +545,60 @@ effort: <optional low|medium|high, or blank>
     for pid in $(live_lock_pids "$proj"); do kill_tree "$pid"; n=$((n+1)); done
     [ "$n" -gt 0 ] && echo "■ cancelled $n in-flight agent(s) in $proj — marked interrupted; task stays put" \
                    || echo "nothing running in $proj" ;;
+
+  yolo)
+    # yolo mode (design/yolo-mode.md): per-project auto-approval of the founder gates the
+    # machine explicitly tagged `"yolo": true` — confirm-only edges; the engine refuses to
+    # auto-satisfy typed_confirm/attest/verify (the honesty rule). Runtime marker, like .paused:
+    # projects/<p>/.yolo = `<expiry-epoch|0> [veto-min]`; the dispatcher sweeps it every tick.
+    proj="${1:?usage: dais yolo <project> [on [--for 48h] [--veto 30m] | off]}"; shift 2>/dev/null || true
+    [ -d "$DAIS_HOME/projects/$proj" ] || { echo "yolo: no project '$proj'"; exit 1; }
+    ym="$DAIS_HOME/projects/$proj/.yolo"
+    sub="${1:-status}"; shift 2>/dev/null || true
+    dur_secs(){ # 48h / 30m / 2d -> seconds ('' = 0)
+      case "$1" in
+        *h) echo $(( ${1%h} * 3600 ));; *m) echo $(( ${1%m} * 60 ));;
+        *d) echo $(( ${1%d} * 86400 ));; ''|0) echo 0;;
+        *) echo "yolo: duration must look like 48h / 30m / 2d" >&2; return 1;;
+      esac
+    }
+    case "$sub" in
+      on)
+        exp=0; veto=""
+        while [ $# -gt 0 ]; do case "$1" in
+          --for)  s="$(dur_secs "$2")" || exit 1; exp=$(( $(date +%s) + s )); shift 2;;
+          --veto) s="$(dur_secs "$2")" || exit 1; veto=$(( s / 60 )); shift 2;;
+          *) echo "yolo: unknown arg: $1"; exit 1;;
+        esac; done
+        printf '%s%s\n' "$exp" "${veto:+ $veto}" > "$ym"
+        if [ "$exp" != 0 ]; then
+          echo "⚡ yolo ON for $proj — tagged founder gates auto-fire each tick (expires $(date -r "$exp" '+%F %H:%M' 2>/dev/null))"
+        else
+          echo "⚡ yolo ON for $proj — tagged founder gates auto-fire each tick (NO EXPIRY — consider --for 48h)"
+        fi
+        echo "   eligible edges:"
+        MP="$(machine_path "$proj")"
+        DAIS_MP="$MP" python3 -c '
+import json, os
+m = json.load(open(os.environ["DAIS_MP"]))
+humans = {r for r, v in (m.get("roles") or {}).items() if (v or {}).get("human")} | {"founder"}
+ok = [e for e in m.get("edges", []) if e.get("yolo") and e.get("by") in humans
+      and not any(g != "confirm" for g in e.get("guards", []))]
+for e in ok:
+    print("     %s --%s--> %s  (by %s)" % (e["from"], e["verb"], e["to"], e["by"]))
+if not ok:
+    print("     (none -- tag an edge \"yolo\": true in machine.json; the mode fires nothing until then)")' ;;
+      off)
+        rm -f "$ym" && echo "◆ yolo OFF for $proj — founder gates restored" ;;
+      status|*)
+        if [ -f "$ym" ]; then
+          exp="$(cut -d' ' -f1 "$ym")"; veto="$(cut -d' ' -f2 -s "$ym")"
+          when="(no expiry)"; [ "$exp" != 0 ] && when="(expires $(date -r "$exp" '+%F %H:%M' 2>/dev/null))"
+          echo "⚡ yolo is ON for $proj $when${veto:+ (veto ${veto}m)}"
+        else
+          echo "◆ yolo is off for $proj"
+        fi ;;
+    esac ;;
 
   archive)
     # hide a finished project: off the rail/status/dispatch, but nothing is deleted — tasks,
