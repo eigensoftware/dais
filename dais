@@ -209,6 +209,11 @@ MD
         link_run_task "$id" create; echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]" ;;
       set)
         id="$1"; shift
+        # fail loud on an unknown id: a blind UPDATE matches zero rows but still printed
+        # "updated <id>", which let a typo'd/guessed id silently no-op — or worse, train the
+        # habit that overwrote a REAL task's field when the guess happened to exist.
+        [ -n "$(db "SELECT 1 FROM tasks WHERE id='$(sqlesc "$id")';")" ] \
+          || { echo "task set: no task '$id'"; exit 1; }
         sets=""; newst=""; dep=""; depset=0; notes_add=""
         while [ $# -gt 0 ]; do case "$1" in
           --status)     newst="$2"; sets="$sets, status='$(sqlesc "$2")'"; shift 2;;
