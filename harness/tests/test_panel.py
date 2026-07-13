@@ -233,6 +233,21 @@ class TestPaneRenderers(unittest.TestCase):
             self.assertGreaterEqual(x, rect.x)
             self.assertLessEqual(pn.disp_width(s), rect.x + rect.w - x)
 
+    def test_inspector_runs_touching_shows_the_model(self):
+        """The task inspector's 'runs touching' history lists the model each run ACTUALLY ran on
+        (runs.model) — so a usage-cap fallback to the backup is visible, not hidden behind the
+        configured-model line."""
+        app = self._app([("lyr-1", "beacon", "impl", "qa_review", "high", None)])
+        app.sel_id = "lyr-1"
+        p = {pr.name: pr for pr in app.snap.projects}["beacon"]
+        p.recent_runs = [d.Run("2026-07-01 16:24:00", "engineer", "succeeded",
+                               summary="lyr-1→qa_review", dur_min=4,
+                               model="claude-opus-4-8", task_ids=("lyr-1",))]
+        lines = pn._panel_detail_lines(app, app._selected(app.left_rows())[1])
+        text = "\n".join(lines)
+        self.assertIn("runs touching lyr-1:", text)
+        self.assertIn("opus-4-8", text)              # de-prefixed model, in the history row
+
     def test_inspector_gate_state_shows_waiting_on_you(self):
         """A founder-gate selection carries a persistent '◆ waiting on YOU … since' line —
         the definitive 'did my fire take?' signal (it exists only while the gate is open)."""

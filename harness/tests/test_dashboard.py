@@ -504,6 +504,43 @@ class TestRunningVisibility(unittest.TestCase):
         self.assertEqual(eng["secs"], 300)
         self.assertEqual(eng["log_path"], "/tmp/x.log")
 
+    def test_running_thread_carries_the_actual_model(self):
+        # the thread carries the model the run LAUNCHED on (runs.model) — so the header can show
+        # the backup when the usage-cap fallback swapped it in, not the configured primary
+        snap = d.Snapshot(
+            projects=[d.Project(name="wb", stage_goal="",
+                                running=[("engineer", "2026-07-01 16:24:00")],
+                                machine=MC.load(MC.default_machine_path()),
+                                tasks_by_status={},
+                                recent_runs=[d.Run("2026-07-01 16:24:00", "engineer", "running",
+                                                   log_path="/tmp/e.log", model="claude-opus-4-8")])],
+            recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
+        threads = d.running_threads(snap, now="2026-07-01 16:30:00")
+        self.assertEqual(threads[0]["model"], "claude-opus-4-8")
+
+    def test_running_header_flags_the_backup_model(self):
+        app = d.App.__new__(d.App)
+        app.snap = None
+        app.root = "/nonexistent"                       # agent_model → configured default
+        cfg, _eff = d.agent_model(app.root, "wb", "engineer")
+        row = {"project": "wb", "agent": "engineer", "task_id": None,
+               "since": "2026-07-01 16:24:00", "model": "claude-opus-4-8[1m]"}
+        head = "\n".join(app.running_header(row, "2026-07-01 16:30:00"))
+        self.assertIn("claude-opus-4-8[1m]", head)      # the ACTUAL model
+        self.assertIn("BACKUP", head)                   # flagged as the fallback
+        self.assertIn(cfg, head)                         # names the configured primary too
+
+    def test_running_header_no_flag_when_on_primary(self):
+        app = d.App.__new__(d.App)
+        app.snap = None
+        app.root = "/nonexistent"
+        cfg, _eff = d.agent_model(app.root, "wb", "engineer")
+        row = {"project": "wb", "agent": "engineer", "task_id": None,
+               "since": "2026-07-01 16:24:00", "model": cfg}
+        head = "\n".join(app.running_header(row, "2026-07-01 16:30:00"))
+        self.assertIn(f"model {cfg}", head)
+        self.assertNotIn("BACKUP", head)
+
     def test_running_thread_log_survives_a_newer_finished_run(self):
         # engineer started first and is STILL running; qa ran after it and finished, so the
         # project's newest run isn't 'running'. The engineer thread must still tail ITS OWN log

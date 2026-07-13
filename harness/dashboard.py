@@ -402,6 +402,7 @@ def running_threads(snap, now=None, root=HOME):
             out.append(dict(project=p.name, agent=agent, since=since,
                             secs=seconds_between(since, now),
                             task=task,
+                            model=(rr.model if rr else None),   # what THIS run launched on (may be the backup)
                             log_path=(rr.log_path if rr and rr.log_path else live_log)))
     return out
 
@@ -765,8 +766,16 @@ class App:
         head = [f"{tid}  {row['project']}/{row['agent']} · running {el}"]
         if task:
             head.append(f'"{truncate_words(task.title, 56)}"')
-        model, eff = agent_model(self.root, row["project"], row["agent"])
-        head.append(f"model {model}" + (f" · effort {eff}" if eff else ""))
+        # show the model the run ACTUALLY launched on (runs.model), not just the configured one —
+        # the usage-cap auto-fallback can swap in the backup, and the header must not keep claiming
+        # the primary. Flag the swap so it reads at a glance; effort is config (applies either way).
+        cfg_model, eff = agent_model(self.root, row["project"], row["agent"])
+        actual = row.get("model")
+        eff_seg = f" · effort {eff}" if eff else ""
+        if actual and actual != cfg_model:
+            head.append(f"model {actual} · ⚑ BACKUP (configured {cfg_model}){eff_seg}")
+        else:
+            head.append(f"model {actual or cfg_model}{eff_seg}")
         return head
 
     # ---- external launchers (pager / browser — suspend curses, run, restore) ----

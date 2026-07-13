@@ -419,7 +419,10 @@ def _panel_detail_lines(app, sel_row):
     out.append(f"runs touching {task.id}:")
     for r in d.runs_touching(p.recent_runs, task.id):
         dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
-        out.append(f"  {d.to_local_hhmm(r.started_at):<5} {r.agent:<10} {r.status:<11} {dur:<4}")
+        # the model column is what a run ACTUALLY launched on (runs.model) — reveals the
+        # usage-cap auto-fallback, which the configured-model line elsewhere can't show
+        out.append(f"  {d.to_local_hhmm(r.started_at):<5} {r.agent:<10} {r.status:<11} "
+                   f"{dur:<4} {d.fmt_model(r.model)}")
     return out
 
 
