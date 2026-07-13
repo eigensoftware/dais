@@ -854,6 +854,12 @@ class TestYolo(unittest.TestCase):
     """Yolo mode (design/yolo-mode.md): auto-fire tagged human gates, honestly."""
 
     def _seed(self, conn, tid="t-1", status="proposal_review", age_min=0):
+        # the real schema.sql has `notes` as a BASE column; the shared _db() fixture omits it
+        # (it models a pre-notes db for the degrade tests). yolo_sweep appends a [yolo] audit
+        # note on every fire, so without the column that write rolls the whole auto-approve
+        # back — add it here so these tests run the real path. Idempotent: the veto test seeds twice.
+        if not any(r[1] == "notes" for r in conn.execute("PRAGMA table_info(tasks)")):
+            conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT")
         conn.execute("INSERT INTO tasks(id,project,title,status,updated_at) VALUES(?,?,?,?,"
                      "datetime('now', ?))", (tid, "acme", "x", status, "-%d minutes" % age_min))
         conn.commit()
@@ -864,9 +870,11 @@ class TestYolo(unittest.TestCase):
         fired = M.yolo_sweep(conn, m, "acme")
         self.assertEqual(fired, [("t-1", "approve")])
         self.assertEqual(_status(conn, "t-1"), "done")
-        # approve's spawn effect ran (the build task exists) — full fire() semantics held
+        # approve's spawn effect ran (the build task exists) — full fire() semantics held.
+        # the engine stores the machine's rel:"from_proposal" as the link rel 'spawned_from'
+        # (see _effect_spawn's rel map / TestSpawnInheritsNotes), so query that value.
         self.assertEqual(conn.execute(
-            "SELECT COUNT(*) FROM task_links WHERE parent_id='t-1' AND rel='from_proposal'"
+            "SELECT COUNT(*) FROM task_links WHERE parent_id='t-1' AND rel='spawned_from'"
         ).fetchone()[0], 1)
 
     def test_never_satisfies_strong_guards_even_when_tagged(self):
