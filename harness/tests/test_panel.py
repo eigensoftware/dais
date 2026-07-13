@@ -625,6 +625,29 @@ class TestInspectorWideColor(unittest.TestCase):
             text = "\n".join(c[2] for c in scr.calls)
             self.assertIn("engineer", text)
 
+    def test_running_work_row_carries_actual_model_to_header(self):
+        """Regression: the RUNNING work row must propagate the run's actual model so the
+        inspector header can flag the backup. The row is built by _machine_work_rows (not
+        running_threads directly), and it once dropped `model` — the header then fell back to
+        the configured model and mislabeled a backup run as the primary (the fable/opus bug)."""
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-pbm-")
+        os.makedirs(os.path.join(root, "projects", "cedar"), exist_ok=True)
+        with open(os.path.join(root, "projects", "cedar", "project.yaml"), "w") as fh:
+            fh.write("project: cedar\nmodel: claude-fable-5\n")   # configured primary = fable
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        thread = {"project": "cedar", "task": "w-1", "agent": "engineer",
+                  "since": "2026-06-29 00:00:00", "secs": 10, "log_path": "/tmp/x.log",
+                  "model": "claude-opus-4-8"}                 # ran on the backup, not the configured fable
+        with mock.patch.object(d, "running_threads", return_value=[thread]):
+            run_row = next(r for r in papp.left_rows() if r["kind"] == "running")
+            self.assertEqual(run_row.get("model"), "claude-opus-4-8")   # the row must carry it
+            head = "\n".join(papp.running_header(run_row, "2026-06-29 00:05:00"))
+            self.assertIn("claude-opus-4-8", head)                      # header shows the ACTUAL model
+            self.assertIn("BACKUP", head)                               # ...flagged as the fallback
+
 
 class TestBarAndHelp(unittest.TestCase):
     def _papp(self, rows):

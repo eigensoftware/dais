@@ -1330,7 +1330,8 @@ def _machine_work_rows(snap, projects, project, expanded, root):
         rows.append({"kind": "running", "id": f"run::{t['project']}/{t['agent']}",
                      "project": t["project"], "task_id": t["task"], "task": None,
                      "status": "doing", "sel": True, "agent": t["agent"],
-                     "since": t["since"], "log_path": t["log_path"]})
+                     "since": t["since"], "log_path": t["log_path"],
+                     "model": t.get("model")})   # carry the ACTUAL run model so the header can flag the backup
 
     live = [(p, st, t) for p in projects for st, ts in p.tasks_by_status.items()
             for t in ts if (p.name, t.id) not in running_ids]
