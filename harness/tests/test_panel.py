@@ -577,11 +577,6 @@ class TestRailSelection(unittest.TestCase):
 
 
 class TestInspectorWideColor(unittest.TestCase):
-    def test_inspector_is_a_wide_right_column(self):
-        L = pn.layout(200, 50)
-        # the inspector is a generous right column (the founder wanted it wide)
-        self.assertGreaterEqual(L["inspector"].w, 80)
-
     def test_two_columns_split_50_50(self):
         # founder decision 2026-07-02: the two columns split evenly — the inspector earned half
         # the screen (model line, edges, links, live log). No left-column cap.

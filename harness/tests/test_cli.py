@@ -42,11 +42,37 @@ def q(root, sql):
         c.close()
 
 
+# A pristine workspace, built ONCE. `dais init` is ~130ms of subprocess (bash + the sqlite
+# schema + every migration); running it in every test's setUp dominated this file's runtime
+# (~11s across the suite). Snapshot init's output here and clone the few small files per test
+# instead — behavior-identical (the post-state is an inited workspace) but ~instant. The
+# harness itself is still copied per test (only ~16ms) so the migration tests keep their own
+# writable harness/migrations, and DAIS_ROOT stays isolated from the live repo.
+def _pristine_workspace():
+    sb = make_sandbox()
+    try:
+        dais(sb, "init")
+        out = {}
+        for name in ("dais.yaml", "CONTEXT.md", ".gitignore", "dais.db"):
+            p = os.path.join(sb, name)
+            if os.path.exists(p):
+                with open(p, "rb") as fh:
+                    out[name] = fh.read()
+        return out
+    finally:
+        shutil.rmtree(sb, ignore_errors=True)
+
+
+_PRISTINE = _pristine_workspace()
+
+
 class CliTest(unittest.TestCase):
     def setUp(self):
         self.root = make_sandbox()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        dais(self.root, "init")
+        for name, data in _PRISTINE.items():        # clone the inited workspace — no per-test `dais init`
+            with open(os.path.join(self.root, name), "wb") as fh:
+                fh.write(data)
 
 
 class TestStatusAndTitle(CliTest):
