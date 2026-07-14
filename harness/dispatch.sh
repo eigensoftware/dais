@@ -137,6 +137,23 @@ else
   done
 fi
 
+# Reconcile stall markers BEFORE the pool-gated eligible loop below, so it runs every tick
+# regardless of free slots — clearing a phantom marker is bookkeeping, not a launch (MAX defaults
+# to 1, so `free` is 0 whenever anything is running, and the eligible loop `break`s out before
+# touching most projects). The in-loop clear only revisits a marker when the router still
+# nominates that role, so a role whose stall-causing task LEFT the board (done/cancelled) is never
+# re-checked and its `dais status` STALLED warning lives forever. Sweep every marker: clear any
+# whose stored fingerprint no longer matches the role's current dispatch-set (world changed, or
+# now empty); a still-valid stall (fp unchanged) is left for the loop's 6h TTL heartbeat.
+for proj in "${projects[@]}"; do
+  for sm in "$DAIS_HOME/projects/$proj"/.stalled-*; do
+    [ -e "$sm" ] || continue
+    r="$(basename "$sm")"; r="${r#.stalled-}"
+    fp="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$proj" "$r" 2>/dev/null)"
+    [ "$fp" = "$(cat "$sm" 2>/dev/null)" ] || { rm -f "$sm"; tlog "unstall $proj/$r — stall-world gone (marker cleared)"; }
+  done
+done
+
 # Build the eligible set: each project the router wants to run, as one line
 # `priority|last_run|project|agent`. At most one NEW launch per project per tick. A busy
 # project is normally skipped — EXCEPT role-concurrency stacking: the router may return the
