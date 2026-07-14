@@ -41,6 +41,7 @@
     {"from": "ready",           "to": "doing",           "by": "engineer", "verb": "claim"},
     {"from": "ready",           "to": "deferred",        "by": "founder",  "verb": "defer"},
     {"from": "ready",           "to": "cancelled",       "by": "founder",  "verb": "cancel", "guards": ["confirm"]},
+    {"from": "approved",        "to": "cancelled",       "by": "founder",  "verb": "cancel", "guards": ["confirm"], "note": "an approved (QA-passed, release-parked) task that turns out obsolete needs a retire path. Without this its only exit is the release lane, so a superseded PR gets swept into a release and fails to merge."},
     {"from": "ready",           "to": "cancelled",       "by": "engineer", "verb": "invalidate", "guards": ["attest:invalid"]},
     {"from": "ready",           "to": "design",          "by": "engineer", "verb": "needs_design"},
     {"from": "design",          "to": "ready",           "by": "designer", "verb": "design_done"},
