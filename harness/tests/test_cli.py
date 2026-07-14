@@ -3,6 +3,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1319,6 +1320,139 @@ class TestDispatchTaskPinning(CliTest):
         self._ins("demo-3", "qa_review")                      # qa_review -> qa, NOT engineer
         self._show_prompt("engineer")
         self.assertIsNone(self._last_run_task())
+
+
+class TestWorktreeIsolation(CliTest):
+    """isolation:worktree gives each run a private git worktree off fresh origin/<default-branch>.
+    A read-only run's worktree is torn down; one left dirty (or with commits) is kept as recoverable
+    task state; a non-git repo warns and runs in place. Exercised through run-agent.sh with the
+    DAIS_NOOP_RUN seam (a shell command stands in for the model), so create->run->teardown all run."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        self.repo_base = tempfile.mkdtemp(prefix="dais-wt-")
+        self.addCleanup(shutil.rmtree, self.repo_base, ignore_errors=True)
+
+    def _isolate(self, role="engineer"):
+        p = os.path.join(self.root, "projects", "demo", "agents", role + ".md")
+        with open(p) as f:
+            body = f.read()
+        with open(p, "w") as f:
+            f.write("---\nisolation: worktree\n---\n" + body)
+
+    def _git_repo(self):
+        repo = os.path.join(self.repo_base, "demo")
+        origin = os.path.join(self.repo_base, "demo-origin.git")
+        def g(args, cwd=None):
+            subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+        g(["init", "--bare", "-b", "main", origin])
+        g(["init", "-b", "main", repo])
+        g(["config", "user.email", "t@example.com"], cwd=repo)
+        g(["config", "user.name", "t"], cwd=repo)
+        with open(os.path.join(repo, "README.md"), "w") as f:
+            f.write("hi\n")
+        g(["add", "-A"], cwd=repo)
+        g(["commit", "-m", "init"], cwd=repo)
+        g(["remote", "add", "origin", origin], cwd=repo)
+        g(["push", "-u", "origin", "main"], cwd=repo)
+        g(["remote", "set-head", "origin", "main"], cwd=repo)
+        return repo
+
+    def _run(self, noop, role="engineer"):
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_AGENT_REPOS": self.repo_base, "DAIS_NOOP_RUN": noop})
+        return subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", role],
+                              capture_output=True, text=True, env=e, cwd=self.root)
+
+    def _run_worktrees(self, repo):
+        wt = os.path.join(repo, ".worktrees")
+        return [d for d in (os.listdir(wt) if os.path.isdir(wt) else []) if d.startswith("run-")]
+
+    def test_run_executes_inside_a_private_worktree(self):
+        self._isolate()
+        self._git_repo()
+        marker = os.path.join(self.repo_base, "where.txt")
+        self._run("pwd > %s" % marker)
+        with open(marker) as f:
+            where = f.read().strip()
+        self.assertIn("/.worktrees/run-", where)   # ran in a private worktree, not the shared repo
+
+    def test_read_only_run_tears_down_its_worktree(self):
+        self._isolate()
+        repo = self._git_repo()
+        self._run("true")                          # touches nothing
+        self.assertEqual(self._run_worktrees(repo), [])   # no leftover
+
+    def test_dirty_run_keeps_its_worktree(self):
+        self._isolate()
+        repo = self._git_repo()
+        self._run("echo work > left.txt")          # leaves an uncommitted file
+        left = self._run_worktrees(repo)
+        self.assertEqual(len(left), 1)             # kept as recoverable task state
+        self.assertTrue(os.path.exists(os.path.join(repo, ".worktrees", left[0], "left.txt")))
+
+    def test_worktree_setup_hook_runs_inside_the_worktree(self):
+        self._isolate()
+        self._git_repo()
+        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as f:
+            f.write("worktree_setup: touch SETUP_MARKER\n")
+        marker = os.path.join(self.repo_base, "hook.txt")
+        # the noop (in WORKDIR) sees the file the setup hook created before the model would run
+        self._run("test -f SETUP_MARKER && echo ran > %s" % marker)
+        self.assertTrue(os.path.exists(marker), "worktree_setup hook did not run in the worktree")
+
+    def test_non_git_repo_runs_in_place_and_warns(self):
+        self._isolate()
+        os.makedirs(os.path.join(self.repo_base, "demo"))   # a plain dir, NOT a git repo
+        marker = os.path.join(self.repo_base, "where.txt")
+        r = self._run("pwd > %s" % marker)
+        with open(marker) as f:
+            where = f.read().strip()
+        self.assertNotIn("/.worktrees/", where)             # ran in place
+        self.assertIn("not a git repo", r.stdout + r.stderr)
+
+    def _add_worktree(self, repo, name, branch=None):
+        args = ["git", "-C", repo, "worktree", "add"]
+        args += (["-b", branch] if branch else ["--detach"])
+        w = os.path.join(repo, ".worktrees", name)
+        subprocess.run(args + [w, "origin/main"], check=True, capture_output=True)
+        return w
+
+    def _backdate(self, path, days=5):
+        old = time.time() - days * 86400
+        os.utime(path, (old, old))
+
+    def _sweep(self, repo, days=2):
+        subprocess.run(["bash", "-c", 'source "%s/harness/lib.sh"; worktree_prune_sweep "%s" %d'
+                        % (self.root, repo, days)],
+                       check=True, capture_output=True, env={**os.environ, "DAIS_HOME": self.root})
+
+    def test_prune_sweep_removes_a_stale_clean_worktree(self):
+        repo = self._git_repo()
+        w = self._add_worktree(repo, "run-901")   # detached at origin/main, clean, no commits
+        self._backdate(w)
+        self._sweep(repo)
+        self.assertFalse(os.path.isdir(w))         # crashed-run leftover reaped
+
+    def test_prune_sweep_keeps_a_stale_worktree_with_unpushed_commits(self):
+        repo = self._git_repo()
+        w = self._add_worktree(repo, "run-902", branch="feat-902")
+        with open(os.path.join(w, "x.txt"), "w") as f:
+            f.write("x")
+        subprocess.run(["git", "-C", w, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", w, "-c", "user.email=a@b", "-c", "user.name=a",
+                        "commit", "-m", "wip"], check=True, capture_output=True)
+        self._backdate(w)
+        self._sweep(repo)
+        self.assertTrue(os.path.isdir(w))          # unpushed work is never yanked
+
+    def test_prune_sweep_leaves_a_fresh_worktree_alone(self):
+        repo = self._git_repo()
+        w = self._add_worktree(repo, "run-903")    # clean but NOT stale (just created)
+        self._sweep(repo)
+        self.assertTrue(os.path.isdir(w))          # only stale worktrees are reaped
 
 
 if __name__ == "__main__":

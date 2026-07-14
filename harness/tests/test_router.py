@@ -461,6 +461,34 @@ class TestLintEnumeratesWithoutRolesFile(unittest.TestCase):
         self.assertIn("demo", buf.getvalue())
 
 
+class TestIsolationConfig(unittest.TestCase):
+    """agent_setup resolves `isolation` (per-run worktree opt-in): frontmatter -> project.yaml ->
+    default 'none'. run-agent.sh reads it to decide whether to give the run a private worktree."""
+
+    def _proj_yaml(self, root, text):
+        with open(os.path.join(root, "projects", "p", "project.yaml"), "w") as f:
+            f.write(text)
+
+    def test_defaults_to_none(self):
+        self.assertEqual(router.agent_setup(_ws([("a", "ready")]), "p", "engineer")["isolation"], "none")
+
+    def test_frontmatter_opt_in(self):
+        root = _ws([("a", "ready")])
+        _with_frontmatter(root, "engineer", ["isolation: worktree"])
+        self.assertEqual(router.agent_setup(root, "p", "engineer")["isolation"], "worktree")
+
+    def test_project_yaml_default(self):
+        root = _ws([("a", "ready")])
+        self._proj_yaml(root, "isolation: worktree\n")
+        self.assertEqual(router.agent_setup(root, "p", "engineer")["isolation"], "worktree")
+
+    def test_frontmatter_overrides_project_yaml(self):
+        root = _ws([("a", "ready")])
+        self._proj_yaml(root, "isolation: worktree\n")
+        _with_frontmatter(root, "engineer", ["isolation: none"])
+        self.assertEqual(router.agent_setup(root, "p", "engineer")["isolation"], "none")
+
+
 class TestDispatchNext(unittest.TestCase):
     """dispatch_next — the reactive (role, task) the dispatcher would launch, so run-agent can pin
     the triggering task to the run (DAIS_TASK_ID). Mirrors decide()'s reactive path."""

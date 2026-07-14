@@ -109,6 +109,28 @@ repo_path(){
   esac
 }
 
+# worktree_prune_sweep <repo> [max-age-days] — reap crashed-run worktrees. A run whose EXIT trap
+# never fired (SIGKILL, power loss) leaves its private .worktrees/run-<id> behind. `worktree prune`
+# clears ones whose dir is already gone; then drop STALE (untouched > max-age-days, default 2)
+# run-* worktrees that are provably safe — clean tree AND no unpushed commits. Anything with
+# uncommitted OR committed-but-unpushed work is LEFT for the founder. The dispatcher calls this only
+# when nothing is live, so it never yanks a worktree out from under a running agent.
+worktree_prune_sweep(){
+  local repo="$1" days="${2:-2}" wtd w dirty unpushed
+  [ -n "$repo" ] || return 0
+  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  git -C "$repo" worktree prune 2>/dev/null || true
+  wtd="$repo/.worktrees"; [ -d "$wtd" ] || return 0
+  for w in "$wtd"/run-*; do
+    [ -d "$w" ] || continue
+    [ -n "$(find "$w" -maxdepth 0 -mtime +"$days" 2>/dev/null)" ] || continue   # stale only
+    dirty="$(git -C "$w" status --porcelain 2>/dev/null)"
+    unpushed="$(git -C "$w" log --branches --not --remotes --oneline -1 2>/dev/null)"
+    [ -z "$dirty" ] && [ -z "$unpushed" ] && git -C "$repo" worktree remove --force "$w" 2>/dev/null || true
+  done
+  git -C "$repo" worktree prune 2>/dev/null || true
+}
+
 # --- agent locks. Each running agent holds projects/<p>/.lock-<role> containing its pid; a lock
 #     whose pid is dead is stale (a crash left it behind). One vocabulary, three verbs: ---
 

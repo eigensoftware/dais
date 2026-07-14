@@ -20,7 +20,7 @@ cfg(){ printf '%s\n' "$CFG" | sed -n "s/^$1=//p" | head -1; }
 MODEL="$(cfg model)"; EFF="$(cfg effort)"
 PROVIDER="$(cfg provider)"; AUTH="$(cfg auth)"
 ACCESS="$(cfg access)"; PB="$(cfg playbook)"; PB_FILE="$(cfg playbook_file)"
-TRIG="$(cfg trigger)"; PREC="$(cfg prec)"
+TRIG="$(cfg trigger)"; PREC="$(cfg prec)"; ISOLATION="$(cfg isolation)"
 FALLBACK="$(cfg fallback_model)"   # optional backup model for the usage-limit auto-fallback
 [ "$FALLBACK" = "$MODEL" ] && FALLBACK=""   # a fallback == primary is a no-op; disable it
 EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
@@ -128,12 +128,58 @@ export DAIS_RUN_ID="$RUNID"
 export DAIS_ACTOR="$AGENT"
 START_TS="$(db "SELECT datetime('now');")"   # used to summarize what this run changed
 
+# Where the agent actually runs. Defaults to the repo itself; per-run worktree isolation (below)
+# points it at a private worktree instead. WT is the worktree to tear down on exit (empty = none),
+# WT_BASE its starting commit — an unchanged HEAD + clean tree means the run was read-only.
+WORKDIR="$REPO"; WT=""; WT_BASE=""
+
+_worktree_teardown(){
+  [ -n "$WT" ] && [ -d "$WT" ] || return 0
+  # Remove only a PRISTINE run worktree (clean tree AND HEAD never moved off the base): the run was
+  # read-only, leave no trace. Uncommitted OR committed work => keep it as recoverable task state
+  # (the dispatch-startup prune sweep reaps stale ones). Committed branches live in the shared repo
+  # regardless, so removing a pristine worktree never loses committed work.
+  local dirty head_now
+  dirty="$(git -C "$WT" status --porcelain 2>/dev/null)"
+  head_now="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"
+  if [ -z "$dirty" ] && [ "$head_now" = "$WT_BASE" ]; then
+    git -C "$REPO" worktree remove --force "$WT" 2>/dev/null
+    git -C "$REPO" worktree prune 2>/dev/null
+  fi
+}
+
 # Clean up on ANY exit — including Ctrl-C / watch-stop / sleep-kill. An interrupted run
 # is recorded as such (not left dangling as 'running'); its task is untouched, so the next
 # tick simply re-runs it. State lives in the db, never in this process.
-cleanup(){ rm -f "$LOCK"; [ -n "${RUNID:-}" ] && db "UPDATE runs SET ended_at=datetime('now'), status=CASE WHEN status='running' THEN 'interrupted' ELSE status END WHERE id=$RUNID;" 2>/dev/null; }
+cleanup(){ rm -f "$LOCK"; [ -n "${RUNID:-}" ] && db "UPDATE runs SET ended_at=datetime('now'), status=CASE WHEN status='running' THEN 'interrupted' ELSE status END WHERE id=$RUNID;" 2>/dev/null; _worktree_teardown; }
 trap cleanup EXIT
 trap 'echo "  ⏹ interrupted — task left in place, will resume next tick"; exit 130' INT TERM
+
+# --- per-run worktree isolation (opt-in: role/project `isolation: worktree`) ------------------
+# A private checkout per run so concurrent runs (role concurrency, or an engineer + qa in one repo)
+# can't corrupt a shared working tree — the guarantee the personas' "work in your own worktree" note
+# only asks for. Created off fresh origin/<default-branch>, DETACHED: the agent makes its own named
+# branch exactly as before. A non-git repo (or a failed add) warns and runs in place (WORKDIR stays
+# $REPO). Fresh worktrees lack installed deps — project.yaml `worktree_setup:` runs once inside it.
+if [ "$ISOLATION" = "worktree" ]; then
+  if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$REPO" fetch --quiet origin 2>/dev/null || true
+    def="$(git -C "$REPO" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+    [ -n "$def" ] || def=main
+    base="origin/$def"
+    git -C "$REPO" rev-parse --verify --quiet "$base" >/dev/null 2>&1 || base="$def"
+    cand="$REPO/.worktrees/run-$RUNID"
+    if git -C "$REPO" worktree add --quiet --detach "$cand" "$base" >>"$LOG" 2>&1; then
+      WT="$cand"; WORKDIR="$cand"; WT_BASE="$(git -C "$cand" rev-parse HEAD 2>/dev/null)"
+      setup="$(pcfg "$PROJECT" worktree_setup)"
+      [ -n "$setup" ] && ( cd "$WT" && eval "$setup" ) >>"$LOG" 2>&1 || true
+    else
+      echo "  ⚠ isolation:worktree — 'git worktree add' failed; running in the shared checkout $REPO" | tee -a "$LOG"
+    fi
+  else
+    echo "  ⚠ isolation:worktree — $REPO is not a git repo; running in place" | tee -a "$LOG"
+  fi
+fi
 
 STAGE_GOAL="$(pcfg "$PROJECT" stage_goal)"
 # Workspace context: company-wide rules + founder decisions that apply to EVERY project. Injected
@@ -231,7 +277,7 @@ case "$ACCESS" in
   *)    PERM+=(--disallowedTools Edit Write NotebookEdit) ;;
 esac
 
-cd "$REPO" || { echo "cd failed"; exit 1; }
+cd "$WORKDIR" || { echo "cd failed"; exit 1; }
 
 # fmt-stream writes the PLAIN log file (always) and colors the terminal on its stdout.
 # In QUIET mode (parallel runs) we send that terminal stream to /dev/null so N agents don't
@@ -242,7 +288,7 @@ run_agent_anthropic(){
         --model "$MODEL" \
         ${EFFORT_FLAG[@]+"${EFFORT_FLAG[@]}"} \
         "${PERM[@]}" \
-        --add-dir "$REPO" \
+        --add-dir "$WORKDIR" \
         --output-format stream-json --verbose 2>&1 \
         | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG"
 }
@@ -261,7 +307,7 @@ run_agent_openai(){
     sandbox_flags=(--sandbox workspace-write
                    -c 'sandbox_workspace_write.writable_roots=["'"$DAIS_HOME"'"]')
   fi
-  codex exec --json --skip-git-repo-check --cd "$REPO" \
+  codex exec --json --skip-git-repo-check --cd "$WORKDIR" \
         ${MODEL:+-m "$MODEL"} \
         ${EFF:+-c model_reasoning_effort="$EFF"} \
         "${sandbox_flags[@]}" \
@@ -272,6 +318,9 @@ $PERSONA" 2>&1 \
 }
 
 run_agent(){
+  # Debug seam: run a shell command in WORKDIR instead of the model (tests exercise the worktree
+  # lifecycle end-to-end without an LLM call). Same convention as DAIS_SHOW_PROMPT/DAIS_SHOW_CONFIG.
+  if [ -n "${DAIS_NOOP_RUN:-}" ]; then ( cd "$WORKDIR" && eval "$DAIS_NOOP_RUN" ) >>"$LOG" 2>&1; return $?; fi
   case "$PROVIDER" in
     anthropic) run_agent_anthropic;;
     openai)    run_agent_openai;;

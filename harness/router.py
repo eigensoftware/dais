@@ -61,7 +61,7 @@ def frontmatter(path):
     return {}          # unterminated block -> treat as no frontmatter
 
 
-AGENT_CONFIG_KEYS = ("model", "fallback_model", "effort", "provider", "auth", "access",
+AGENT_CONFIG_KEYS = ("model", "fallback_model", "effort", "provider", "auth", "access", "isolation",
                      "trigger", "prec", "playbook", "playbook_file", "concurrency")
 
 
@@ -129,12 +129,18 @@ def agent_setup(root, project, role):
     conc = str(fm.get("concurrency") or "").strip()
     if not (conc.isdigit() and 1 <= int(conc) <= 5):
         conc = "1"
+    # isolation: 'worktree' gives each run a private git worktree (frontmatter -> project.yaml ->
+    # 'none'). The guarantee the personas' "work in your own worktree" instruction only asks for —
+    # at role concurrency >1 discipline is the wrong tool, the harness should own it.
+    isolation = (fm.get("isolation") or _yaml_line(ytext, "isolation") or "none").strip()
+    if isolation not in ("none", "worktree"):
+        isolation = "none"                          # a typo must not silently change run semantics
     return {"model": model, "fallback_model": fallback_model,
             "effort": effort, "provider": provider, "auth": auth,
             "access": access, "trigger": trigger, "prec": str(prec),
             "playbook": playbook,
             "playbook_file": _playbook_file(root, project, playbook),
-            "concurrency": conc}
+            "concurrency": conc, "isolation": isolation}
 
 
 def cast(root, project):

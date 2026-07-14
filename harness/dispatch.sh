@@ -40,6 +40,7 @@ if [ "$DRY" = 0 ]; then
       [ "$(pcfg "$pj" archived)" = "true" ] && continue   # archived: the dispatcher never touches it
       mp="$(machine_path "$pj")"; [ -n "$mp" ] || continue
       python3 "$SELF/machine.py" recover "$DB" "$mp" "$pj" 2>/dev/null || true
+      worktree_prune_sweep "$(repo_path "$pj" 2>/dev/null)"   # reap crashed-run worktrees (safe: live=0)
     done
   fi
 fi
