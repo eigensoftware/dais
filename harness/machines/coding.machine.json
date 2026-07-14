@@ -17,7 +17,7 @@
     "doing":            {},
     "qa_review":        {},
     "blocked":          {},
-    "approved": {},
+    "approved":         {"band": "WAITING"},
     "release_open":    {"initial": true},
     "release_review":   {},
     "releasing":        {},
