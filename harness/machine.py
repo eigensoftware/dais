@@ -698,11 +698,19 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         if cas.rowcount != 1:                       # someone else moved it between read and write
             raise GuardFailure(f"task {tid} left state {task['status']!r} concurrently — "
                                f"re-check with: dais edges {tid}")
-        # Log WHO worked it: the first AGENT to fire an edge on an unassigned task stamps itself
-        # as assignee, so archived tasks record their worker even when filing skipped --assignee.
-        # Explicit assignments are never overwritten; founder/system edges (approve/defer/cancel)
-        # are gate/surgery actions, not authorship. (Routing ignores assignee — display only.)
-        if actor not in ("founder", "system") and not (task["assignee"] or "").strip():
+        # Keep `assignee` meaning WHO CARRIES THIS TASK NOW. On a handoff into a state a DIFFERENT
+        # role dispatches, re-stamp to that role — so a task the lead promotes into `ready` reads as
+        # the engineer's, not frozen on whoever last touched it. Only AUTO-stamps move: an assignee
+        # equal to the FROM-state's dispatch role (or empty) is auto; anything else is a deliberate
+        # cross-assignment and is left alone. If the destination has NO dispatch role (a gate/
+        # terminal), fall back to recording the AGENT that worked it, so archived tasks still show a
+        # worker (founder/system edges are surgery, not authorship — they don't claim it).
+        cur = (task["assignee"] or "").strip()
+        to_role = dispatch_role(m, to)
+        from_role = dispatch_role(m, task["status"])
+        if to_role and to_role != cur and (not cur or cur == from_role):
+            conn.execute("UPDATE tasks SET assignee=? WHERE id=?", (to_role, tid))
+        elif not cur and actor not in ("founder", "system"):
             conn.execute("UPDATE tasks SET assignee=? WHERE id=?", (actor, tid))
         if (m or {}).get("states", {}).get(to, {}).get("history"):
             try:  # entering a history state — remember where from, so @history can return there

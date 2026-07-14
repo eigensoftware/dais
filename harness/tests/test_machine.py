@@ -175,9 +175,10 @@ class TestPendingFor(unittest.TestCase):
 
 
 class TestAssigneeStamp(unittest.TestCase):
-    """The first AGENT to fire an edge on an unassigned task stamps itself as assignee, so
-    archived tasks record their worker. Explicit assignments are never overwritten; founder
-    edges don't claim authorship."""
+    """`assignee` tracks WHO CARRIES THE TASK NOW: a handoff into a state a different role dispatches
+    re-stamps to that role. Auto-stamps (assignee == the from-state's dispatch role, or empty) update
+    on handoff; a deliberate cross-assignment is left alone. Destinations with no dispatch role (a
+    gate/terminal) fall back to recording the agent that worked it, so archives still show a worker."""
     def setUp(self):
         self.conn = _db()
         self.m = M.load(CODING)
@@ -202,6 +203,43 @@ class TestAssigneeStamp(unittest.TestCase):
                           "VALUES('t3','proj','x','ready')")
         M.fire(self.conn, self.m, "t3", "defer", "founder")
         self.assertFalse((self._row("t3")["assignee"] or "").strip())
+
+    def test_handoff_restamps_to_the_destination_role(self):
+        # lead promotes a proposed task (auto-assigned lead) into ready -> engineer carries it now
+        self.conn.execute("INSERT INTO tasks(id,project,title,status,assignee) "
+                          "VALUES('h1','proj','x','proposed','lead')")
+        M.fire(self.conn, self.m, "h1", "promote", "lead")
+        self.assertEqual(self._row("h1")["assignee"], "engineer")
+
+    def test_restamp_follows_the_lane_on_completion(self):
+        # engineer completes -> qa_review dispatches qa -> qa carries it now
+        self.conn.execute("INSERT INTO tasks(id,project,title,status,assignee) "
+                          "VALUES('h2','proj','x','doing','engineer')")
+        M.fire(self.conn, self.m, "h2", "complete", "engineer")
+        self.assertEqual(self._row("h2")["assignee"], "qa")
+
+    def test_founder_handoff_into_a_lane_restamps(self):
+        # a founder edge that moves a task into a role's lane stamps that role (who carries it now) —
+        # authorship isn't claimed, but ownership follows the destination
+        self.conn.execute("INSERT INTO tasks(id,project,title,status,assignee) "
+                          "VALUES('h3','proj','x','design','designer')")
+        M.fire(self.conn, self.m, "h3", "skip_design", "founder")
+        self.assertEqual(self._row("h3")["assignee"], "engineer")
+
+    def test_manual_cross_assignment_survives_a_handoff(self):
+        # assignee set to a role that ISN'T the from-state's dispatch role is a deliberate override;
+        # a handoff must not clobber it
+        self.conn.execute("INSERT INTO tasks(id,project,title,status,assignee) "
+                          "VALUES('h4','proj','x','ready','lead')")   # lead != dispatch_role(ready)
+        M.fire(self.conn, self.m, "h4", "claim", "engineer")
+        self.assertEqual(self._row("h4")["assignee"], "lead")
+
+    def test_no_dispatch_destination_records_the_worker(self):
+        # qa fails a never-assigned review -> blocked has no dispatch role: fall back to the worker
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) "
+                          "VALUES('h5','proj','x','qa_review')")
+        M.fire(self.conn, self.m, "h5", "fail", "qa")
+        self.assertEqual(self._row("h5")["assignee"], "qa")
 
 
 class TestHistoryPark(unittest.TestCase):
