@@ -461,5 +461,27 @@ class TestLintEnumeratesWithoutRolesFile(unittest.TestCase):
         self.assertIn("demo", buf.getvalue())
 
 
+class TestDispatchNext(unittest.TestCase):
+    """dispatch_next — the reactive (role, task) the dispatcher would launch, so run-agent can pin
+    the triggering task to the run (DAIS_TASK_ID). Mirrors decide()'s reactive path."""
+
+    def test_returns_role_and_triggering_task(self):
+        self.assertEqual(router.dispatch_next(_ws([("a", "ready")]), "p"), ("engineer", "a"))
+
+    def test_idle_returns_empty_pair(self):
+        # 'approved' is release-parked: no dispatch role, so nothing to pin
+        self.assertEqual(router.dispatch_next(_ws([("a", "approved")]), "p"), ("", ""))
+
+    def test_the_trigger_is_the_top_priority_task(self):
+        root = _ws([("a", "ready", None, "medium"), ("b", "ready", None, "high")])
+        self.assertEqual(router.dispatch_next(root, "p"), ("engineer", "b"))
+
+    def test_role_matches_what_decide_reactively_picks(self):
+        root = _ws([("a", "qa_review")])
+        role, task = router.dispatch_next(root, "p")
+        self.assertEqual(role, router.decide(root, "p"))
+        self.assertEqual((role, task), ("qa", "a"))
+
+
 if __name__ == "__main__":
     unittest.main()

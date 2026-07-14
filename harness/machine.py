@@ -322,14 +322,17 @@ def _dep_open(conn, tid):
     return bool(pred) and pred[0] not in ("done", "cancelled")
 
 
-def next_role(conn, m, project, excluded=frozenset()):
-    """Reactive dispatch (the scheduler): the role to launch next for this project — the dispatch
-    role of the highest-priority pending task sitting in a state that auto-dispatches. '' when
-    nothing is dispatchable (the caller then considers cadence roles). Blocked/parked/gate states
-    have no dispatch role, so they're naturally skipped; a task waiting on an open dependency
+def next_dispatch(conn, m, project, excluded=frozenset()):
+    """Reactive dispatch as (role, task_id): the role to launch next for this project AND the
+    specific highest-priority pending task whose state named that role. ('', '') when nothing is
+    dispatchable (the caller then considers cadence roles). Blocked/parked/gate states have no
+    dispatch role, so they're naturally skipped; a task waiting on an open dependency
     (tasks.blocked_on) is skipped too. `excluded` roles are skipped WHILE SCANNING (the next
     dispatchable task of a different role still surfaces) — how the dispatcher's no-progress
-    throttle avoids starving a whole project on one cooled role."""
+    throttle avoids starving a whole project on one cooled role.
+
+    The task id is the dispatch trigger: the dispatcher pins it to the run (DAIS_TASK_ID) so
+    run->task attribution is exact instead of reconstructed from run_tasks after a claim."""
     rows = conn.execute("SELECT id, status, COALESCE(priority,'medium') FROM tasks "
                         "WHERE project=? AND status NOT IN ('done','cancelled')", (project,)).fetchall()
     best = None
@@ -342,8 +345,14 @@ def next_role(conn, m, project, excluded=frozenset()):
         prio = (r["COALESCE(priority,'medium')"] if hasattr(r, "keys") else r[2])
         key = (_PRIORITY_RANK.get(prio, 2), rid)
         if best is None or key < best[0]:
-            best = (key, role)
-    return best[1] if best else ""
+            best = (key, role, rid)
+    return (best[1], best[2]) if best else ("", "")
+
+
+def next_role(conn, m, project, excluded=frozenset()):
+    """The role next_dispatch would launch, without the task. '' when nothing is dispatchable.
+    See next_dispatch for the full scan semantics."""
+    return next_dispatch(conn, m, project, excluded)[0]
 
 
 def pending_for(conn, m, project, role):

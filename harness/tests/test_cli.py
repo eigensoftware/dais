@@ -1269,5 +1269,57 @@ class TestArchive(CliTest):
         self.assertIn("archived", r.stdout + r.stderr)
 
 
+class TestDispatchTaskPinning(CliTest):
+    """run-agent.sh pins the dispatching task to the run: it names the task in the standing prompt
+    and records it on runs.task_id. An explicit DAIS_TASK_ID (dais start <id>) wins; otherwise the
+    reactive trigger for THIS role is re-derived and pinned only when it's actually this role's
+    (role-guard). Exercised through the DAIS_SHOW_PROMPT seam, which sits AFTER the run INSERT."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        self.repo_base = tempfile.mkdtemp(prefix="dais-repos-")
+        self.addCleanup(shutil.rmtree, self.repo_base, ignore_errors=True)
+        os.makedirs(os.path.join(self.repo_base, "demo"))
+
+    def _ins(self, tid, status):
+        c = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        c.execute("INSERT INTO tasks(id,project,title,status) VALUES(?,?,?,?)", (tid, "demo", tid, status))
+        c.commit(); c.close()
+
+    def _show_prompt(self, agent, env=None):
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_AGENT_REPOS": self.repo_base, "DAIS_SHOW_PROMPT": "1"})
+        if env:
+            e.update(env)
+        r = subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", agent],
+                           capture_output=True, text=True, env=e, cwd=self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def _last_run_task(self):
+        return q(self.root, "SELECT task_id FROM runs ORDER BY id DESC LIMIT 1")[0]
+
+    def test_reactive_trigger_is_pinned_to_prompt_and_run(self):
+        self._ins("demo-5", "ready")                          # ready -> engineer
+        out = self._show_prompt("engineer")
+        self.assertIn("demo-5", out)                          # the prompt names the dispatched task
+        self.assertEqual(self._last_run_task(), "demo-5")     # and the run row records it
+
+    def test_explicit_task_id_overrides_rederivation(self):
+        # dais start <id>: the founder chose demo-9 even though demo-5 is the reactive top for engineer
+        self._ins("demo-5", "ready")
+        self._ins("demo-9", "ready")
+        out = self._show_prompt("engineer", env={"DAIS_TASK_ID": "demo-9"})
+        self.assertIn("demo-9", out)
+        self.assertEqual(self._last_run_task(), "demo-9")
+
+    def test_role_guard_pins_nothing_when_trigger_is_another_role(self):
+        self._ins("demo-3", "qa_review")                      # qa_review -> qa, NOT engineer
+        self._show_prompt("engineer")
+        self.assertIsNone(self._last_run_task())
+
+
 if __name__ == "__main__":
     unittest.main()

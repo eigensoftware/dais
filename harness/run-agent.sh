@@ -94,12 +94,27 @@ if [ -z "$LOCK" ]; then
 fi
 echo $$ > "$LOCK"
 
+# Pin the dispatching task to this run so run->task attribution is EXACT (not reconstructed from
+# run_tasks after a claim). An explicit DAIS_TASK_ID from the caller (`dais start <id>`) wins;
+# otherwise re-derive the reactive trigger for THIS role and pin it only when it's actually ours
+# (role-guard) — a cadence role or a launch with no reactive work for this role pins nothing.
+TASK_ID="${DAIS_TASK_ID:-}"
+if [ -z "$TASK_ID" ]; then
+  dn="$(python3 "$SELF/router.py" --dispatch-next "$DAIS_HOME" "$PROJECT" 2>/dev/null)"
+  IFS="$(printf '\t')" read -r dn_role dn_task <<<"$dn"
+  [ -n "$dn_role" ] && [ "$dn_role" = "$AGENT" ] && TASK_ID="$dn_task"
+fi
+export DAIS_TASK_ID="$TASK_ID"
+
 mkdir -p "$PDIR/logs"
 TS="$(date +%Y%m%d-%H%M%S)"; LOG="$PDIR/logs/$AGENT-$TS.log"
 # record the resolved model with the run (migration 0006); fall back to the legacy shape on a
 # dais.db that hasn't run `dais migrate` yet — run recording must never break on a schema gap.
 RUNID="$(db "INSERT INTO runs(project,agent,log_path,model) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")'); SELECT last_insert_rowid();" 2>/dev/null)"
 [ -n "$RUNID" ] || RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")'); SELECT last_insert_rowid();")"
+# Pin the task onto the run row (best-effort metadata; the run is already recorded). Separate
+# UPDATE, not part of the INSERT, so the dual-INSERT schema-gap fallback above stays untouched.
+[ -n "$TASK_ID" ] && db "UPDATE runs SET task_id='$(sqlesc "$TASK_ID")' WHERE id=$RUNID;" >/dev/null 2>&1
 # No run row = no attribution and malformed UPDATEs downstream (WHERE id=;) — fail loud instead
 # of running unrecorded (db locked past the busy timeout, disk full, broken schema).
 [ -n "$RUNID" ] || { echo "[$PROJECT/$AGENT] could not record the run in dais.db — aborting (is the db locked or full?)"; rm -f "$LOCK"; exit 1; }
@@ -163,6 +178,13 @@ Do the work your role owns for the task's current state, then fire the edge that
 
 "
 
+# The dispatcher pinned a specific task to this run (see TASK_ID above) — name it in the prompt so
+# the agent starts there instead of re-scanning the queue. Empty when nothing was pinned.
+DISPATCH_NOTE=""
+[ -n "$TASK_ID" ] && DISPATCH_NOTE="You were dispatched for task **$TASK_ID** — start there: read it first with '$DAIS_ROOT/dais task show $TASK_ID'. Work a different task only if $TASK_ID turns out not to be yours to act on right now.
+
+"
+
 STANDING="You are running headless as the **$AGENT** for the '$PROJECT' project.
 
 Stage goal: $STAGE_GOAL
@@ -184,7 +206,7 @@ Notes are how agents communicate: the next agent — or the founder deciding at 
 
 Each shell command starts in a FRESH working directory — use absolute paths everywhere; never rely on a prior 'cd' having stuck.
 
-Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, fire the edge that hands the work on per your role.${PLAYBOOK}"
+${DISPATCH_NOTE}Do ONE unit of work this run, then stop. Follow your role file exactly, and the working conventions below. Do not start more than one task. When done, fire the edge that hands the work on per your role.${PLAYBOOK}"
 
 # The persona injected into the prompt is the BODY only — frontmatter is config, not prompt.
 # NOTE: an UNTERMINATED --- block yields an empty persona here while router.frontmatter() treats

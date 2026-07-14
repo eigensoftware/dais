@@ -86,6 +86,35 @@ class TestNextRole(unittest.TestCase):
                              f"{st!r} should not auto-dispatch a role")
 
 
+class TestNextDispatch(unittest.TestCase):
+    """next_dispatch — next_role plus the specific task that triggered the role, so the run can be
+    pinned to it (DAIS_TASK_ID) instead of reconstructing attribution after the fact."""
+    def setUp(self):
+        self.conn = _db()
+        self.m = M.load(CODING)
+
+    def test_returns_role_and_triggering_task(self):
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj"), ("", ""))  # nothing pending
+        M.create_task(self.conn, self.m, "proj", "idea")                        # proposed -> lead
+        rid = self.conn.execute("SELECT id FROM tasks WHERE project='proj'").fetchone()[0]
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj"), ("lead", rid))
+
+    def test_task_is_the_top_priority_one(self):
+        # a HIGH-priority ready task outranks the medium proposal: the dispatch names THAT task
+        M.create_task(self.conn, self.m, "proj", "idea")                        # proposed, medium
+        self.conn.execute("INSERT INTO tasks(id,project,title,status,assignee,priority) VALUES"
+                          "('proj-9','proj','urgent','ready','engineer','high')")
+        self.conn.commit()
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj"), ("engineer", "proj-9"))
+
+    def test_next_role_agrees_with_next_dispatch(self):
+        # next_role is next_dispatch without the task — they must never disagree on the role
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('a','proj','x','ready')")
+        self.conn.commit()
+        self.assertEqual(M.next_role(self.conn, self.m, "proj"),
+                         M.next_dispatch(self.conn, self.m, "proj")[0])
+
+
 class TestBandsAndActions(unittest.TestCase):
     def setUp(self):
         self.m = M.load(CODING)

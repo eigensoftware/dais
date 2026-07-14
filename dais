@@ -323,6 +323,9 @@ print((M.dispatch_role(m, st) or '') + '|' + M.band_of(m, st))" 2>/dev/null)"
       exit 1
     fi
     echo "▶ starting $proj/$role for $id ($st)…"
+    # pin the task the FOUNDER chose (may not be the reactive top for this role) — run-agent
+    # prefers an explicit DAIS_TASK_ID over re-deriving the trigger.
+    export DAIS_TASK_ID="$id"
     exec "$DAIS_ROOT/harness/run-agent.sh" "$proj" "$role" ;;
 
   scaffold)

@@ -238,6 +238,22 @@ def decide(root, project, excluded=None, live=None):
     return None  # idle
 
 
+def dispatch_next(root, project):
+    """The reactive dispatch as (role, task_id): the role the machine would launch next AND the
+    specific top-priority task that triggers it. ('', '') when there's no reactive work (cadence-only
+    or idle). Mirrors decide()'s reactive path — dormant roles (trigger 'none') are never dispatched,
+    so they're excluded from the scan. run-agent.sh calls this to PIN the triggering task to the run
+    (DAIS_TASK_ID + runs.task_id), role-guarded, so run->task attribution is exact instead of
+    reconstructed from run_tasks after a claim."""
+    import machine as MC
+    roles = cast(root, project)
+    if not roles:
+        return ("", "")
+    db = MC.open_db(os.path.join(root, "dais.db"))
+    dormant = {r["name"] for r in roles if r["trigger"] == "none"}
+    return MC.next_dispatch(db, MC.load(_machine_for(root, project)), project, excluded=dormant)
+
+
 def lint_project(root, project):
     """Return (errors, warnings) for one project's config: project.yaml + machine.json +
     agents/<role>.md cast, plus (during the transition) the legacy roles file if present."""
@@ -416,6 +432,18 @@ if __name__ == "__main__":
         root = sys.argv[2]
         project = sys.argv[3] if len(sys.argv) > 3 else ""
         sys.exit(lint(root, project))
+    if len(sys.argv) > 1 and sys.argv[1] == "--dispatch-next":
+        # The reactive dispatch as "role<TAB>task_id" (run-agent.sh reads it to PIN the triggering
+        # task to the run). Empty output = no reactive work. Never crashes: any error -> empty, same
+        # idle-safety contract as decide-mode below.
+        try:
+            role, task = dispatch_next(sys.argv[2], sys.argv[3])
+            if role and task:
+                print("%s\t%s" % (role, task))
+        except Exception:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--dispatch-set":
         # The role's visible world: `id|status` per task sitting in a state this role dispatches
         # for. The dispatcher fingerprints this for stall markers (dispatch.sh): a role that keeps
