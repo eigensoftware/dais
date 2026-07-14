@@ -84,6 +84,8 @@ class Run:
     id: int = None            # runs.id — needed to join the authoritative run_tasks links
     task_ids: tuple = ()      # tasks this run touched (from run_tasks); () when unlinked/pre-migration
     claim: str = None         # the task this run picked up (verb='claim'), if any — else None
+    task_id: str = None       # the task PINNED at dispatch (runs.task_id) — the trigger, set before
+                              # any claim; the RUNNING view prefers it over a re-derived guess
 
 
 @dataclass
@@ -292,11 +294,11 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 pr_url=r["pr_url"], notes=r["notes"], updated_at=r["updated_at"],
                 blocked_on=(r["blocked_on"] if dep else None)))
         run_rows = conn.execute(
-            "SELECT id,started_at,ended_at,agent,status,summary,log_path" + mcol + " FROM runs "
+            "SELECT id,started_at,ended_at,agent,status,summary,log_path,task_id" + mcol + " FROM runs "
             "WHERE project=? ORDER BY id DESC LIMIT ?", (name, recent)).fetchall()
         proj_runs = [Run(id=r["id"], started_at=r["started_at"], agent=r["agent"],
                          status=r["status"], summary=r["summary"],
-                         log_path=r["log_path"], project=name,
+                         log_path=r["log_path"], project=name, task_id=r["task_id"],
                          model=(r["model"] if mcol else None),
                          dur_min=minutes_between(r["started_at"], r["ended_at"]))
                      for r in run_rows]
@@ -324,12 +326,12 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                     status_by_id.get(t.blocked_on) not in (None, "done", "cancelled")
                 t.blocked_status = status_by_id.get(t.blocked_on) if t.blocked else None
     grows = conn.execute(
-        "SELECT id,started_at,ended_at,project,agent,status,summary,log_path" + mcol + " FROM runs "
+        "SELECT id,started_at,ended_at,project,agent,status,summary,log_path,task_id" + mcol + " FROM runs "
         "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()
     recent_runs = [Run(id=r["id"], started_at=r["started_at"],
                        agent=f"{r['project']}/{r['agent']}",
                        status=r["status"], summary=r["summary"],
-                       log_path=r["log_path"], project=r["project"],
+                       log_path=r["log_path"], project=r["project"], task_id=r["task_id"],
                        model=(r["model"] if mcol else None),
                        dur_min=minutes_between(r["started_at"], r["ended_at"]))
                    for r in grows]

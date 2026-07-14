@@ -17,7 +17,7 @@ SCHEMA = """
 CREATE TABLE tasks(id TEXT, project TEXT, title TEXT, status TEXT, assignee TEXT,
   priority TEXT, pr_url TEXT, notes TEXT, updated_at TEXT);
 CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,
-  status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT);
+  task_id TEXT, status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT);
 """
 
 
@@ -475,14 +475,53 @@ class TestRunningVisibility(unittest.TestCase):
                          r"^\d\d:\d\d:\d\d$")
         self.assertEqual(d.to_local_hhmm(None), "--:--")
 
-    def test_running_task_id_guesses_a_dispatch_state(self):
+    def test_unknown_task_is_blank_not_a_guess(self):
+        # no claim/touch/pin yet -> show nothing, never a guessed project task (even one queued).
+        # The UI renders '' as a '—' placeholder; a maybe-wrong id is worse than 'not known yet'.
         m = MC.load(MC.default_machine_path())
-        p = d.Project(name="p", stage_goal="", machine=m,
-                      tasks_by_status={"ready": [d.Task("p-1", "x", "ready", "high")]})
-        self.assertEqual(d.running_task_id(p), "p-1")   # ready is a dispatch (QUEUED) state
-        p2 = d.Project(name="p", stage_goal="", machine=m,
-                       tasks_by_status={"approved": [d.Task("p-2", "y", "approved", "high")]})
-        self.assertEqual(d.running_task_id(p2), "")     # approved parks -> no guess
+        snap = d.Snapshot(projects=[d.Project(name="wb", stage_goal="",
+            running=[("engineer", "2026-07-01 16:24:00")], machine=m,
+            tasks_by_status={"ready": [d.Task("wb-9", "x", "ready", "high")]},   # queued, but NOT this run's
+            recent_runs=[d.Run("2026-07-01 16:24:00", "engineer", "running", log_path="/tmp/e.log")])],
+            recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
+        self.assertEqual(d.running_threads(snap, now="2026-07-01 16:30:00")[0]["task"], "")
+
+    def test_running_thread_uses_the_dispatch_pin(self):
+        # feature-1 pins runs.task_id at dispatch; the RUNNING row shows it as a fact
+        m = MC.load(MC.default_machine_path())
+        snap = d.Snapshot(projects=[d.Project(name="wb", stage_goal="",
+            running=[("qa", "2026-07-01 16:24:00")], machine=m,
+            tasks_by_status={"ready": [d.Task("wb-9", "x", "ready", "high")]},   # queued decoy, not shown
+            recent_runs=[d.Run("2026-07-01 16:24:00", "qa", "running",
+                               log_path="/tmp/q.log", task_id="wb-3")])],
+            recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
+        self.assertEqual(d.running_threads(snap, now="2026-07-01 16:30:00")[0]["task"], "wb-3")
+
+    def test_running_thread_prefers_the_claim_over_the_pin(self):
+        # the agent's recorded claim (what it ACTUALLY picked up) beats the dispatch-time pin
+        m = MC.load(MC.default_machine_path())
+        r = d.Run("2026-07-01 16:24:00", "engineer", "running", log_path="/tmp/e.log", task_id="wb-1")
+        r.claim = "wb-2"
+        snap = d.Snapshot(projects=[d.Project(name="wb", stage_goal="",
+            running=[("engineer", "2026-07-01 16:24:00")], machine=m,
+            tasks_by_status={}, recent_runs=[r])],
+            recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
+        self.assertEqual(d.running_threads(snap, now="2026-07-01 16:30:00")[0]["task"], "wb-2")
+
+    def test_each_concurrent_run_shows_its_own_pinned_task(self):
+        # issue-#2 scenario, post-pin: three runs, each pinned at dispatch to its own task ->
+        # no two rows share an id, and none is a project-wide guess
+        m = MC.load(MC.default_machine_path())
+        t0 = "2026-07-01 16:24:00"
+        snap = d.Snapshot(projects=[d.Project(name="doc", stage_goal="",
+            running=[("qa", t0), ("lead", t0), ("engineer", t0)], machine=m,
+            tasks_by_status={},
+            recent_runs=[d.Run(t0, "qa", "running", task_id="doc-74"),
+                         d.Run(t0, "lead", "running", task_id="doc-80"),
+                         d.Run(t0, "engineer", "running", task_id="doc-90")])],
+            recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
+        by = {t["agent"]: t["task"] for t in d.running_threads(snap, now="2026-07-01 16:30:00")}
+        self.assertEqual(by, {"qa": "doc-74", "lead": "doc-80", "engineer": "doc-90"})
 
     def test_running_threads_collects_all_agents(self):
         snap = d.Snapshot(
@@ -492,7 +531,7 @@ class TestRunningVisibility(unittest.TestCase):
                           machine=MC.load(MC.default_machine_path()),
                           tasks_by_status={"doing": [d.Task("lyr-1", "t", "doing", "high")]},
                           recent_runs=[d.Run("2026-06-26 20:40:00", "engineer", "running",
-                                             log_path="/tmp/x.log")]),
+                                             log_path="/tmp/x.log", task_id="lyr-1")]),
                 d.Project(name="wb", stage_goal="",
                           running=[("qa", "2026-06-26 20:44:00")], tasks_by_status={}),
             ],

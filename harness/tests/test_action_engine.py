@@ -23,7 +23,7 @@ SCHEMA = """
 CREATE TABLE tasks(id TEXT, project TEXT, title TEXT, status TEXT, assignee TEXT,
   priority TEXT, pr_url TEXT, notes TEXT, updated_at TEXT, blocked_on TEXT);
 CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,
-  status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT);
+  task_id TEXT, status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT);
 CREATE TABLE task_links(id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id TEXT,
   child_id TEXT, rel TEXT, at TEXT);
 """

@@ -1894,33 +1894,6 @@ class TestRunningInspectorNotes(unittest.TestCase):
         self.assertIn("live log", text)
 
 
-class TestRunningTaskGuess(unittest.TestCase):
-    """running_task_id: the fallback guess for a running agent is the first task in a state the
-    machine auto-dispatches (band QUEUED); parked/gate states are not guessed."""
-
-    def _proj(self, by_status):
-        import machine as MC
-        return d.Project(name="p", stage_goal="", running=[("engineer", None)],
-                         machine=MC.load(MC.default_machine_path()),
-                         tasks_by_status={st: [d.Task(id=i, title=i, status=st, priority="medium")
-                                               for i in ids] for st, ids in by_status.items()})
-
-    def test_dispatch_state_wins_over_parked(self):
-        p = self._proj({"doing": ["a"], "approved": ["s"]})   # doing dispatches; approved parks
-        self.assertEqual(d.running_task_id(p), "a")
-
-    def test_ready_is_guessed(self):
-        p = self._proj({"ready": ["r"], "approved": ["s"]})
-        self.assertEqual(d.running_task_id(p), "r")
-
-    def test_proposed_is_guessed_when_only_work(self):
-        p = self._proj({"proposed": ["s"]})                   # proposed dispatches the lead
-        self.assertEqual(d.running_task_id(p), "s")
-
-    def test_parked_only_yields_no_guess(self):
-        p = self._proj({"approved": ["s"]})                   # only a parked phase -> no guess
-        self.assertEqual(d.running_task_id(p), "")
-
 
 
 class TestInspectorLogWrapScroll(unittest.TestCase):

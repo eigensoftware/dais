@@ -371,20 +371,21 @@ def short_summary(summary, limit=1):
 # --------------------------------------------------------------------------- #
 # running-visibility + list-clarity helpers (pure)
 # --------------------------------------------------------------------------- #
-def running_task_id(project):
-    """Fallback guess at the task a running agent is on (the run's recorded claim in run_tasks is the
-    real signal; this only covers the window before it records one): the first task in a state the
-    machine auto-dispatches (band QUEUED), else ''."""
-    for st, tasks in project.tasks_by_status.items():
-        if tasks and MC.band_of(project.machine, st) == "QUEUED":
-            return tasks[0].id
-    return ""
+def _known_task(rr):
+    """The task a running agent is on, strongest evidence first: its recorded claim (what it
+    actually picked up), else the first task it touched, else the task PINNED at dispatch
+    (runs.task_id). '' when none is known yet — a just-launched run that hasn't claimed, or a
+    task-less cadence sweep. We do NOT guess: the UI shows '' as a '—' placeholder, because a
+    maybe-wrong id reads as fact and is worse than "not known yet"."""
+    if not rr:
+        return ""
+    return rr.claim or (rr.task_ids[0] if rr.task_ids else "") or (rr.task_id or "")
 
 
 def running_threads(snap, now=None, root=HOME):
     """Every concurrent agent across all projects -> dicts for the RUNNING band. The task each agent
-    is on is guessed agent-awarely (from the role's handled statuses) so it isn't mislabeled; a
-    non-role runner like 'deploy' is task-less."""
+    is on is the one it recorded (claim/touch) or was pinned at dispatch (_known_task); '' when not
+    known yet — shown as a placeholder, never a guessed id."""
     now = now or utc_now()
     out = []
     for p in snap.projects:
@@ -392,16 +393,11 @@ def running_threads(snap, now=None, root=HOME):
         # that already finished (e.g. qa completed after the engineer started, still running)
         live_log = next((r.log_path for r in p.recent_runs if r.status == "running"), None)
         for agent, since in p.running:
-            # Authoritative first: the task THIS running agent recorded via run_tasks — its claim, else
-            # the first task it touched. Fall back to the machine-derived guess only before it records.
             rr = next((x for x in p.recent_runs
                        if x.status == "running" and x.agent == agent), None)
-            task = (rr.claim or (rr.task_ids[0] if rr.task_ids else "")) if rr else ""
-            if not task:
-                task = running_task_id(p)
             out.append(dict(project=p.name, agent=agent, since=since,
                             secs=seconds_between(since, now),
-                            task=task,
+                            task=_known_task(rr),   # claim/touch/pin, else '' — never a guess
                             model=(rr.model if rr else None),   # what THIS run launched on (may be the backup)
                             log_path=(rr.log_path if rr and rr.log_path else live_log)))
     return out
@@ -717,7 +713,9 @@ class App:
             if p.running:
                 for a, since in p.running:
                     el = fmt_elapsed(seconds_between(since, now))
-                    tid = running_task_id(p)
+                    rr = next((x for x in p.recent_runs
+                               if x.status == "running" and x.agent == a), None)
+                    tid = _known_task(rr)
                     suffix = f"  · {tid}  (↑/k to the ▶ running row up top for the live log)" if tid else ""
                     out.append(f"▶ {a} running {el}{suffix}")
             else:
