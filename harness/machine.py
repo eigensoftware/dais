@@ -1051,8 +1051,42 @@ def _main(argv):
             else:
                 i += 1
         conn = open_db(db)
+        m = load(mp)
+        # Actor-performed script effects, automated for the CLI. The engine deliberately never
+        # executes effect.script (see _apply_effect): the ACTOR does the action, then fires the
+        # edge. When the edge's owner is a human role and it carries a script effect, do exactly
+        # that in that order — pre-validate actor + guards (never take an outward action a gate
+        # would refuse), run projects/<p>/scripts/<name>, and fire only on exit 0, so a failed
+        # action leaves the board unchanged. A missing script keeps the old declarative meaning
+        # (the human did the action by hand). Guards are checked again inside fire(); the CAS in
+        # fire() still owns the race where the task moves between script and transition.
+        _t = task_row(conn, tid)
+        _e = _find_edge(m, _t["status"], verb) if _t else None
+        _sc = (_e.get("effect", {}) or {}).get("script") if _e else None
+        if _sc and (m.get("roles", {}).get(_e.get("by"), {}) or {}).get("human"):
+            try:
+                if actor != _e.get("by"):
+                    raise GuardFailure(f"actor {actor!r} may not fire this edge (owner is {_e.get('by')!r})")
+                _check_guards(conn, m, _e, _t, ctx)
+            except (GuardFailure, ValueError) as ex:
+                print(f"  ✗ {ex}", file=sys.stderr); return 1
+            _name = _sc.get("name") if isinstance(_sc, dict) else str(_sc)
+            _spath = os.path.join(os.path.dirname(os.path.abspath(mp)), "scripts", _name)
+            if os.path.isfile(_spath) and os.access(_spath, os.X_OK):
+                import subprocess
+                try:  # task_row's narrow SELECT omits pr_url — fetch it directly
+                    _row = conn.execute("SELECT pr_url FROM tasks WHERE id=?", (tid,)).fetchone()
+                    _pr = (_row[0] or "") if _row else ""
+                except sqlite3.OperationalError:
+                    _pr = ""
+                _env = dict(os.environ, DAIS_TASK=tid, DAIS_PROJECT=_t["project"], DAIS_PR=_pr)
+                print(f"  ▶ {verb}: running scripts/{_name} …", flush=True)
+                if subprocess.call([_spath], env=_env) != 0:
+                    print(f"  ✗ scripts/{_name} failed — {verb} NOT fired; task unchanged",
+                          file=sys.stderr)
+                    return 1
         try:
-            r = fire(conn, load(mp), tid, verb, actor, ctx)
+            r = fire(conn, m, tid, verb, actor, ctx)
         except (GuardFailure, ValueError) as ex:
             print(f"  ✗ {ex}", file=sys.stderr); return 1
         extra = ""
