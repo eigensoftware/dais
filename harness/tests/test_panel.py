@@ -833,7 +833,7 @@ class TestRolePalette(unittest.TestCase):
         self.assertEqual(self._row_attr_rail(scr, names[0]), 0)
         self.assertEqual(self._row_attr_rail(scr, names[1]), 0)
         # mark the first project running -> only it turns green (cp 1) — the live role
-        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]
+        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00", 1)]
         scr2 = FakeScr(40, 200)
         pn.render_rail(scr2, pn.Rect(1, 0, 20, 20), papp, focused=False)
         self.assertEqual(self._row_attr_rail(scr2, names[0]) & 1000, 1000)
@@ -1365,7 +1365,7 @@ class TestRailSelectionUniformBar(unittest.TestCase):
                                      ("a-2", "alpha", "work", "ready", "med", None)])
         papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
         papp.snap = d.load_snapshot(conn, root=root)
-        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]  # live -> green hue
+        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00", 1)]  # live -> green hue
         papp._cp = lambda n: n * 1000
         papp._rail_i = 0                                    # cursor on 'alpha' (ALL is last now)
         return papp
@@ -1582,7 +1582,7 @@ class TestMissionControlDots(unittest.TestCase):
 
     def test_rail_running_project_shows_the_run_dot(self):
         papp = self._papp([("a-1", "alpha", "x", "ready", "med", None)])
-        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]
+        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00", 1)]
         scr = FakeScr(40, 200)
         pn.render_rail(scr, pn.Rect(1, 0, 20, 30), papp, focused=False)
         row = next(c for c in scr.calls if "alpha" in c[2])
@@ -2029,7 +2029,7 @@ class TestPanelHonesty(unittest.TestCase):
 
     def test_rail_does_not_double_count_a_running_task(self):
         papp = self._papp([("a-1", "alpha", "x", "ready", "medium", None)])
-        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00")]
+        papp.snap.projects[0].running = [("engineer", "2026-06-29 00:00:00", 1)]
         threads = [{"project": "alpha", "agent": "engineer", "task": "a-1",
                     "since": "2026-06-29 00:00:00", "log_path": None}]
         with mock.patch.object(d, "running_threads", return_value=threads):
@@ -2051,6 +2051,25 @@ class TestPanelHonesty(unittest.TestCase):
             i, _ = papp._selected(rows)
             papp.sel_id = papp._move_sel(rows, i, +1)
             self.assertEqual(papp.sel_id, running[1]["id"])
+
+    def test_stacked_same_role_runs_are_distinct_selectable_rows(self):
+        # regression: role concurrency:2 stacks two runs of the SAME agent name ('writer') —
+        # the two running rows must still get DISTINCT ids (by run_id), or selection snaps back
+        # to the first row and can never scroll to the second (the "duplicate row" TUI bug).
+        papp = self._papp([("v-1", "voic", "t", "doing", "medium", None),
+                           ("v-2", "voic", "u", "doing", "medium", None)])
+        threads = [{"project": "voic", "agent": "writer", "task": "v-1",
+                    "since": "2026-07-18 10:00:00", "log_path": "/tmp/w1.log", "run_id": 101},
+                   {"project": "voic", "agent": "writer", "task": "v-2",
+                    "since": "2026-07-18 10:05:00", "log_path": "/tmp/w2.log", "run_id": 102}]
+        with mock.patch.object(d, "running_threads", return_value=threads):
+            rows = papp.left_rows()
+            running = [r for r in rows if r["kind"] == "running"]
+            self.assertEqual(len({r["id"] for r in running}), 2)   # unique ids despite same agent
+            papp.sel_id = running[0]["id"]
+            i, _ = papp._selected(rows)
+            papp.sel_id = papp._move_sel(rows, i, +1)
+            self.assertEqual(papp.sel_id, running[1]["id"])         # scroll reaches the SECOND row
 
     def test_inspector_scroll_clamps_back(self):
         papp = self._papp([("z-1", "zeta", "t", "ready", "medium", None)])

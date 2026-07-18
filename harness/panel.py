@@ -525,7 +525,7 @@ def _workspace_lines(app):
            f"dais {d.tool_version()} · watch {loop}", ""]
     for p in snap.projects:
         run, you, que, wait, done = _rail_counts(app, p.name)
-        act = "▶ " + "+".join(a for a, _ in p.running) if p.running else "idle"
+        act = "▶ " + "+".join(a for a, _, _ in p.running) if p.running else "idle"
         roles = [r for r in d.project_roles(app.root, p.name) if r != "founder"]
         models = []
         for r in roles:                                  # distinct, in cast order, de-prefixed
@@ -1324,10 +1324,19 @@ def _machine_work_rows(snap, projects, project, expanded, root):
                if project is None or t["project"] == project]
     running_ids = {(t["project"], t["task"]) for t in threads if t["task"]}
     add_band("RUNNING", len(threads))
+    # id carries the AGENT too — two concurrent agents in one project must be two distinct
+    # selectable rows, or selection can never move past the first. That alone isn't enough
+    # for SAME-role concurrency (role concurrency:2 stacks two slots under one agent name,
+    # e.g. two 'writer' rows) — those need a per-slot tiebreaker too: prefer the run's own
+    # id (unique per run), else its `since` timestamp, else a bare slot counter as a last resort.
+    slot_seen = {}
     for t in threads:
-        # id carries the AGENT too — two concurrent agents in one project must be two
-        # distinct selectable rows, or selection can never move past the first.
-        rows.append({"kind": "running", "id": f"run::{t['project']}/{t['agent']}",
+        key = (t["project"], t["agent"])
+        slot_seen[key] = slot_seen.get(key, -1) + 1
+        ident = t.get("run_id")
+        if ident is None:
+            ident = t["since"] or f"slot{slot_seen[key]}"
+        rows.append({"kind": "running", "id": f"run::{t['project']}/{t['agent']}::{ident}",
                      "project": t["project"], "task_id": t["task"], "task": None,
                      "status": "doing", "sel": True, "agent": t["agent"],
                      "since": t["since"], "log_path": t["log_path"],

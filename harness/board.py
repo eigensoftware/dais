@@ -303,13 +303,26 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                          dur_min=minutes_between(r["started_at"], r["ended_at"]))
                      for r in run_rows]
         attach_run_tasks(conn, proj_runs)
+        # running: one (agent, since, run_id) triple PER LIVE LOCK SLOT — same-role concurrency
+        # (.lock-writer + .lock-writer.2) yields the same agent name twice, so slots pair with
+        # their OWN run by fetching that agent's running runs ONCE (oldest first) and assigning
+        # run i to slot i, instead of re-querying "the newest running run" per slot (which
+        # collapsed every slot of a stacked role onto the same run/timestamp/task).
         running = []
+        agent_runs = {}    # agent -> [ {id, started_at}, ... ] oldest first, consumed by index
+        agent_slot = {}    # agent -> next unconsumed index into agent_runs[agent]
         for agent in running_agents(os.path.join(root, "projects", name)):
-            since = conn.execute(
-                "SELECT started_at FROM runs WHERE project=? AND agent=? "
-                "AND status='running' ORDER BY id DESC LIMIT 1",
-                (name, agent)).fetchone()
-            running.append((agent, since["started_at"] if since else None))
+            if agent not in agent_runs:
+                agent_runs[agent] = conn.execute(
+                    "SELECT id,started_at FROM runs WHERE project=? AND agent=? "
+                    "AND status='running' ORDER BY id",
+                    (name, agent)).fetchall()
+                agent_slot[agent] = 0
+            i = agent_slot[agent]
+            row = agent_runs[agent][i] if i < len(agent_runs[agent]) else None
+            agent_slot[agent] = i + 1
+            running.append((agent, row["started_at"] if row else None,
+                            row["id"] if row else None))
         projects.append(Project(name=name, stage_goal=stage_goal(root, name),
                                 running=running, tasks_by_status=by_status,
                                 recent_runs=proj_runs,

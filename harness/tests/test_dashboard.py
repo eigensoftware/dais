@@ -243,6 +243,43 @@ class TestDataLayer(unittest.TestCase):
             self.assertEqual(
                 d.running_agents(dirp, is_alive=lambda p: p in alive), ["qa"])
 
+    def test_stacked_same_role_slots_pair_oldest_run_first(self):
+        # regression: role concurrency:2 produces TWO lock slots for the SAME agent
+        # ('writer' + 'writer.2'). load_snapshot must pair each slot with its OWN running
+        # run (oldest run -> first slot), not re-query "the newest running run" per slot
+        # (which collapsed both slots onto the same run/timestamp/task).
+        with tempfile.TemporaryDirectory() as root:
+            pdir = os.path.join(root, "projects", "voic")
+            os.makedirs(pdir)
+            mypid = os.getpid()   # a PID this process can assert is alive, without mocking
+            open(os.path.join(pdir, ".lock-writer"), "w").write(f"{mypid}\n")
+            open(os.path.join(pdir, ".lock-writer.2"), "w").write(f"{mypid}\n")
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.executescript(SCHEMA)
+            conn.executemany(
+                "INSERT INTO tasks(id,project,title,status,priority,assignee,pr_url,notes) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                [("voic-6", "voic", "t1", "doing", "high", "writer", None, None),
+                 ("voic-7", "voic", "t2", "doing", "high", "writer", None, None)])
+            conn.executemany(
+                "INSERT INTO runs(project,agent,task_id,status,summary,log_path,started_at,ended_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                [("voic", "writer", "voic-6", "running", None, "/tmp/w1.log",
+                  "2026-07-18 10:00:00", None),
+                 ("voic", "writer", "voic-7", "running", None, "/tmp/w2.log",
+                  "2026-07-18 10:05:00", None)])
+            conn.commit()
+            snap = d.load_snapshot(conn, root=root, now="2026-07-18 10:10:00")
+            proj = {p.name: p for p in snap.projects}["voic"]
+            self.assertEqual(len(proj.running), 2)
+            slot0, slot1 = proj.running
+            self.assertEqual(slot0[1], "2026-07-18 10:00:00")   # oldest run -> first slot
+            self.assertEqual(slot1[1], "2026-07-18 10:05:00")
+            self.assertIsNotNone(slot0[2])
+            self.assertIsNotNone(slot1[2])
+            self.assertNotEqual(slot0[2], slot1[2])              # distinct run ids
+
     def test_snapshot_groups_tasks_by_status(self):
         conn = _seed()
         snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
@@ -480,9 +517,10 @@ class TestRunningVisibility(unittest.TestCase):
         # The UI renders '' as a '—' placeholder; a maybe-wrong id is worse than 'not known yet'.
         m = MC.load(MC.default_machine_path())
         snap = d.Snapshot(projects=[d.Project(name="wb", stage_goal="",
-            running=[("engineer", "2026-07-01 16:24:00")], machine=m,
+            running=[("engineer", "2026-07-01 16:24:00", 1)], machine=m,
             tasks_by_status={"ready": [d.Task("wb-9", "x", "ready", "high")]},   # queued, but NOT this run's
-            recent_runs=[d.Run("2026-07-01 16:24:00", "engineer", "running", log_path="/tmp/e.log")])],
+            recent_runs=[d.Run("2026-07-01 16:24:00", "engineer", "running",
+                               log_path="/tmp/e.log", id=1)])],
             recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
         self.assertEqual(d.running_threads(snap, now="2026-07-01 16:30:00")[0]["task"], "")
 
@@ -490,20 +528,21 @@ class TestRunningVisibility(unittest.TestCase):
         # feature-1 pins runs.task_id at dispatch; the RUNNING row shows it as a fact
         m = MC.load(MC.default_machine_path())
         snap = d.Snapshot(projects=[d.Project(name="wb", stage_goal="",
-            running=[("qa", "2026-07-01 16:24:00")], machine=m,
+            running=[("qa", "2026-07-01 16:24:00", 1)], machine=m,
             tasks_by_status={"ready": [d.Task("wb-9", "x", "ready", "high")]},   # queued decoy, not shown
             recent_runs=[d.Run("2026-07-01 16:24:00", "qa", "running",
-                               log_path="/tmp/q.log", task_id="wb-3")])],
+                               log_path="/tmp/q.log", task_id="wb-3", id=1)])],
             recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
         self.assertEqual(d.running_threads(snap, now="2026-07-01 16:30:00")[0]["task"], "wb-3")
 
     def test_running_thread_prefers_the_claim_over_the_pin(self):
         # the agent's recorded claim (what it ACTUALLY picked up) beats the dispatch-time pin
         m = MC.load(MC.default_machine_path())
-        r = d.Run("2026-07-01 16:24:00", "engineer", "running", log_path="/tmp/e.log", task_id="wb-1")
+        r = d.Run("2026-07-01 16:24:00", "engineer", "running", log_path="/tmp/e.log",
+                  task_id="wb-1", id=1)
         r.claim = "wb-2"
         snap = d.Snapshot(projects=[d.Project(name="wb", stage_goal="",
-            running=[("engineer", "2026-07-01 16:24:00")], machine=m,
+            running=[("engineer", "2026-07-01 16:24:00", 1)], machine=m,
             tasks_by_status={}, recent_runs=[r])],
             recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
         self.assertEqual(d.running_threads(snap, now="2026-07-01 16:30:00")[0]["task"], "wb-2")
@@ -514,26 +553,48 @@ class TestRunningVisibility(unittest.TestCase):
         m = MC.load(MC.default_machine_path())
         t0 = "2026-07-01 16:24:00"
         snap = d.Snapshot(projects=[d.Project(name="doc", stage_goal="",
-            running=[("qa", t0), ("lead", t0), ("engineer", t0)], machine=m,
+            running=[("qa", t0, 1), ("lead", t0, 2), ("engineer", t0, 3)], machine=m,
             tasks_by_status={},
-            recent_runs=[d.Run(t0, "qa", "running", task_id="doc-74"),
-                         d.Run(t0, "lead", "running", task_id="doc-80"),
-                         d.Run(t0, "engineer", "running", task_id="doc-90")])],
+            recent_runs=[d.Run(t0, "qa", "running", task_id="doc-74", id=1),
+                         d.Run(t0, "lead", "running", task_id="doc-80", id=2),
+                         d.Run(t0, "engineer", "running", task_id="doc-90", id=3)])],
             recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
         by = {t["agent"]: t["task"] for t in d.running_threads(snap, now="2026-07-01 16:30:00")}
         self.assertEqual(by, {"qa": "doc-74", "lead": "doc-80", "engineer": "doc-90"})
+
+    def test_stacked_same_role_runs_pair_by_run_id_not_agent_name(self):
+        # regression: role concurrency:2 stacks two runs of the SAME agent ('writer'). Each
+        # running-tuple slot carries its OWN run_id, and running_threads must resolve each
+        # slot to ITS run — not both collapsing onto whichever run agent-name lookup finds first.
+        snap = d.Snapshot(projects=[d.Project(name="voic", stage_goal="",
+            running=[("writer", "2026-07-18 10:00:00", 101),
+                     ("writer", "2026-07-18 10:05:00", 102)],
+            machine=MC.load(MC.default_machine_path()),
+            tasks_by_status={},
+            recent_runs=[d.Run("2026-07-18 10:00:00", "writer", "running",
+                               log_path="/tmp/w1.log", task_id="voic-6", id=101),
+                         d.Run("2026-07-18 10:05:00", "writer", "running",
+                               log_path="/tmp/w2.log", task_id="voic-7", id=102)])],
+            recent_runs=[], cap_state=False, ts="2026-07-18 10:10:00")
+        threads = d.running_threads(snap, now="2026-07-18 10:10:00")
+        self.assertEqual(len(threads), 2)
+        by_run = {t["run_id"]: t for t in threads}
+        self.assertEqual(by_run[101]["task"], "voic-6")
+        self.assertEqual(by_run[101]["log_path"], "/tmp/w1.log")
+        self.assertEqual(by_run[102]["task"], "voic-7")
+        self.assertEqual(by_run[102]["log_path"], "/tmp/w2.log")
 
     def test_running_threads_collects_all_agents(self):
         snap = d.Snapshot(
             projects=[
                 d.Project(name="beacon", stage_goal="",
-                          running=[("engineer", "2026-06-26 20:40:00")],
+                          running=[("engineer", "2026-06-26 20:40:00", 1)],
                           machine=MC.load(MC.default_machine_path()),
                           tasks_by_status={"doing": [d.Task("lyr-1", "t", "doing", "high")]},
                           recent_runs=[d.Run("2026-06-26 20:40:00", "engineer", "running",
-                                             log_path="/tmp/x.log", task_id="lyr-1")]),
+                                             log_path="/tmp/x.log", task_id="lyr-1", id=1)]),
                 d.Project(name="wb", stage_goal="",
-                          running=[("qa", "2026-06-26 20:44:00")], tasks_by_status={}),
+                          running=[("qa", "2026-06-26 20:44:00", None)], tasks_by_status={}),
             ],
             recent_runs=[], cap_state=False, ts="2026-06-26 20:45:00")
         threads = d.running_threads(snap, now="2026-06-26 20:45:00")
@@ -548,11 +609,12 @@ class TestRunningVisibility(unittest.TestCase):
         # the backup when the usage-cap fallback swapped it in, not the configured primary
         snap = d.Snapshot(
             projects=[d.Project(name="wb", stage_goal="",
-                                running=[("engineer", "2026-07-01 16:24:00")],
+                                running=[("engineer", "2026-07-01 16:24:00", 1)],
                                 machine=MC.load(MC.default_machine_path()),
                                 tasks_by_status={},
                                 recent_runs=[d.Run("2026-07-01 16:24:00", "engineer", "running",
-                                                   log_path="/tmp/e.log", model="claude-opus-4-8")])],
+                                                   log_path="/tmp/e.log", model="claude-opus-4-8",
+                                                   id=1)])],
             recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
         threads = d.running_threads(snap, now="2026-07-01 16:30:00")
         self.assertEqual(threads[0]["model"], "claude-opus-4-8")
@@ -586,14 +648,14 @@ class TestRunningVisibility(unittest.TestCase):
         # (found by agent), not show '(waiting for output…)' because recent_runs[0] finished.
         snap = d.Snapshot(
             projects=[d.Project(name="wb", stage_goal="",
-                                running=[("engineer", "2026-07-01 16:24:00")],
+                                running=[("engineer", "2026-07-01 16:24:00", 2)],
                                 machine=MC.load(MC.default_machine_path()),
                                 tasks_by_status={},
                                 recent_runs=[
                                     d.Run("2026-07-01 16:25:00", "qa", "succeeded",
-                                          log_path="/tmp/qa.log"),
+                                          log_path="/tmp/qa.log", id=1),
                                     d.Run("2026-07-01 16:24:00", "engineer", "running",
-                                          log_path="/tmp/eng.log"),
+                                          log_path="/tmp/eng.log", id=2),
                                 ])],
             recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
         threads = d.running_threads(snap, now="2026-07-01 16:30:00")
@@ -603,15 +665,15 @@ class TestRunningVisibility(unittest.TestCase):
     def test_concurrent_threads_each_get_their_own_log(self):
         snap = d.Snapshot(
             projects=[d.Project(name="wb", stage_goal="",
-                                running=[("engineer", "2026-07-01 16:24:00"),
-                                         ("qa", "2026-07-01 16:25:00")],
+                                running=[("engineer", "2026-07-01 16:24:00", 1),
+                                         ("qa", "2026-07-01 16:25:00", 2)],
                                 machine=MC.load(MC.default_machine_path()),
                                 tasks_by_status={},
                                 recent_runs=[
                                     d.Run("2026-07-01 16:25:00", "qa", "running",
-                                          log_path="/tmp/qa.log"),
+                                          log_path="/tmp/qa.log", id=2),
                                     d.Run("2026-07-01 16:24:00", "engineer", "running",
-                                          log_path="/tmp/eng.log"),
+                                          log_path="/tmp/eng.log", id=1),
                                 ])],
             recent_runs=[], cap_state=False, ts="2026-07-01 16:30:00")
         logs = {t["agent"]: t["log_path"]

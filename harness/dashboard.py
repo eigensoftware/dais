@@ -131,7 +131,7 @@ def render_plain(snap, color=None):
             P(f"  {c['CD']}{truncate_words(p.stage_goal, 84)}{c['C0']}")
         P()
         if p.running:
-            for agent, since in p.running:
+            for agent, since, _run_id in p.running:
                 el = fmt_elapsed(seconds_between(since, snap.ts))
                 P(f"  {c['CG']}{c['CB']}▶ RUNNING NOW{c['C0']}  {agent}  "
                   f"{c['CD']}({el} · since {to_local_hhmm(since)}){c['C0']}")
@@ -392,10 +392,14 @@ def running_threads(snap, now=None, root=HOME):
         # fallback log: the newest RUNNING run's — NOT recent_runs[0], which may be a newer run
         # that already finished (e.g. qa completed after the engineer started, still running)
         live_log = next((r.log_path for r in p.recent_runs if r.status == "running"), None)
-        for agent, since in p.running:
-            rr = next((x for x in p.recent_runs
-                       if x.status == "running" and x.agent == agent), None)
-            out.append(dict(project=p.name, agent=agent, since=since,
+        for agent, since, run_id in p.running:
+            # resolve by run IDENTITY, not agent name — same-role concurrency (role
+            # concurrency:2) stacks two 'running' slots for the SAME agent name, and
+            # name-only lookup collapsed both slots onto whichever run it found first.
+            rr = (next((x for x in p.recent_runs
+                       if x.status == "running" and x.id == run_id), None)
+                  if run_id is not None else None)
+            out.append(dict(project=p.name, agent=agent, since=since, run_id=run_id,
                             secs=seconds_between(since, now),
                             task=_known_task(rr),   # claim/touch/pin, else '' — never a guess
                             model=(rr.model if rr else None),   # what THIS run launched on (may be the backup)
@@ -711,10 +715,11 @@ class App:
             p = by_name[row["project"]]
             out = [p.name, truncate_words(p.stage_goal, 60), ""]
             if p.running:
-                for a, since in p.running:
+                for a, since, run_id in p.running:
                     el = fmt_elapsed(seconds_between(since, now))
-                    rr = next((x for x in p.recent_runs
-                               if x.status == "running" and x.agent == a), None)
+                    rr = (next((x for x in p.recent_runs
+                               if x.status == "running" and x.id == run_id), None)
+                          if run_id is not None else None)
                     tid = _known_task(rr)
                     suffix = f"  · {tid}  (↑/k to the ▶ running row up top for the live log)" if tid else ""
                     out.append(f"▶ {a} running {el}{suffix}")
