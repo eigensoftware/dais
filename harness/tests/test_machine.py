@@ -174,6 +174,42 @@ class TestPendingFor(unittest.TestCase):
         self.assertEqual(M.pending_for(self.conn, self.m, "proj", "engineer"), 1)  # 'doing' only
 
 
+class TestRoleAwaitsVerify(unittest.TestCase):
+    """role_awaits_verify — the dispatcher's signal (dispatch.sh, fa459de stall-escalation) that a
+    role dispatching into some state may legitimately need several polling runs to resolve it
+    (a verify:-guarded exit edge), so it must never be PERMANENTLY stall-escalated there."""
+
+    def test_false_when_no_edge_carries_a_verify_guard(self):
+        m = M.load(CODING)   # the stock template's shipped edge has no verify guard by default
+        self.assertFalse(M.role_awaits_verify(m, "engineer"))
+
+    def test_true_when_the_role_s_own_exit_edge_is_verify_guarded(self):
+        m = M.load(CODING)
+        for e in m["edges"]:
+            if e["from"] == "releasing" and e["verb"] == "shipped":
+                e["guards"] = e.get("guards", []) + ["verify:migrations_live"]
+        self.assertTrue(M.role_awaits_verify(m, "engineer"))
+
+    def test_a_different_role_s_verify_guard_does_not_leak(self):
+        # the guard belongs to a DIFFERENT actor than the one dispatching that state — must not
+        # exempt an unrelated role just because SOME edge somewhere has a verify guard.
+        m = {"states": {"a": {}, "b": {}},
+             "edges": [{"from": "a", "to": "b", "by": "engineer", "verb": "go"},
+                      {"from": "b", "to": "a", "by": "qa", "verb": "back",
+                       "guards": ["verify:checked"]}]}
+        self.assertFalse(M.role_awaits_verify(m, "engineer"))
+
+    def test_verify_guard_on_a_state_the_role_does_not_dispatch_does_not_count(self):
+        # 'b' has two agents (engineer, qa) so dispatch_role(b) is None (E3-ambiguous, no pool) —
+        # a verify guard sitting there must not exempt 'engineer' when it never dispatches 'b'.
+        m = {"states": {"a": {}, "b": {}},
+             "edges": [{"from": "a", "to": "b", "by": "engineer", "verb": "go"},
+                      {"from": "b", "to": "a", "by": "engineer", "verb": "back1"},
+                      {"from": "b", "to": "a", "by": "qa", "verb": "back2",
+                       "guards": ["verify:checked"]}]}
+        self.assertFalse(M.role_awaits_verify(m, "engineer"))
+
+
 class TestAssigneeStamp(unittest.TestCase):
     """`assignee` tracks WHO CARRIES THE TASK NOW: a handoff into a state a different role dispatches
     re-stamps to that role. Auto-stamps (assignee == the from-state's dispatch role, or empty) update

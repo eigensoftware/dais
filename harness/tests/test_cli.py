@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sqlite3
@@ -340,6 +341,62 @@ class TestNoopThrottle(CliTest):
         self._seed_run(5, touched="d-1", verb="touch")
         r = dais(self.root, "tick", "demo", "--dry-run")
         self.assertNotIn("WOULD run lead", r.stdout)
+
+
+class TestStallEscalationVerifyGate(CliTest):
+    """A role's 2nd consecutive touch-only run PERMANENTLY parks it (`.stalled-<role>`, fa459de)
+    — correct for a truly stuck task, but a task legitimately WAITING in a multi-run state (e.g.
+    'releasing' on an async EAS/CI build) can ONLY report progress via a note between polls, and
+    its dispatch-set fingerprint (id|status) never changes while it's correctly waiting — so the
+    marker never self-clears (observed 2026-07-17: `dais tick` said "nothing to run", only
+    `dais start` worked). A verify:-guarded exit edge is the machine's OWN signal that a state may
+    need several polling runs; the escalation must skip it there (the 45m throttle still paces
+    the polling) while still protecting a state WITHOUT that signal (the original fa459de case)."""
+
+    def _add_verify_guard(self):
+        mp = os.path.join(self.root, "projects", "demo", "machine.json")
+        with open(mp) as fh:
+            m = json.load(fh)
+        for e in m["edges"]:
+            if e["from"] == "releasing" and e["verb"] == "shipped":
+                e["guards"] = e.get("guards", []) + ["verify:migrations_live"]
+        with open(mp, "w") as fh:
+            json.dump(m, fh)
+
+    def _seed_two_touch_only_runs(self, task_id):
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        for mins_ago in (20, 10):
+            conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status) "
+                         "VALUES('demo','engineer',datetime('now','-%d minutes'),"
+                         "datetime('now','-%d minutes'),'succeeded')" % (mins_ago, mins_ago))
+            rid = conn.execute("SELECT MAX(id) FROM runs").fetchone()[0]
+            conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(?,?,'touch')",
+                         (rid, task_id))
+        conn.commit(); conn.close()
+
+    def _stall_marker(self):
+        return os.path.join(self.root, "projects", "demo", ".stalled-engineer")
+
+    def test_verify_gated_state_is_never_permanently_stalled(self):
+        dais(self.root, "scaffold", "demo")
+        self._add_verify_guard()
+        dais(self.root, "task", "add", "demo", "Release", "--id", "d-1", "--status", "releasing")
+        self._seed_two_touch_only_runs("d-1")
+        r = dais(self.root, "tick", "demo")     # real tick: writes markers, but has nothing to launch
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)   # idle — engineer is 45m-throttled
+        self.assertFalse(os.path.exists(self._stall_marker()),
+                         "a verify-gated state must never get a permanent stall marker")
+
+    def test_non_verify_gated_state_still_stalls(self):
+        # protects the ORIGINAL fa459de fix: a state with no structural verify signal keeps the
+        # existing protection (an agent can't dodge the stall by writing notes).
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "Release", "--id", "d-1", "--status", "releasing")
+        self._seed_two_touch_only_runs("d-1")
+        r = dais(self.root, "tick", "demo")
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(self._stall_marker()),
+                        "a non-verify-gated stuck task should still escalate to a stall marker")
 
 
 class TestDbLifecycle(unittest.TestCase):

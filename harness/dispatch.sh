@@ -218,10 +218,24 @@ for proj in "${projects[@]}"; do
                       ORDER BY r.id DESC LIMIT 2)
                     WHERE s='succeeded' AND e=0;" 2>/dev/null)"
       if [ "${streak:-0}" -ge 2 ] && [ "$DRY" = 0 ]; then
-        fp="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$proj" "$cand" 2>/dev/null)"
-        if [ -n "$fp" ]; then    # empty set = cadence-only run, nothing to stall on
-          printf '%s\n' "$fp" > "$sm"
-          tlog "STALL $proj/$cand — $streak consecutive no-op runs; parked until its tasks change ($(paste -sd' ' "$sm"))"
+        # A role dispatching into a verify-guarded state (router.py --verify-gated; see
+        # machine.role_awaits_verify) must never be PERMANENTLY parked here: that state's own
+        # exit edge says resolving it may legitimately take several polling runs (e.g. an async
+        # EAS/CI build), each of which can only report progress via a task-set note (verb=
+        # 'touch', since no edge fires until the external process finishes) — indistinguishable
+        # from a truly stuck task by this streak check alone. The dispatch-set fingerprint
+        # (id|status) never changes while such a task correctly waits in the same state across
+        # polls, so a STALL marker here would never self-clear — only `dais start` or the 6h TTL
+        # would ever run it again. The 45-minute throttle below still paces the polling and
+        # self-clears; only the escalation to a standing marker is skipped.
+        if [ "$(python3 "$SELF/router.py" --verify-gated "$DAIS_HOME" "$proj" "$cand" 2>/dev/null)" = "1" ]; then
+          tlog "no-stall $proj/$cand — dispatch-set awaits a verify guard; polling continues (never permanently parked)"
+        else
+          fp="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$proj" "$cand" 2>/dev/null)"
+          if [ -n "$fp" ]; then    # empty set = cadence-only run, nothing to stall on
+            printf '%s\n' "$fp" > "$sm"
+            tlog "STALL $proj/$cand — $streak consecutive no-op runs; parked until its tasks change ($(paste -sd' ' "$sm"))"
+          fi
         fi
       fi
       tlog "throttle $proj/$cand — last run was a recent no-op; cooling 45m (trying next role)"

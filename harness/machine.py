@@ -371,6 +371,31 @@ def pending_for(conn, m, project, role):
     return n
 
 
+def role_awaits_verify(m, role):
+    """True if `role` dispatches for a state whose outbound edge (owned by `role`) carries a
+    `verify:` guard — the machine's OWN signal that resolving this state may legitimately take
+    several polling runs (e.g. winterbraid's `releasing -> shipped` gated on
+    `verify:migrations_live`, or a `releasing` task that stays put across runs while an async
+    EAS/CI build finishes: each poll can only report progress via a task-set note, verb='touch',
+    since no edge fires until the external process is actually done).
+
+    dispatch.sh's stall-escalation (fa459de) treats 2 consecutive touch-only runs as "stuck" and
+    permanently parks the role (`.stalled-<role>`) until the dispatch-set's id|status fingerprint
+    changes — which it never does while a task is *correctly* waiting in the same state across
+    polls, so a legitimately multi-run release got wedged exactly like a truly orphaned task,
+    recoverable only by `dais start` or the 6h TTL heartbeat. This function lets the dispatcher
+    exempt ONLY states with this structural signal from the PERMANENT stall (the short 45-minute
+    throttle still applies — it just paces the polling, and self-clears) — states without a
+    verify guard keep the original protection (an agent can't self-unstall by writing notes)."""
+    for state in (m or {}).get("states", {}):
+        if dispatch_role(m, state) != role:
+            continue
+        for e in edges_from(m, state):
+            if e.get("by") == role and any(g.startswith("verify:") for g in e.get("guards", [])):
+                return True
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # display derivation — so `top` configures itself from the machine (no per-model wiring)
 # --------------------------------------------------------------------------- #

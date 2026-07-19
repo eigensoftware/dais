@@ -468,6 +468,20 @@ if __name__ == "__main__":
             for (line,) in db.execute(q, [project] + states):
                 print(line)
         sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--verify-gated":
+        # Prints "1" if `role` dispatches for a state whose exit edge (owned by that role) is
+        # `verify:`-guarded (machine.role_awaits_verify) — the dispatcher's signal that a role
+        # must never be PERMANENTLY stall-escalated there (see that function's docstring); nothing
+        # otherwise. Never crashes: any error means "not exempt" (fail toward the existing,
+        # already-safe stall behavior), same idle-safety contract as decide-mode.
+        root, project, role = sys.argv[2], sys.argv[3], sys.argv[4]
+        try:
+            import machine as MC
+            if MC.role_awaits_verify(MC.load(_machine_for(root, project)), role):
+                print("1")
+        except Exception:
+            pass
+        sys.exit(0)
     try:
         excl = set(sys.argv[3].split(",")) - {""} if len(sys.argv) > 3 else set()
         live = {}                  # optional 4th arg: 'role=N,role=N' from the project's live locks
