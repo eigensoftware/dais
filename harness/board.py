@@ -10,6 +10,7 @@ re-exports these names, so `import dashboard as d` keeps working everywhere.
 """
 import datetime as _dt
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -169,17 +170,36 @@ def project_archived(root, name):
     return project_field(root, name, "archived").lower() in ("true", "yes", "1")
 
 
+# A YAML block-scalar indicator (folded `>`/`>-`/`>+` or literal `|`/`|-`/`|+`) as the WHOLE
+# value after `key:` — the reader must fold in the following more-indented lines instead of
+# returning the two-character indicator literally.
+_BLOCK_SCALAR = re.compile(r"^[|>][+-]?[ \t]*$")
+
+
 def project_field(root, name, key):
     """First-line value of `key:` from a project's project.yaml ('' if absent). Line-based, matching
-    the bash `pcfg` reader — used for stage_goal, deploy, etc."""
+    the bash `pcfg` reader — used for stage_goal, deploy, etc. A block-scalar value (`key: >-` etc.)
+    is folded: every following MORE-INDENTED line is joined with spaces (good enough for these
+    single-paragraph fields — a real incident: `stage_goal: >-` reached an agent's prompt as the
+    literal string '>-' because this reader, being line-based, never followed the fold)."""
     path = os.path.join(root, "projects", name, "project.yaml")
     try:
         with open(path) as fh:
-            for line in fh:
-                if line.startswith(key + ":"):
-                    return line.split(":", 1)[1].strip()
+            lines = fh.readlines()
     except OSError:
-        pass
+        return ""
+    for i, line in enumerate(lines):
+        if line.startswith(key + ":"):
+            v = line.split(":", 1)[1].strip()
+            if not _BLOCK_SCALAR.match(v):
+                return v
+            out = []
+            for cont in lines[i + 1:]:
+                if re.match(r"^[ \t]+\S", cont):
+                    out.append(cont.strip())
+                else:
+                    break
+            return " ".join(out)
     return ""
 
 

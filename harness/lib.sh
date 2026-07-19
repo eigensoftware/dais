@@ -77,8 +77,38 @@ link_run_task(){
   db "INSERT INTO run_tasks(run_id,task_id,verb) VALUES($DAIS_RUN_ID,'$(sqlesc "$1")','$(sqlesc "${2:-touch}")');" 2>/dev/null || true
 }
 
-# read a single-line field from projects/<project>/project.yaml
-pcfg(){ grep -E "^$2:" "$DAIS_HOME/projects/$1/project.yaml" 2>/dev/null | head -1 | sed "s/^$2:[[:space:]]*//"; }
+# read a field from projects/<project>/project.yaml. Line-based (key: value) with one hardening:
+# a YAML block-scalar indicator (folded `>`/`>-`/`>+` or literal `|`/`|-`/`|+`) as the WHOLE value
+# is followed — every subsequent MORE-INDENTED line is folded in, space-joined (good enough for
+# these single-paragraph fields, e.g. stage_goal). Without this, `key: >-` returned the literal
+# two-character string ">-" (a real incident: it reached an agent's prompt as its stage goal).
+# Mirrored in board.py's project_field (project_field's docstring has the same rationale).
+pcfg(){
+  local f="$DAIS_HOME/projects/$1/project.yaml" k="$2"
+  [ -f "$f" ] || return 0
+  awk -v key="$k" '
+    BEGIN { re = "^(" key "):" }
+    !found && $0 ~ re {
+      found = 1
+      v = $0
+      sub(re, "", v)
+      sub(/^[ \t]*/, "", v)
+      if (v ~ /^[|>][+-]?[ \t]*$/) { block = 1; next }
+      print v
+      exit
+    }
+    found && block {
+      if ($0 ~ /^[ \t]+[^ \t]/) {
+        s = $0
+        sub(/^[ \t]+/, "", s)
+        out = (out == "") ? s : out " " s
+        next
+      }
+      exit
+    }
+    END { if (block) print out }
+  ' "$f" 2>/dev/null
+}
 
 # machine_path <project> -> the project's resolved machine file. Unconditional: the project's own
 # machine.json wins, else a `machine:` selector in project.yaml, else the `coding` default. Shared

@@ -551,6 +551,65 @@ class TestRepoPath(unittest.TestCase):
         self.assertEqual(got, expected)
 
 
+class TestPcfgBlockScalar(unittest.TestCase):
+    """lib.sh's pcfg() reads project.yaml line-by-line — a YAML block-scalar indicator
+    (`key: >-` etc.) as the whole value used to come back as the literal indicator text instead
+    of the folded paragraph (a real incident: a `stage_goal: >-` folded scalar reached an
+    agent's prompt as the string '>-'). pcfg must fold in the following more-indented lines."""
+
+    def setUp(self):
+        self.root = make_sandbox()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        os.makedirs(os.path.join(self.root, "projects", "demo"))
+
+    def _pcfg(self, yaml_body, key="stage_goal"):
+        yaml = os.path.join(self.root, "projects", "demo", "project.yaml")
+        with open(yaml, "w") as fh:
+            fh.write(yaml_body)
+        e = {"DAIS_ROOT": self.root, "DAIS_HOME": self.root, "PATH": os.environ["PATH"]}
+        r = subprocess.run(["bash", "-c",
+                            'source "%s/harness/lib.sh"; pcfg demo %s' % (self.root, key)],
+                           capture_output=True, text=True, env=e)
+        return r.stdout.strip()
+
+    def test_plain_single_line_value_unchanged(self):
+        got = self._pcfg("project: demo\nstage_goal: ship the thing\nrepo: x\n")
+        self.assertEqual(got, "ship the thing")
+
+    def test_folded_block_scalar_is_joined(self):
+        got = self._pcfg(
+            "project: demo\n"
+            "stage_goal: >-\n"
+            "  Ship the launch-week fixes and keep the\n"
+            "  release lane green.\n"
+            "repo: x\n")
+        self.assertEqual(got, "Ship the launch-week fixes and keep the release lane green.")
+        self.assertNotEqual(got, ">-")
+
+    def test_literal_block_scalar_is_joined_too(self):
+        # space-join both folded (>) and literal (|) — good enough for these single-paragraph
+        # fields per the task's own scope (no real multi-paragraph project.yaml field exists).
+        got = self._pcfg(
+            "project: demo\n"
+            "stage_goal: |\n"
+            "  first line\n"
+            "  second line\n"
+            "repo: x\n")
+        self.assertEqual(got, "first line second line")
+
+    def test_block_scalar_stops_at_next_top_level_key(self):
+        got = self._pcfg(
+            "project: demo\n"
+            "stage_goal: >-\n"
+            "  only this paragraph\n"
+            "repo: x\n"
+            "priority: 5\n")
+        self.assertEqual(got, "only this paragraph")
+
+    def test_missing_key_is_empty(self):
+        self.assertEqual(self._pcfg("project: demo\n", key="nope"), "")
+
+
 class TestRunAgentRepoPath(CliTest):
     def test_relative_repo_resolves_via_repo_path(self):
         # A scaffolded project ships a RELATIVE `repo:` (the template default).

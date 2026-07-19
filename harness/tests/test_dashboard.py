@@ -920,6 +920,55 @@ class TestFireErrorPrefersStderr(unittest.TestCase):
         self.assertNotIn("running scripts", app.flash)
 
 
+class TestProjectFieldBlockScalar(unittest.TestCase):
+    """board.py's project_field is the python twin of lib.sh's pcfg — same line-based reader,
+    same block-scalar hardening (a `key: >-` folded scalar used to come back as the literal
+    string '>-' instead of the folded paragraph)."""
+
+    def _field(self, yaml_body, key="stage_goal"):
+        with tempfile.TemporaryDirectory() as root:
+            pdir = os.path.join(root, "projects", "demo")
+            os.makedirs(pdir)
+            with open(os.path.join(pdir, "project.yaml"), "w") as fh:
+                fh.write(yaml_body)
+            return d.project_field(root, "demo", key)
+
+    def test_plain_single_line_value_unchanged(self):
+        got = self._field("project: demo\nstage_goal: ship the thing\nrepo: x\n")
+        self.assertEqual(got, "ship the thing")
+
+    def test_folded_block_scalar_is_joined(self):
+        got = self._field(
+            "project: demo\n"
+            "stage_goal: >-\n"
+            "  Ship the launch-week fixes and keep the\n"
+            "  release lane green.\n"
+            "repo: x\n")
+        self.assertEqual(got, "Ship the launch-week fixes and keep the release lane green.")
+        self.assertNotEqual(got, ">-")
+
+    def test_literal_block_scalar_is_joined_too(self):
+        got = self._field(
+            "project: demo\n"
+            "stage_goal: |\n"
+            "  first line\n"
+            "  second line\n"
+            "repo: x\n")
+        self.assertEqual(got, "first line second line")
+
+    def test_block_scalar_stops_at_next_top_level_key(self):
+        got = self._field(
+            "project: demo\n"
+            "stage_goal: >-\n"
+            "  only this paragraph\n"
+            "repo: x\n"
+            "priority: 5\n")
+        self.assertEqual(got, "only this paragraph")
+
+    def test_missing_key_is_empty(self):
+        self.assertEqual(self._field("project: demo\n", key="nope"), "")
+
+
 class TestRenderProjectCast(unittest.TestCase):
     """`dais project <name>`'s cast now renders straight from router.cast()/agent_setup() —
     the agents/ directory IS the cast, no roles-file read, no active_agents gating."""
