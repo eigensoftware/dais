@@ -602,6 +602,31 @@ def _add(scr, y, x, s, w, attr=0):
         pass
 
 
+# the wrapper's OWN bookkeeping line for a failed script effect (machine.py's `create`->`fire`
+# script-effect path, 81e3087): announces nothing useful on its own ("shipped NOT fired; task
+# unchanged" doesn't say WHY) and would otherwise mask the script's real stderr underneath it.
+_SCRIPT_WRAPPER_MARK = "NOT fired; task unchanged"
+
+
+def _fire_error(rc, stdout, stderr):
+    """The founder-facing reason a `dais fire` failed. Prefers STDERR over stdout: every failure
+    path in machine.py's fire command (GuardFailure, ValueError, a failed script effect) prints
+    its message to stderr — stdout only ever carries the "▶ <verb>: running scripts/<name> …"
+    progress marker printed just BEFORE a script effect runs (81e3087). The panel used to pick
+    the first non-blank line of stdout+stderr CONCATENATED, so that harmless progress marker
+    (stdout, printed first) silently ate the actual failure reason (the script's own stderr,
+    e.g. "merge_pr: task jac-12 has no pr_url — set it") — "it did nothing" instead of why.
+    Within stderr, machine.py's own generic wrapper line (_SCRIPT_WRAPPER_MARK) is filtered out
+    so a genuinely informative script message isn't shadowed by it either; the LAST remaining
+    line wins (a script's most specific diagnostic is typically its final one)."""
+    for src in (stderr, stdout):
+        lines = [ln.strip() for ln in src.splitlines()
+                if ln.strip() and _SCRIPT_WRAPPER_MARK not in ln]
+        if lines:
+            return lines[-1]
+    return f"exit {rc}"
+
+
 class App:
     """The TUI's ENGINE half: data refresh, selection, the machine-derived action bar/menu,
     guard prompting and dispatch. Deliberately renderer-less — `run()` calls `draw()` and
@@ -1029,11 +1054,13 @@ class App:
         return subprocess.call([self._dais()] + [str(c) for c in cmd])
 
     def _dispatch_out(self, cmd):
-        """Like _dispatch but capture output — for actions whose FAILURE REASON the founder must
-        see (a gate that didn't fire must say why, not just 'exit 1')."""
+        """Like _dispatch but capture output SEPARATELY (stdout, stderr) — for actions whose
+        FAILURE REASON the founder must see (a gate that didn't fire must say why, not just
+        'exit 1'). Kept apart (not pre-joined) so the caller can prefer stderr — see
+        _fire_error's docstring for why that matters."""
         r = subprocess.run([self._dais()] + [str(c) for c in cmd],
                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
+        return r.returncode, (r.stdout or ""), (r.stderr or "")
 
     def _spawn_agent(self, cmd):
         """Launch a STREAMING-agent command (e.g. `start`) DETACHED, with its output to the run log —
@@ -1142,13 +1169,13 @@ class App:
             if not prompted and not self._confirm(f"{verb} {t['id']}?"):
                 return
             cmd.append("--confirm")
-        rc, out = self._dispatch_out(cmd)
+        rc, out, err_out = self._dispatch_out(cmd)
         self.refresh()
         if rc == 0:
             # state the TRANSITION, not just the verb — "did my greenlight take?" answers itself
             self.flash = f"✓ {verb} {t['id']} — now {edge.get('to', '?').replace('_', ' ')}"
         else:
-            err = next((ln.strip() for ln in out.splitlines() if ln.strip()), f"exit {rc}")
+            err = _fire_error(rc, out, err_out)
             self.flash = f"✗ {verb} {t['id']} DID NOT FIRE — {err[:110]}"
 
     def _action_menu(self, row):

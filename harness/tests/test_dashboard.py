@@ -834,7 +834,7 @@ class TestActMachineConditionalAttest(unittest.TestCase):
 
         def _dispatch_out(self, cmd):
             self.dispatched = cmd
-            return 0, ""
+            return 0, "", ""
 
         def refresh(self):
             pass
@@ -869,6 +869,55 @@ class TestActMachineConditionalAttest(unittest.TestCase):
         self.assertTrue(any("attest" in p for p in app.prompts))
         self.assertIn("--attest", app.dispatched)
         self.assertIn("migration_reviewed", app.dispatched)
+
+
+class TestFireErrorPrefersStderr(unittest.TestCase):
+    """A failed edge-script effect (machine.py's CLI script-effect path, 81e3087) must surface
+    ITS reason in the panel, not machine.py's own harmless "▶ running scripts/…" progress line —
+    the exact combined-output captured from a real `dais fire` of jackwangdotcom's `merge` edge
+    on a task with no pr_url (merge_pr writes to stderr; machine.py prints the progress marker to
+    stdout BEFORE the script even runs)."""
+
+    _STDOUT = "  ▶ merge: running scripts/merge_pr …\n"
+    _STDERR = ("merge_pr: task demo-1 has no pr_url — set it (dais task set <id> --pr <url>) "
+               "or merge by hand\n  ✗ scripts/merge_pr failed — merge NOT fired; task unchanged\n")
+
+    def test_script_stderr_wins_over_the_progress_marker(self):
+        err = d._fire_error(1, self._STDOUT, self._STDERR)
+        self.assertEqual(err, "merge_pr: task demo-1 has no pr_url — set it "
+                              "(dais task set <id> --pr <url>) or merge by hand")
+        self.assertNotIn("running scripts", err)
+
+    def test_plain_guard_failure_is_unaffected(self):
+        # no script involved — the sole stderr line (as machine.py always prints for
+        # GuardFailure/ValueError) must still come through unchanged.
+        err = d._fire_error(1, "", "  ✗ actor 'engineer' may not fire this edge (owner is 'founder')\n")
+        self.assertEqual(err, "✗ actor 'engineer' may not fire this edge (owner is 'founder')")
+
+    def test_no_stderr_falls_back_to_stdout(self):
+        self.assertEqual(d._fire_error(3, "some stdout line\n", ""), "some stdout line")
+
+    def test_nothing_captured_falls_back_to_exit_code(self):
+        self.assertEqual(d._fire_error(2, "", ""), "exit 2")
+
+    def test_act_machine_flash_shows_the_real_reason(self):
+        # end-to-end through _act_machine's own dispatch + flash, not just the helper.
+        class _FakeApp(TestActMachineConditionalAttest._FakeApp):
+            def _dispatch_out(inner_self, cmd):
+                inner_self.dispatched = cmd
+                return 1, TestFireErrorPrefersStderr._STDOUT, TestFireErrorPrefersStderr._STDERR
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE tasks(id TEXT, project TEXT, status TEXT, title TEXT,"
+                     " assignee TEXT, parked_from TEXT, pr_url TEXT)")
+        conn.execute("INSERT INTO tasks(id,project,status,title) VALUES('jac-12','jw','review','x')")
+        app = _FakeApp(conn)
+        machine = {"edges": [{"from": "review", "to": "done", "by": "founder", "verb": "merge",
+                              "effect": {"script": {"name": "merge_pr", "outward": True}}}]}
+        app._act_machine(machine, "merge", None, {"id": "jac-12", "status": "review"})
+        self.assertIn("merge_pr: task demo-1 has no pr_url", app.flash)
+        self.assertNotIn("running scripts", app.flash)
 
 
 class TestRenderProjectCast(unittest.TestCase):
