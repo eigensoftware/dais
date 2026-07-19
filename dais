@@ -354,9 +354,12 @@ print((M.dispatch_role(m, st) or '') + '|' + M.band_of(m, st))" 2>/dev/null)"
     # seed the project's own machine from the template's workflow (a copy it can edit)
     mfile="$DAIS_ROOT/harness/machines/$tmpl.machine.json"
     [ -f "$mfile" ] && cp "$mfile" "$dest/machine.json"
-    for f in "$dest/project.yaml" "$dest/CONTEXT.md"; do
-      [ -f "$f" ] && { sed "s/__PROJECT__/$name/g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"; }
-    done
+    # substitute __PROJECT__ in EVERY file the template copied — not just project.yaml and
+    # CONTEXT.md (the old scope): a template's agents/*.md personas carry it too (e.g. "you work
+    # on __PROJECT__"), and were left unsubstituted, reaching an agent's prompt verbatim.
+    while IFS= read -r f; do
+      grep -q '__PROJECT__' "$f" 2>/dev/null && { sed "s/__PROJECT__/$name/g" "$f" > "$f.tmp" && mv "$f.tmp" "$f"; }
+    done < <(find "$dest" -type f)
     echo "scaffolded projects/$name from '$tmpl' (machine.json seeded) — edit project.yaml, then: dais lint $name" ;;
 
   role)

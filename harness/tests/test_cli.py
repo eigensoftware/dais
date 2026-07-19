@@ -1031,6 +1031,27 @@ class TestScaffold(CliTest):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("exists", (r.stdout + r.stderr).lower())
 
+    def test_scaffold_substitutes_every_copied_file(self):
+        # the sed pass used to cover only project.yaml + CONTEXT.md — agents/*.md personas
+        # (which several templates address to "__PROJECT__") were left unsubstituted, reaching
+        # an agent's prompt verbatim. Check EVERY template, every file, zero hits.
+        templates = sorted(os.listdir(os.path.join(REPO, "harness", "templates")))
+        self.assertTrue(templates)     # sanity: the glob actually found templates
+        for tmpl in templates:
+            proj = "t_" + tmpl
+            r = dais(self.root, "scaffold", proj, "--template", tmpl)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            base = os.path.join(self.root, "projects", proj)
+            hits = []
+            for dirpath, _dirs, files in os.walk(base):
+                for fn in files:
+                    p = os.path.join(dirpath, fn)
+                    with open(p, "rb") as fh:
+                        if b"__PROJECT__" in fh.read():
+                            hits.append(os.path.relpath(p, base))
+            self.assertEqual(hits, [], "template %r left __PROJECT__ unsubstituted in: %s"
+                             % (tmpl, hits))
+
     def test_scaffold_rejects_non_slug_names(self):
         # A name with `/`, a space, or a sed metachar would break the sed
         # substitution or create nested dirs — reject it as a slug violation.
