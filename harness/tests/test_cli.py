@@ -91,6 +91,59 @@ class TestStatusAndTitle(CliTest):
         self.assertEqual(q(self.root, "SELECT title FROM tasks WHERE id='d-2'")[0], "New title")
 
 
+class TestTaskAddTouchesMigrations(CliTest):
+    """`task add --touches-migrations` (same semantics as `task set`): the winterbraid lead files
+    release tasks with this flag AT CREATION — it used to be silently swallowed (not a recognized
+    flag, so it hit the generic "unknown flag" catch and the task was never even created), leaving
+    releases with NULL touches_migrations. Same true/false vocabulary as `task set`."""
+
+    def test_true_sets_the_column(self):
+        r = dais(self.root, "task", "add", "demo", "Release", "--id", "d-1",
+                 "--touches-migrations", "true")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT touches_migrations FROM tasks WHERE id='d-1'")[0], 1)
+
+    def test_false_sets_the_column(self):
+        r = dais(self.root, "task", "add", "demo", "Release", "--id", "d-1",
+                 "--touches-migrations", "false")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT touches_migrations FROM tasks WHERE id='d-1'")[0], 0)
+
+    def test_omitted_leaves_it_null(self):
+        dais(self.root, "task", "add", "demo", "Release", "--id", "d-1")
+        self.assertIsNone(q(self.root, "SELECT touches_migrations FROM tasks WHERE id='d-1'")[0])
+
+    def test_bogus_value_is_rejected(self):
+        r = dais(self.root, "task", "add", "demo", "Release", "--id", "d-1",
+                 "--touches-migrations", "maybe")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("true|false", r.stdout + r.stderr)
+        self.assertIsNone(q(self.root, "SELECT 1 FROM tasks WHERE id='d-1'"))
+
+
+class TestTaskAddUnknownFlagIsAnError(CliTest):
+    """Silent-ignore is the deeper bug: an unrecognized `--flag` must fail loud, both at the bash
+    CLI layer AND at machine.py's `create` — the single authority `task add` delegates to — so a
+    typo can never silently create a task with the intended field dropped on the floor."""
+
+    def test_bash_layer_rejects_unknown_flag(self):
+        r = dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--bogus", "1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unknown flag", r.stdout + r.stderr)
+        self.assertIsNone(q(self.root, "SELECT 1 FROM tasks WHERE id='d-1'"))
+
+    def test_machine_create_rejects_unknown_flag_directly(self):
+        # bypass the bash CLI's own filter — call the authority machine.py delegates to directly,
+        # proving IT no longer silently drops an unrecognized argument either.
+        import subprocess as sp
+        mp = os.path.join(self.root, "harness", "machines", "coding.machine.json")
+        r = sp.run(["python3", os.path.join(self.root, "harness", "machine.py"),
+                    "create", os.path.join(self.root, "dais.db"), mp, "demo", "x",
+                    "--bogus", "1"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unknown argument", r.stdout + r.stderr)
+
+
 class TestAgentStateSurgery(CliTest):
     """Agents (runs carrying DAIS_RUN_ID) may NOT set --status — state changes go through edges
     (dais fire), which is how the cou-21 incident happened: an agent raw-set a founder-semantic

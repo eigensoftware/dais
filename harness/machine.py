@@ -922,12 +922,16 @@ def yolo_sweep(conn, m, project, veto_min=0):
 # task creation (enters at an initial state)
 # --------------------------------------------------------------------------- #
 def create_task(conn, m, project, title, state=None, assignee=None,
-                tid=None, priority=None, notes=None, blocked_on=None):
+                tid=None, priority=None, notes=None, blocked_on=None,
+                touches_migrations=None):
     """Create a task at `state` (default: the machine's entry). The one authority for what
     `dais task add` needs — state validation, id allocation (or an explicit tid), and the
     optional board attributes — so the CLI delegates here instead of re-deriving any of it.
     assignee: omitted -> the state's dispatch role (what spawns/python callers want);
-    '' -> explicitly unassigned (what a founder's bare `task add` means)."""
+    '' -> explicitly unassigned (what a founder's bare `task add` means).
+    touches_migrations: the release fact (0/1) — same column `task set --touches-migrations`
+    writes; settable at creation so a release task filed straight into release_open (or any
+    other state) doesn't need a follow-up `task set` to record it."""
     initials = [s for s, meta in m["states"].items() if meta.get("initial")]
     st = state or m.get("entry") or (initials[0] if initials else "backlog")
     if st not in m.get("states", {}):
@@ -938,9 +942,14 @@ def create_task(conn, m, project, title, state=None, assignee=None,
             raise ValueError("dependencies need a schema upgrade — run 'dais migrate' first")
         if not conn.execute("SELECT 1 FROM tasks WHERE id=?", (blocked_on,)).fetchone():
             raise ValueError(f"no such predecessor task: {blocked_on}")
+    if touches_migrations is not None:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        if "touches_migrations" not in have:              # column arrives by migration 0005
+            raise ValueError("--touches-migrations needs a schema upgrade — run 'dais migrate' first")
     asg = assignee if assignee is not None else dispatch_role(m, st)
     extra = {k: v for k, v in (("priority", priority), ("notes", notes),
-                               ("blocked_on", blocked_on)) if v is not None}
+                               ("blocked_on", blocked_on),
+                               ("touches_migrations", touches_migrations)) if v is not None}
     tid = _insert_task(conn, project, title, st, asg or None, tid=tid, extra=extra)
     conn.commit()
     return tid
@@ -1011,20 +1020,35 @@ def _main(argv):
         return 0
     if cmd == "create":
         # create <db> <machine> <project> <title> [state] [--id X] [--priority P]
-        #        [--assignee A] [--notes N] [--blocked-on ID]
+        #        [--assignee A] [--notes N] [--blocked-on ID] [--touches-migrations 0|1]
         # prints "<id>|<state>" (the CLI's `task add` echoes both); errors go to stderr, exit 1.
         db, mp, project, title = argv[1], argv[2], argv[3], argv[4]
         st, kw, rest = None, {}, argv[5:]
         flags = {"--id": "tid", "--priority": "priority", "--assignee": "assignee",
-                 "--notes": "notes", "--blocked-on": "blocked_on"}
+                 "--notes": "notes", "--blocked-on": "blocked_on",
+                 "--touches-migrations": "touches_migrations"}
         i = 0
         while i < len(rest):
             if rest[i] in flags:
-                kw[flags[rest[i]]] = rest[i + 1]; i += 2
+                key, val = flags[rest[i]], rest[i + 1]
+                if key == "touches_migrations":
+                    try:
+                        val = int(val)
+                    except ValueError:
+                        print(f"machine.py create: --touches-migrations needs an int (0/1); "
+                              f"got {val!r}", file=sys.stderr)
+                        return 1
+                kw[key] = val; i += 2
             elif st is None and not rest[i].startswith("--"):
                 st = rest[i]; i += 1
             else:
-                i += 1
+                # An unrecognized token here (a typo'd flag, or a stray extra positional) used to
+                # be silently SKIPPED — the deeper form of the `task add` silent-ignore bug: even
+                # once the bash CLI started rejecting unknown flags, anything reaching this
+                # authority directly (the one `task add` is supposed to delegate ALL validation
+                # to) still dropped it on the floor with no signal at all.
+                print(f"machine.py create: unknown argument: {rest[i]!r}", file=sys.stderr)
+                return 1
         conn = open_db(db)
         try:
             tid = create_task(conn, load(mp), project, title, st, **kw)

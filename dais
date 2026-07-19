@@ -19,7 +19,7 @@ dais — your agent company control panel
   dais top [secs]                     live control panel — act on tasks, fire guarded edges (default 2s refresh)
   dais project <name>                 a project's setup: cast + models, machine dispatch map, config
   dais tasks <project> [--assignee A] [--status S]
-  dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."]
+  dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."] [--touches-migrations true|false]
   dais task show <id>                 the full record: fields + links + the notes log
   dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."(appends)] [--replace-notes "..."] [--touches-migrations true|false]
   dais tick [project] [--dry-run]     check the list once: run the most valuable pending task
@@ -179,8 +179,8 @@ MD
         [ -n "$links" ] && { echo; echo "links:"; printf '%s\n' "$links" | sed 's/^/  /'; }
         echo; echo "notes:"; db "SELECT COALESCE(NULLIF(notes,''),'(none)') FROM tasks WHERE id='$(sqlesc "$id")';" ;;
       add)
-        proj="${1:?usage: dais task add <project> \"title\" [--id X] [--priority P] [--status S] [--assignee A] [--notes \"...\"] [--depends-on ID]}"; shift
-        id=""; title=""; pri="medium"; st=""; asg=""; notes=""; dep=""
+        proj="${1:?usage: dais task add <project> \"title\" [--id X] [--priority P] [--status S] [--assignee A] [--notes \"...\"] [--depends-on ID] [--touches-migrations true|false]}"; shift
+        id=""; title=""; pri="medium"; st=""; asg=""; notes=""; dep=""; tm=""
         while [ $# -gt 0 ]; do case "$1" in
           --id)         id="$2"; shift 2;;
           --priority)   pri="$2"; shift 2;;
@@ -188,6 +188,12 @@ MD
           --assignee)   asg="$2"; shift 2;;
           --notes)      notes="$2"; shift 2;;
           --depends-on) dep="$2"; shift 2;;
+          --touches-migrations)  # release fact, settable at creation (same semantics as task set)
+                        case "$2" in
+                          true|1|yes)  tm=1;;
+                          false|0|no)  tm=0;;
+                          *) echo "task add: --touches-migrations needs true|false"; exit 1;;
+                        esac; shift 2;;
           --*) echo "task add: unknown flag: $1 (a typo'd --depends-on would drop the dependency silently)"; exit 1;;
           *) [ -n "$title" ] && { echo "task add: unexpected arg: $1"; exit 1; }; title="$1"; shift;;
         esac; done
@@ -203,6 +209,7 @@ MD
         [ -n "$id" ]    && args+=(--id "$id")
         [ -n "$notes" ] && args+=(--notes "$notes")
         [ -n "$dep" ]   && args+=(--blocked-on "$dep")
+        [ -n "$tm" ]    && args+=(--touches-migrations "$tm")
         res="$(python3 "$DAIS_ROOT/harness/machine.py" "${args[@]}" 2>&1)" \
           || { echo "task add: $res"; exit 1; }
         id="${res%%|*}"; st="${res##*|}"
