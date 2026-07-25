@@ -322,7 +322,19 @@ def _dep_open(conn, tid):
     return bool(pred) and pred[0] not in ("done", "cancelled")
 
 
-def next_dispatch(conn, m, project, excluded=frozenset()):
+def _live_pins(conn, project):
+    """Task ids currently pinned to a live run of this project (run-agent.sh writes runs.task_id at
+    startup, before the agent does any work). A db with no runs table / no task_id column yields no
+    pins, so selection degrades to exactly its pre-pin behavior instead of stranding work."""
+    try:
+        rows = conn.execute("SELECT DISTINCT task_id FROM runs WHERE project=? AND status='running' "
+                            "AND task_id IS NOT NULL", (project,)).fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    return frozenset(r[0] for r in rows)
+
+
+def next_dispatch(conn, m, project, excluded=frozenset(), skip_live_pins=False):
     """Reactive dispatch as (role, task_id): the role to launch next for this project AND the
     specific highest-priority pending task whose state named that role. ('', '') when nothing is
     dispatchable (the caller then considers cadence roles). Blocked/parked/gate states have no
@@ -332,7 +344,16 @@ def next_dispatch(conn, m, project, excluded=frozenset()):
     throttle avoids starving a whole project on one cooled role.
 
     The task id is the dispatch trigger: the dispatcher pins it to the run (DAIS_TASK_ID) so
-    run->task attribution is exact instead of reconstructed from run_tasks after a claim."""
+    run->task attribution is exact instead of reconstructed from run_tasks after a claim.
+
+    `skip_live_pins` also skips tasks already pinned to a LIVE run — what a stacked run (role
+    `concurrency: 2..5`) needs so the second run picks the next task instead of re-picking the top
+    one its sibling is on. Off by default, and deliberately so: this is the SELECTING caller's
+    switch (router.dispatch_next), not the scan's default. next_role/decide() only reach this scan
+    for a project holding no live locks, where every 'running' row is an orphan of a crashed run —
+    honoring those pins would strand the task instead of re-dispatching it, the opposite of what
+    dispatch.sh's interrupt reconciliation is for."""
+    live_pins = _live_pins(conn, project) if skip_live_pins else frozenset()
     rows = conn.execute("SELECT id, status, COALESCE(priority,'medium') FROM tasks "
                         "WHERE project=? AND status NOT IN ('done','cancelled')", (project,)).fetchall()
     best = None
@@ -340,7 +361,7 @@ def next_dispatch(conn, m, project, excluded=frozenset()):
         rid = r["id"] if hasattr(r, "keys") else r[0]
         status = r["status"] if hasattr(r, "keys") else r[1]
         role = dispatch_role(m, status)
-        if not role or role in excluded or _dep_open(conn, rid):
+        if not role or role in excluded or rid in live_pins or _dep_open(conn, rid):
             continue
         prio = (r["COALESCE(priority,'medium')"] if hasattr(r, "keys") else r[2])
         key = (_PRIORITY_RANK.get(prio, 2), rid)
