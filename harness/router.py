@@ -250,14 +250,20 @@ def dispatch_next(root, project):
     or idle). Mirrors decide()'s reactive path — dormant roles (trigger 'none') are never dispatched,
     so they're excluded from the scan. run-agent.sh calls this to PIN the triggering task to the run
     (DAIS_TASK_ID + runs.task_id), role-guarded, so run->task attribution is exact instead of
-    reconstructed from run_tasks after a claim."""
+    reconstructed from run_tasks after a claim.
+
+    Tasks already pinned to a live run are skipped (skip_live_pins). This is the selection half of
+    role concurrency: decide()'s stacking gate only launches a second run of a role when MORE
+    dispatchable tasks exist than live runs, so the extra task is guaranteed to be there — without
+    this the stacked run just re-picked the top task and paid twice for one task's work."""
     import machine as MC
     roles = cast(root, project)
     if not roles:
         return ("", "")
     db = MC.open_db(os.path.join(root, "dais.db"))
     dormant = {r["name"] for r in roles if r["trigger"] == "none"}
-    return MC.next_dispatch(db, MC.load(_machine_for(root, project)), project, excluded=dormant)
+    return MC.next_dispatch(db, MC.load(_machine_for(root, project)), project, excluded=dormant,
+                            skip_live_pins=True)
 
 
 def lint_project(root, project):

@@ -236,11 +236,12 @@ once. By default every project runs ONE agent at a time (the repo is shared stat
 you declare `concurrency: 2..5` on may STACK: the dispatcher launches another run of the
 *already-live role* when it has slot headroom and there are more dispatchable tasks than live
 runs. It never launches a *second role* into a busy repo, and it never stacks onto a single
-task. Turn it up only where runs are truly independent per task (content drafting, review-only
-roles). Two cautions: roles whose agents run a shared test stack (a scratch DB) will collide;
-isolate that first; and roles whose agents *drain a queue* may duplicate the top task's work
-(the machine's compare-and-swap edges make duplicates harmless, but the spend is wasted).
-Cadence roles (`every:Nh`) should stay at 1 (they groom shared state); `dais lint` warns.
+task: each run pins its task to `runs.task_id` at startup, and dispatch skips tasks a live run
+already holds — so the stacked run takes the *next* task down the queue. Turn it up only where
+runs are truly independent per task (content drafting, review-only roles). One caution: roles
+whose agents run a shared test stack (a scratch DB) will collide; isolate that first (see
+`isolation: worktree`). Cadence roles (`every:Nh`) should stay at 1 (they groom shared state);
+`dais lint` warns.
 
 **Let Claude design a role:** `dais role new <project> --desc "what it does"` proposes a
 persona + config from your project's existing roles; you confirm.

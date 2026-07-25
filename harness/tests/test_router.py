@@ -24,8 +24,16 @@ SCHEMA = (
     "CREATE TABLE tasks(id TEXT PRIMARY KEY, project TEXT, title TEXT, status TEXT,"
     " priority TEXT DEFAULT 'medium'%s);\n"
     "CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,"
-    " started_at TEXT, ended_at TEXT, status TEXT);\n"
+    " task_id TEXT, started_at TEXT, ended_at TEXT, status TEXT);\n"
 )
+
+
+def _pin(root, agent, task_id, status="running"):
+    """Record a run holding `task_id` — what run-agent.sh writes to runs.task_id at startup."""
+    conn = sqlite3.connect(os.path.join(root, "dais.db"))
+    conn.execute("INSERT INTO runs(project,agent,task_id,status) VALUES('p',?,?,?)",
+                 (agent, task_id, status))
+    conn.commit(); conn.close()
 
 
 def _ws(tasks, roles=ROLES_REACTIVE, with_dep_col=True):
@@ -509,6 +517,26 @@ class TestDispatchNext(unittest.TestCase):
         role, task = router.dispatch_next(root, "p")
         self.assertEqual(role, router.decide(root, "p"))
         self.assertEqual((role, task), ("qa", "a"))
+
+    def test_task_held_by_a_live_run_is_not_handed_out_twice(self):
+        root = _ws([("a", "qa_review"), ("b", "qa_review")])
+        self.assertEqual(router.dispatch_next(root, "p"), ("qa", "a"))
+        _pin(root, "qa", "a")                                   # run 1 pins the top task
+        self.assertEqual(router.dispatch_next(root, "p"), ("qa", "b"))
+
+    def test_a_finished_run_releases_its_task(self):
+        root = _ws([("a", "qa_review")])
+        _pin(root, "qa", "a", status="interrupted")
+        self.assertEqual(router.dispatch_next(root, "p"), ("qa", "a"))
+
+    def test_stacked_run_takes_the_second_task(self):
+        # the whole point, end to end (issue #7): qa live on 'a' with concurrency 2 → decide stacks a
+        # second qa run, and that run must pin 'b'. Before the fix both runs read "dispatched for a".
+        root = _ws([("a", "qa_review"), ("b", "qa_review")])
+        _with_frontmatter(root, "qa", ["concurrency: 2"])
+        _pin(root, "qa", "a")
+        self.assertEqual(router.decide(root, "p", live={"qa": 1}), "qa")
+        self.assertEqual(router.dispatch_next(root, "p"), ("qa", "b"))
 
 
 if __name__ == "__main__":

@@ -26,6 +26,20 @@ def _status(conn, tid):
     return conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0]
 
 
+def _runs_table(conn):
+    """Add the `runs` table to a test db. Deliberately NOT part of _db(): the default fixture has no
+    runs table, so every other test also proves the pin scan degrades to 'no pins' on an old schema."""
+    conn.execute("CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,"
+                 "  task_id TEXT, status TEXT DEFAULT 'running')")
+    conn.commit()
+
+
+def _run(conn, project, agent, task_id, status="running"):
+    conn.execute("INSERT INTO runs(project,agent,task_id,status) VALUES(?,?,?,?)",
+                 (project, agent, task_id, status))
+    conn.commit()
+
+
 class TestLint(unittest.TestCase):
     def test_coding_default_is_coherent(self):
         errors, _ = M.lint(M.load(CODING))
@@ -113,6 +127,71 @@ class TestNextDispatch(unittest.TestCase):
         self.conn.commit()
         self.assertEqual(M.next_role(self.conn, self.m, "proj"),
                          M.next_dispatch(self.conn, self.m, "proj")[0])
+
+
+class TestNextDispatchLivePins(unittest.TestCase):
+    """skip_live_pins — the selection a STACKED run makes (role concurrency > 1). Runs pin their task
+    to runs.task_id at startup; the second run of a role must pick the next task, not re-pick the top
+    one the live run is already on (that duplicate is pure wasted spend)."""
+    def setUp(self):
+        self.conn = _db()
+        self.m = M.load(CODING)
+        _runs_table(self.conn)
+        # two tasks of the SAME state/priority: 'a' is the top pick by id, 'b' is the one behind it
+        self.conn.executescript(
+            "INSERT INTO tasks(id,project,title,status) VALUES('a','proj','x','ready');"
+            "INSERT INTO tasks(id,project,title,status) VALUES('b','proj','y','ready');")
+        self.conn.commit()
+
+    def test_pinned_task_is_skipped(self):
+        _run(self.conn, "proj", "engineer", "a")
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj"), ("engineer", "a"))
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj", skip_live_pins=True),
+                         ("engineer", "b"))
+
+    def test_all_pinned_falls_through_to_another_role(self):
+        _run(self.conn, "proj", "engineer", "a")
+        _run(self.conn, "proj", "engineer", "b")
+        self.conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('c','proj','z','proposed')")
+        self.conn.commit()
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj", skip_live_pins=True), ("lead", "c"))
+
+    def test_all_pinned_and_nothing_else_dispatches_nothing(self):
+        _run(self.conn, "proj", "engineer", "a")
+        _run(self.conn, "proj", "engineer", "b")
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj", skip_live_pins=True), ("", ""))
+
+    def test_ended_run_releases_its_pin(self):
+        for st in ("interrupted", "succeeded", "failed", "capped"):
+            c = _db(); _runs_table(c)
+            c.execute("INSERT INTO tasks(id,project,title,status) VALUES('a','proj','x','ready')")
+            c.commit()
+            _run(c, "proj", "engineer", "a", status=st)
+            self.assertEqual(M.next_dispatch(c, self.m, "proj", skip_live_pins=True), ("engineer", "a"),
+                             f"a {st!r} run must not hold a pin")
+
+    def test_pin_is_scoped_to_the_project(self):
+        _run(self.conn, "other", "engineer", "a")   # same task id, different project's run
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj", skip_live_pins=True),
+                         ("engineer", "a"))
+
+    def test_unpinned_live_run_holds_nothing(self):
+        _run(self.conn, "proj", "engineer", None)   # cadence role / pre-pin window
+        self.assertEqual(M.next_dispatch(self.conn, self.m, "proj", skip_live_pins=True),
+                         ("engineer", "a"))
+
+    def test_old_schema_without_runs_table_still_dispatches(self):
+        c = _db()   # no runs table at all
+        c.execute("INSERT INTO tasks(id,project,title,status) VALUES('a','proj','x','ready')")
+        c.commit()
+        self.assertEqual(M.next_dispatch(c, self.m, "proj", skip_live_pins=True), ("engineer", "a"))
+
+    def test_next_role_ignores_pins(self):
+        # next_role is only consulted for an IDLE project (no live locks) — any 'running' row it could
+        # see there is an orphan, and honoring it would strand the task instead of re-dispatching it.
+        _run(self.conn, "proj", "engineer", "a")
+        _run(self.conn, "proj", "engineer", "b")
+        self.assertEqual(M.next_role(self.conn, self.m, "proj"), "engineer")
 
 
 class TestBandsAndActions(unittest.TestCase):
