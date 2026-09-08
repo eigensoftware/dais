@@ -405,6 +405,7 @@ Rules:
 - trigger: reactive (runs when the machine dispatches it) | every:Nh (cadence) | none.
 - prec: integer; reviewers low, builders mid, planners high — fit it among the existing cast's precs.
 - playbook: pick from the available list the craft that fits, or 'code' for ordinary coding work.
+- provider: anthropic (the claude CLI) | openai (codex exec on the ChatGPT login) — blank inherits the project default. A model id must belong to its provider (claude-* vs gpt-*).
 - model / effort: leave blank to inherit the project default; set one only to override it for this role.
 - persona: a crisp system prompt — who the agent is, the ONE kind of work it does per run, that it reads its queue via 'dais tasks $proj --assignee <name>' and advances work by firing machine edges ('dais edges <task-id>' then 'dais fire <task-id> <verb>'). Do NOT repeat coordination boilerplate, the playbook, or CONTEXT — the harness injects those.
 Output EXACTLY this and nothing else (header lines, then a line with three dashes, then the persona markdown):
@@ -412,6 +413,7 @@ name: <slug>
 trigger: <reactive|every:Nh|none>
 prec: <int>
 playbook: <name>
+provider: <anthropic|openai, or blank>
 model: <optional model id, or blank>
 effort: <optional low|medium|high, or blank>
 ---
@@ -426,17 +428,18 @@ effort: <optional low|medium|high, or blank>
               if(key==k){ v=substr($0,i+1); sub(/^[ \t]+/,"",v); sub(/[ \t]+$/,"",v); print v; exit } } }'; }
         name="$(field name)"; trig="$(field trigger)"; prec="$(field prec)"
         pbook="$(field playbook)"; model="$(field model)"; effort="$(field effort)"
+        provider="$(field provider)"
         # frontmatter is line-based (key: value) — strip any stray spaces the model put in these
         # single-token values so a written frontmatter line can't get mangled.
         trig="${trig//[[:space:]]/}"; prec="${prec//[[:space:]]/}"; pbook="${pbook//[[:space:]]/}"
-        model="${model//[[:space:]]/}"; effort="${effort//[[:space:]]/}"
+        model="${model//[[:space:]]/}"; effort="${effort//[[:space:]]/}"; provider="${provider//[[:space:]]/}"
         persona="$(printf '%s\n' "$proposal" | awk 'f; /^---[[:space:]]*$/{f=1}')"
         [[ "$name" =~ ^[a-z0-9._-]+$ ]] || { echo "role new: generator returned a bad/blank name: '$name'"; exit 1; }
         [ -n "$persona" ] || { echo "role new: proposal had no persona (after the --- line)"; exit 1; }
         [ -e "$PDIR/agents/$name.md" ] && { echo "role new: role '$name' already exists (agents/$name.md)"; exit 1; }
         echo; echo "Proposed role for $proj:"
-        printf '  %-12s trigger=%s prec=%s playbook=%s%s%s\n' \
-          "$name" "$trig" "$prec" "$pbook" "${model:+ model=$model}" "${effort:+ effort=$effort}"
+        printf '  %-12s trigger=%s prec=%s playbook=%s%s%s%s\n' \
+          "$name" "$trig" "$prec" "$pbook" "${provider:+ provider=$provider}" "${model:+ model=$model}" "${effort:+ effort=$effort}"
         echo "  persona → agents/$name.md ($(printf '%s\n' "$persona" | grep -c '') lines)"
         if [ "$yes" -ne 1 ]; then
           printf 'create this role? [y/N] '; read -r ans < /dev/tty 2>/dev/null || ans=""
@@ -448,6 +451,7 @@ effort: <optional low|medium|high, or blank>
           echo "trigger: $trig"
           echo "prec: $prec"
           [ -n "$pbook" ] && echo "playbook: $pbook"
+          [ -n "$provider" ] && echo "provider: $provider"
           [ -n "$model" ] && echo "model: $model"
           [ -n "$effort" ] && echo "effort: $effort"
           echo "---"

@@ -29,7 +29,7 @@ from board import (  # noqa: F401
     _parse, minutes_between, seconds_between, utc_now,
     Task, Run, Project, Snapshot,
     connect, _has_column, _pid_alive, running_agents,
-    project_field, agent_model, stage_goal, _load_machine,
+    project_field, agent_model, agent_provider, stage_goal, _load_machine,
     _REVERSE_VERBS, _machine_actions, workspace_name,
     _PRIO, load_snapshot, load_runs, attach_run_tasks, runs_touching,
 )
@@ -1458,7 +1458,7 @@ def render_project(root, name, color=None):
     # this mirrors exactly what a run would use (frontmatter -> legacy roles file -> project.yaml
     # -> defaults) with no separate roles-file read here.
     P("")
-    P(f"  {c['CB']}cast{c['C0']} {c['CD']}(role · access · trigger · model @ effort · persona){c['C0']}")
+    P(f"  {c['CB']}cast{c['C0']} {c['CD']}(role · access · trigger · provider · model @ effort · persona){c['C0']}")
     for r in router.cast(root, name):
         if r["name"] == "founder":     # some legacy roles files carry an explicit founder
             continue                   # row (trigger none) — the static line below covers it
@@ -1467,8 +1467,11 @@ def render_project(root, name, color=None):
                    if os.path.exists(os.path.join(pdir, "agents", r["name"] + ".md"))
                    else c['CR'] + "no persona" + c['C0'])
         playbook = f"  {c['CD']}[{s['playbook']}]{c['C0']}" if s["playbook"] != "code" else ""
+        # openai has no tool-side default model: an empty `model` means the codex CLI's own
+        # config picks — say so rather than print an empty cell
+        shown_model = s["model"] or "(%s default)" % router.PROVIDER_CLI.get(s["provider"], "cli")
         P(f"    {r['name']:<10} {s['access']:<7} {s['trigger']:<10} "
-          f"{s['model']}{' @ ' + s['effort'] if s['effort'] else ''}  "
+          f"{s['provider']} · {shown_model}{' @ ' + s['effort'] if s['effort'] else ''}  "
           f"{c['CD']}{persona}{c['C0']}{playbook}")
     P(f"    {'founder':<10} {c['CD']}(human — gates ◆){c['C0']}")
 

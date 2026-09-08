@@ -721,7 +721,7 @@ class TestPerRoleModelOverride(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r.stdout
 
-    def _run_agent(self, agent, env=None):
+    def _run_agent(self, agent, env=None, stdin_text=None):
         # like _show_config, but WITHOUT DAIS_SHOW_CONFIG — the run must reach the
         # auth:api preflight (which sits after the config seam), not stop at it.
         e = dict(os.environ)
@@ -730,7 +730,8 @@ class TestPerRoleModelOverride(CliTest):
         if env:
             e.update(env)
         return subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", agent],
-                              capture_output=True, text=True, env=e, cwd=self.root)
+                              capture_output=True, text=True, env=e, cwd=self.root,
+                              input=stdin_text)
 
     def test_role_override_beats_project_default(self):
         qa = self._show_config("qa")
@@ -793,6 +794,74 @@ class TestPerRoleModelOverride(CliTest):
         self.assertIn("provider=gemini", out)      # resolution passes it through
         r = self._run_agent("qa")                  # the run itself fails, named
         self.assertIn("no adapter for provider 'gemini'", r.stdout + r.stderr)
+
+    # --- provider CLI preflight + the codex adapter, exercised with a controlled PATH ---------
+    # A bin dir holding ONLY what run-agent needs (the real python3, sqlite3, git) plus an
+    # optional fake `codex`; PATH = that dir + /usr/bin:/bin, so the real provider CLIs
+    # (Homebrew / ~/.local/bin) are invisible and the test decides what "installed" means.
+    def _tmpbin(self, fake_codex=None):
+        import sys
+        b = tempfile.mkdtemp(prefix="dais-bin-")
+        self.addCleanup(shutil.rmtree, b, ignore_errors=True)
+        os.symlink(sys.executable, os.path.join(b, "python3"))
+        for tool in ("sqlite3", "git"):
+            os.symlink(shutil.which(tool), os.path.join(b, tool))
+        if fake_codex is not None:
+            p = os.path.join(b, "codex")
+            with open(p, "w") as fh:
+                fh.write("#!/bin/bash\n" + fake_codex)
+            os.chmod(p, 0o755)
+        return "%s:/usr/bin:/bin" % b
+
+    def _set_role(self, agent, fm):
+        with open(os.path.join(self.root, "projects", "demo", "agents", agent + ".md"), "w") as f:
+            f.write("---\n%s---\npersona\n" % fm)
+
+    def test_openai_role_without_codex_cli_fails_before_recording_a_run(self):
+        self._set_role("qa", "provider: openai\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin()})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("codex", r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT COUNT(*) FROM runs")[0], 0)   # nothing recorded
+
+    def test_anthropic_role_without_claude_cli_fails_before_recording_a_run(self):
+        self._set_role("qa", "")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin()})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("claude", r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT COUNT(*) FROM runs")[0], 0)
+
+    def test_openai_top_level_error_marks_run_failed(self):
+        # codex exits 0 on an API error (e.g. a model the ChatGPT plan can't use); the run
+        # must still land as 'failed', never as a 'succeeded' no-op the throttle then parks.
+        fake = ('echo \'{"type":"thread.started","thread_id":"t"}\'\n'
+                'echo \'{"type":"turn.started"}\'\n'
+                'echo \'{"type":"error","message":"The x model is not supported"}\'\n'
+                'exit 0\n')
+        self._set_role("qa", "provider: openai\nmodel: x\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # run-agent itself completes
+        self.assertEqual(q(self.root, "SELECT status FROM runs ORDER BY id DESC LIMIT 1")[0], "failed")
+
+    def test_openai_adapter_passes_model_effort_and_ephemeral(self):
+        argv = os.path.join(self.root, "codex-argv")
+        fake = ('printf "%s\\n" "$@" > "' + argv + '"\n'
+                # codex prints "Reading additional input from stdin..." and can block on an
+                # inherited terminal; the adapter must hand it a closed stdin
+                'if read -r _x; then echo stdin=open >> "' + argv + '"; else echo stdin=closed >> "' + argv + '"; fi\n'
+                'echo \'{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"ok"}}\'\n'
+                'echo \'{"type":"turn.completed","usage":{}}\'\n')
+        self._set_role("qa", "provider: openai\nmodel: gpt-5.4\neffort: low\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake)}, stdin_text="stray terminal input\n")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        args = open(argv).read().split("\n")
+        self.assertIn("stdin=closed", args)
+        self.assertIn("exec", args)
+        self.assertIn("--json", args)
+        self.assertIn("--ephemeral", args)            # no session piles up in ~/.codex per headless run
+        self.assertEqual(args[args.index("-m") + 1], "gpt-5.4")
+        self.assertIn("model_reasoning_effort=low", args)
+        self.assertEqual(q(self.root, "SELECT status FROM runs ORDER BY id DESC LIMIT 1")[0], "succeeded")
 
 
 class TestWorkspaceContextInjection(CliTest):
@@ -982,6 +1051,26 @@ class TestRoleNew(CliTest):
         self.assertIn("playbook: legal", body)
         self.assertIn("research memo", body)
         self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", "roles")))
+
+    def test_writes_provider_when_the_designer_picks_one(self):
+        # the generator is told the provider choice (anthropic | openai) — a role it puts on
+        # codex must land in frontmatter, or the choice silently evaporates to the default
+        dais(self.root, "scaffold", "demo")
+        prop = ("name: reviewer\ntrigger: reactive\nprec: 6\nplaybook: code\n"
+                "provider: openai\nmodel: gpt-5.4\neffort: \n---\n# Reviewer\nbody\n")
+        r = dais(self.root, "role", "new", "demo", "--desc", "x", "--yes",
+                 env={"DAIS_ROLE_GEN": self._gen_stub(prop)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        body = open(os.path.join(self.root, "projects", "demo", "agents", "reviewer.md")).read()
+        self.assertIn("provider: openai\n", body)
+        self.assertIn("model: gpt-5.4\n", body)
+
+    def test_generator_prompt_offers_the_provider_choice(self):
+        # the stub echoes the prompt it was given (DAIS_ROLE_GEN gets it on stdin? no — via
+        # argv-less claude -p; the harness passes nothing) so assert on the prompt text the
+        # CLI builds instead: it must mention both providers
+        src = open(os.path.join(self.root, "dais")).read()
+        self.assertIn("provider: <anthropic|openai", src)
 
     def test_rejects_bad_name_writes_nothing(self):
         dais(self.root, "scaffold", "demo")

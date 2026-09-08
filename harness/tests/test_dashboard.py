@@ -221,6 +221,51 @@ class TestFmtStreamProvider(unittest.TestCase):
         self.assertIn("💬", log)                    # the agent_message mapped
         self.assertIn("✓", log)                     # turn completion mapped
 
+    def _run_openai(self, lines):
+        with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+            logpath = lf.name
+        self.addCleanup(os.unlink, logpath)
+        r = subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"),
+                            logpath, "--provider", "openai"],
+                           input="".join(json.dumps(x) + "\n" for x in lines),
+                           capture_output=True, text=True)
+        return r.returncode, open(logpath).read()
+
+    def test_fmt_stream_openai_clean_stream_exits_zero(self):
+        rc, _log = self._run_openai([
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": "ok"}},
+            {"type": "turn.completed", "usage": {}}])
+        self.assertEqual(rc, 0)
+
+    def test_fmt_stream_openai_top_level_error_fails_the_run(self):
+        # codex exits 0 even when the turn dies on an API error (e.g. a model the ChatGPT
+        # account can't use) — without this, run-agent scored such a run 'succeeded' with no
+        # task changes and the no-op throttle parked the role. The formatter is the seam
+        # that sees the event: log it loud and exit nonzero so pipefail marks the run failed.
+        rc, log = self._run_openai([
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "turn.started"},
+            {"type": "error", "message": "The 'nope' model is not supported with a ChatGPT account."}])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("✗", log)
+        self.assertIn("not supported", log)
+
+    def test_fmt_stream_openai_item_error_is_a_warning_not_a_failure(self):
+        # an item-level error (codex's 'model metadata not found, using fallback') is
+        # advisory — the turn continues — so it surfaces but must not fail the run
+        rc, log = self._run_openai([
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "item.completed", "item": {"id": "i0", "type": "error",
+                                                 "message": "Model metadata for `x` not found."}},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "i1", "type": "agent_message", "text": "ok"}},
+            {"type": "turn.completed", "usage": {}}])
+        self.assertEqual(rc, 0)
+        self.assertIn("⚠", log)
+        self.assertIn("metadata", log)
+
     def test_fmt_stream_default_is_anthropic_unchanged(self):
         # a claude stream-json line still maps (regression: the provider arg is additive)
         line = json.dumps({"type": "assistant",
@@ -984,6 +1029,36 @@ class TestRenderProjectCast(unittest.TestCase):
             out = d.render_project(root, "p", color=False)
             self.assertIn("qa", out)
             self.assertIn("claude-haiku-4-5", out)
+
+    def test_render_project_cast_names_each_roles_provider(self):
+        # a mixed cast (a codex role beside claude roles) must be readable at a glance —
+        # the model id alone is the only hint otherwise, and `dais project` is where a
+        # founder checks what a role will actually run on
+        with tempfile.TemporaryDirectory() as root:
+            pdir = os.path.join(root, "projects", "p")
+            os.makedirs(os.path.join(pdir, "agents"))
+            with open(os.path.join(pdir, "project.yaml"), "w") as f:
+                f.write("project: p\nrepo: x\nstage_goal: g\nmodel: claude-opus-4-8\n")
+            with open(os.path.join(pdir, "agents", "qa.md"), "w") as f:
+                f.write("---\nprovider: openai\nmodel: gpt-5.4\n---\npersona\n")
+            with open(os.path.join(pdir, "agents", "engineer.md"), "w") as f:
+                f.write("persona\n")
+            out = d.render_project(root, "p", color=False)
+            self.assertIn("openai · gpt-5.4", out)
+            self.assertIn("anthropic · claude-opus-4-8", out)
+
+    def test_render_project_names_the_cli_default_when_a_role_sets_no_model(self):
+        # openai has no tool-side default model (the codex CLI's own config decides) — an
+        # empty cell read as `openai ·  @ high`; say what actually happens instead
+        with tempfile.TemporaryDirectory() as root:
+            pdir = os.path.join(root, "projects", "p")
+            os.makedirs(os.path.join(pdir, "agents"))
+            with open(os.path.join(pdir, "project.yaml"), "w") as f:
+                f.write("project: p\nrepo: x\nstage_goal: g\n")
+            with open(os.path.join(pdir, "agents", "qa.md"), "w") as f:
+                f.write("---\nprovider: openai\n---\npersona\n")
+            out = d.render_project(root, "p", color=False)
+            self.assertIn("openai · (codex default)", out)
 
 
 if __name__ == "__main__":

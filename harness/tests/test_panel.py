@@ -884,6 +884,26 @@ class TestInspectorModelLine(unittest.TestCase):
         self.assertIn("claude-opus-4-8", body)
         self.assertNotIn("claude-fable-5", body)
 
+    def test_inspector_names_the_provider_a_role_runs_on(self):
+        # a role switched to codex (frontmatter provider: openai) must read as such in the
+        # inspector — "runs as qa · openai · gpt-5.4", not a bare model id
+        papp = self._papp("qa_review", self.YAML)
+        adir = os.path.join(papp.root, "projects", "p", "agents")
+        os.makedirs(adir, exist_ok=True)
+        with open(os.path.join(adir, "qa.md"), "w") as fh:
+            fh.write("---\nprovider: openai\nmodel: gpt-5.4\n---\npersona\n")
+        body = "\n".join(pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1]))
+        self.assertIn("runs as qa · openai · gpt-5.4", body)
+
+    def test_inspector_names_the_cli_default_when_a_codex_role_sets_no_model(self):
+        papp = self._papp("qa_review", "project: p\nrepo: p\n")
+        adir = os.path.join(papp.root, "projects", "p", "agents")
+        os.makedirs(adir, exist_ok=True)
+        with open(os.path.join(adir, "qa.md"), "w") as fh:
+            fh.write("---\nprovider: openai\n---\npersona\n")
+        body = "\n".join(pn._panel_detail_lines(papp, papp._selected(papp.left_rows())[1]))
+        self.assertIn("runs as qa · openai · (codex default)", body)
+
     def test_parked_state_shows_no_model_line(self):
         # approved parks (no dispatch role) -> no "runs as" line
         papp = self._papp("approved", self.YAML)

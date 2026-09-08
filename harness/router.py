@@ -9,9 +9,11 @@
 # pending task's state (machine.next_role; edges own state->role, nothing is hardcoded here).
 # When no reactive work is pending, cadence roles (`trigger: every:Nh`) run on their clock for
 # periodic discovery; `trigger: none` is dormancy and outranks both. Else idle.
-import sys, os, sqlite3, re
+import sys, os, sqlite3, re, shutil
 
 VALID_ACCESS = {"edit", "review", "draft", "none"}
+# provider -> the CLI its adapter execs (run-agent.sh run_agent_<provider>); lint checks PATH
+PROVIDER_CLI = {"anthropic": "claude", "openai": "codex"}
 
 
 def parse_roles(path):
@@ -358,6 +360,11 @@ def lint_project(root, project):
         if raw_conc and s["concurrency"] == "1" and raw_conc != "1":
             warnings.append("role '%s': concurrency '%s' is not an integer 1..5 — treated as 1 "
                             "(serial)" % (r["name"], raw_conc))
+        cli = PROVIDER_CLI.get(s["provider"])
+        if cli and s["trigger"] != "none" and not shutil.which(cli):
+            warnings.append("role '%s': provider %s needs `%s`, which is not on PATH — every "
+                            "dispatch of this role fails at preflight until it is installed"
+                            % (r["name"], s["provider"], cli))
         if int(s["concurrency"]) > 1 and s["trigger"].startswith("every:"):
             warnings.append("role '%s': concurrency %s on a CADENCE role — cadence roles groom "
                             "shared state (queues, digests); parallel runs duplicate and conflict. "

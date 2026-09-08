@@ -393,6 +393,32 @@ class TestLintTransitionWarnings(unittest.TestCase):
         _, warns = router.lint_project(self.root, "demo")
         self.assertTrue(any("legacy roles file" in w for w in warns))
 
+    def _with_path(self, path):
+        old = os.environ.get("PATH", "")
+        os.environ["PATH"] = path
+        self.addCleanup(os.environ.__setitem__, "PATH", old)
+
+    def test_warns_when_a_roles_provider_cli_is_not_installed(self):
+        # a role on provider openai needs `codex` on PATH; without it the run dies at
+        # preflight every tick, so say so at lint time (the founder's first stop)
+        self._agent("qa", "provider: openai\n")
+        self._with_path("/nonexistent-bin")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("codex" in w and "qa" in w for w in warns), warns)
+
+    def test_no_provider_cli_warning_when_installed(self):
+        b = tempfile.mkdtemp(prefix="dais-bin-")
+        self.addCleanup(shutil.rmtree, b, ignore_errors=True)
+        for cli in ("codex", "claude"):
+            with open(os.path.join(b, cli), "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(os.path.join(b, cli), 0o755)
+        self._agent("qa", "provider: openai\n")
+        self._agent("engineer")
+        self._with_path(b)
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertFalse(any("not on PATH" in w for w in warns), warns)
+
     def test_warns_on_legacy_suffix_keys_and_active_agents(self):
         with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
             f.write("model_qa: claude-haiku-4-5\nactive_agents: qa engineer\n")

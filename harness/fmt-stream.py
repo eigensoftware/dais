@@ -64,11 +64,24 @@ def handle_anthropic(e):
 #                                    "command":...,"aggregated_output":...,"exit_code":...}}
 #   {"type":"turn.completed","usage":{...}}
 # note: item's own type key is "type" (not "item_type" as first sketched).
+# codex exits 0 even when the turn dies on a top-level {"type":"error"} (e.g. a model the
+# ChatGPT account can't use). Without a signal, run-agent scored such runs 'succeeded' with
+# no task changes and the no-op throttle parked the role. This formatter is the one seam that
+# sees the event: log it loud and exit 1 at end of stream (pipefail carries it to run-agent,
+# which marks the run failed). Item-level errors are advisory (the turn continues) — warn only.
+FAILED = False
+
 def handle_openai(e):
+    global FAILED
     t = e.get("type", "")
     item = e.get("item", {}) or {}
     it = item.get("type") or ""
-    if t == "item.completed" and it == "agent_message":
+    if t == "error":
+        FAILED = True
+        emit("  ✗ error: " + brief(e.get("message", ""), 400), "red")
+    elif t == "item.completed" and it == "error":
+        emit("  ⚠ " + brief(item.get("message", ""), 400), "yellow")
+    elif t == "item.completed" and it == "agent_message":
         emit("  💬 " + brief(item.get("text", ""), 400), "cyan")
     elif t == "item.completed" and it == "command_execution":
         emit("  🔧 shell %s" % brief(item.get("command", "")), "yellow")
@@ -97,3 +110,5 @@ for raw in iter(sys.stdin.readline, ""):
         handle_openai(e) if PROVIDER == "openai" else handle_anthropic(e)
     except Exception:
         emit("  " + raw)
+
+sys.exit(1 if FAILED else 0)

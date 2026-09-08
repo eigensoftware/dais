@@ -48,6 +48,17 @@ if [ "${DAIS_SHOW_CONFIG:-0}" = 1 ]; then
   echo "model=$MODEL effort=$EFF provider=$PROVIDER auth=$AUTH access=$ACCESS playbook=$PB trigger=$TRIG prec=$PREC"; exit 0
 fi
 
+# Provider CLI preflight — the role's adapter needs its CLI on PATH. Fail here, named, BEFORE
+# the git fetch and before a run row exists: a missing `codex` used to surface as exit 127
+# deep in the pipeline, recorded as a failed run that then fed the error-backoff gate. The
+# DAIS_NOOP_RUN test seam stands in for the CLI, so it is exempt.
+if [ -z "${DAIS_NOOP_RUN:-}" ]; then
+  case "$PROVIDER" in
+    anthropic) need claude "install Claude Code (https://claude.com/claude-code) — role '$AGENT' runs on provider anthropic";;
+    openai)    need codex  "install OpenAI's codex CLI (npm i -g @openai/codex) and 'codex login' — role '$AGENT' runs on provider openai";;
+  esac
+fi
+
 # auth:api preflight — fail fast, before any network/claude work (git fetch is right below),
 # if the provider's key isn't set anywhere (process env / ~/.dais/env / $DAIS_HOME/.env).
 if [ "$AUTH" = "api" ]; then
@@ -307,13 +318,16 @@ run_agent_openai(){
     sandbox_flags=(--sandbox workspace-write
                    -c 'sandbox_workspace_write.writable_roots=["'"$DAIS_HOME"'"]')
   fi
-  codex exec --json --skip-git-repo-check --cd "$WORKDIR" \
+  # --ephemeral: a headless run is not a session to resume — don't pile one into ~/.codex per tick.
+  # </dev/null: codex "reads additional input from stdin" until EOF — under an interactive
+  # `dais watch` that is the founder's terminal, so a run would sit waiting on a keypress.
+  codex exec --json --ephemeral --skip-git-repo-check --cd "$WORKDIR" \
         ${MODEL:+-m "$MODEL"} \
         ${EFF:+-c model_reasoning_effort="$EFF"} \
         "${sandbox_flags[@]}" \
         "$STANDING
 
-$PERSONA" 2>&1 \
+$PERSONA" </dev/null 2>&1 \
         | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG" --provider openai
 }
 

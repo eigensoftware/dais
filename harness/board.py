@@ -214,6 +214,13 @@ def agent_model(root, project, agent):
     return s["model"], s["effort"]
 
 
+def agent_provider(root, project, agent):
+    """The provider a run will actually use (anthropic | openai | …), through the same
+    authority as agent_model — so a role switched to codex reads as such everywhere."""
+    import router
+    return router.agent_setup(root, project, agent)["provider"]
+
+
 def stage_goal(root, name):
     return project_field(root, name, "stage_goal")
 

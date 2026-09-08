@@ -258,6 +258,15 @@ auth: api                # subscription (default, CLI login) | api (metered)
 ---
 ```
 
+A mixed cast is the normal case: put `provider: openai` in ONE role's frontmatter and the rest
+of the project stays on claude. `dais project <name>` shows each role's provider next to its
+model; `dais top`'s inspector reads `runs as qa · openai · gpt-5.4`; `dais role new` asks the
+designer which provider a new role runs on. `dais lint` warns when a role's provider CLI is not
+on PATH, and a run refuses to start (recording nothing) until it is. A codex turn that dies on an
+API error, such as a model id your ChatGPT plan can't use, is recorded as a `failed` run, not a
+silent success. Codex runs are `--ephemeral` (no session piles up in `~/.codex` per tick), but
+they DO read your `~/.codex/config.toml`: a `notify` hook there fires on every headless run.
+
 Resolution (frontmatter → legacy roles file → `project.yaml` → defaults) is one authority,
 `router.agent_setup`, read by every consumer (the scheduler, `run-agent.sh`, `dais project`).
 **Model keys are provider-scoped:** a project-wide `model:` in `project.yaml` only applies to

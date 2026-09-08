@@ -376,7 +376,11 @@ def _panel_detail_lines(app, sel_row):
     role = MC.dispatch_role(p.machine, task.status)     # who the machine launches from this state
     if role:
         model, eff = d.agent_model(app.root, p.name, role)
-        out.append(f"runs as {role} · {model}" + (f" · effort {eff}" if eff else ""))
+        prov = d.agent_provider(app.root, p.name, role)
+        # an empty model on a codex role means the CLI's own config picks — name that, mirroring
+        # dashboard.render_project, rather than render `openai ·  · effort low`
+        model = model or "(%s default)" % d.router.PROVIDER_CLI.get(prov, "cli")
+        out.append(f"runs as {role} · {prov} · {model}" + (f" · effort {eff}" if eff else ""))
     elif MC.band_of(p.machine, task.status) == "NEEDS YOU":
         # a founder gate answers "did my fire take?" persistently: this line exists ONLY while
         # the gate is still open — the moment an edge lands, status moves and it disappears.
