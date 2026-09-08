@@ -121,7 +121,10 @@ mkdir -p "$PDIR/logs"
 TS="$(date +%Y%m%d-%H%M%S)"; LOG="$PDIR/logs/$AGENT-$TS.log"
 # record the resolved model with the run (migration 0006); fall back to the legacy shape on a
 # dais.db that hasn't run `dais migrate` yet — run recording must never break on a schema gap.
-RUNID="$(db "INSERT INTO runs(project,agent,log_path,model) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")'); SELECT last_insert_rowid();" 2>/dev/null)"
+# Three shapes, newest first: +provider (0007, the per-provider cap gate reads it), +model
+# (0006), legacy. Each falls back to the next on a schema gap.
+RUNID="$(db "INSERT INTO runs(project,agent,log_path,model,provider) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")','$(sqlesc "$PROVIDER")'); SELECT last_insert_rowid();" 2>/dev/null)"
+[ -n "$RUNID" ] || RUNID="$(db "INSERT INTO runs(project,agent,log_path,model) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")'); SELECT last_insert_rowid();" 2>/dev/null)"
 [ -n "$RUNID" ] || RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")'); SELECT last_insert_rowid();")"
 # Pin the task onto the run row (best-effort metadata; the run is already recorded). Separate
 # UPDATE, not part of the INSERT, so the dual-INSERT schema-gap fallback above stays untouched.

@@ -138,8 +138,8 @@ def render_plain(snap, color=None):
         else:
             P(f"  {c['CD']}▶ idle{c['C0']}")
         if snap.cap_state:
-            P(f"  {c['CY']}⏸ cooling down — recent cap "
-              f"(resumes when the window frees){c['C0']}")
+            P(f"  {c['CY']}⏸ cooling down — {', '.join(snap.cooling) or 'recent'} capped "
+              f"(that provider's roles wait for its window; others still run){c['C0']}")
         # auto-fallback: a role whose primary model (e.g. Fable) hit the usage limit runs on its
         # backup until the window resets — surface it so it's clear you're off the primary model.
         pdir = os.path.join(HOME, "projects", p.name)

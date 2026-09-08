@@ -103,9 +103,11 @@ class Project:
 class Snapshot:
     projects: list
     recent_runs: list
-    cap_state: bool
+    cap_state: bool                # any provider cooling (= bool(cooling)); kept for callers
     ts: str
     workspace: str = None          # workspace identity (dais.yaml `workspace:`), or None
+    cooling: list = field(default_factory=list)  # providers the dispatcher's cap gate is holding
+                                                 # (['all'] on a db without runs.provider)
     links: list = field(default_factory=list)   # composition graph: (parent_id, child_id, rel)
                                                 # rows from task_links; [] pre-migration
     archived: list = field(default_factory=list)  # projects hidden from the board (`archived: true`
@@ -379,19 +381,30 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
     # Mirror the dispatcher's cap gate (dispatch.sh): a success AFTER the last cap proves the
     # window is back, so only count caps newer than the latest success. Without this the badge
     # shows COOLING for the full 90m even after the loop has already resumed dispatching.
-    capped = conn.execute(
-        "SELECT COUNT(*) c FROM runs WHERE status='capped' "
-        "AND started_at > datetime(?, '-90 minutes') "
-        "AND started_at > COALESCE((SELECT MAX(started_at) FROM runs "
-        "WHERE status='succeeded'), '')", (now,)).fetchone()["c"]
+    # Per PROVIDER (runs.provider, 0007), exactly like the gate: a cap counts only against the
+    # provider that hit it, and only that provider's later success clears it. NULL = anthropic.
+    try:
+        cooling = [r["p"] for r in conn.execute(
+            "SELECT DISTINCT COALESCE(r.provider,'anthropic') p FROM runs r WHERE r.status='capped' "
+            "AND r.started_at > datetime(?, '-90 minutes') "
+            "AND r.started_at > COALESCE((SELECT MAX(s.started_at) FROM runs s "
+            "WHERE s.status='succeeded' AND COALESCE(s.provider,'anthropic')="
+            "COALESCE(r.provider,'anthropic')), '') ORDER BY p", (now,))]
+    except sqlite3.OperationalError:            # pre-0007 db: providers indistinguishable
+        capped = conn.execute(
+            "SELECT COUNT(*) c FROM runs WHERE status='capped' "
+            "AND started_at > datetime(?, '-90 minutes') "
+            "AND started_at > COALESCE((SELECT MAX(started_at) FROM runs "
+            "WHERE status='succeeded'), '')", (now,)).fetchone()["c"]
+        cooling = ["all"] if capped else []
     try:                        # composition graph (task_links, migration 0003); [] pre-migration
         links = [(r["parent_id"], r["child_id"], r["rel"]) for r in
                  conn.execute("SELECT parent_id, child_id, rel FROM task_links ORDER BY id")]
     except sqlite3.Error:
         links = []
     return Snapshot(projects=projects, recent_runs=recent_runs,
-                    cap_state=capped > 0, ts=now, workspace=workspace_name(root),
-                    links=links, archived=archived)
+                    cap_state=bool(cooling), cooling=cooling, ts=now,
+                    workspace=workspace_name(root), links=links, archived=archived)
 
 
 def load_runs(conn, limit=200):

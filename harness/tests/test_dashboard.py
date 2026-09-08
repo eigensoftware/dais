@@ -17,7 +17,8 @@ SCHEMA = """
 CREATE TABLE tasks(id TEXT, project TEXT, title TEXT, status TEXT, assignee TEXT,
   priority TEXT, pr_url TEXT, notes TEXT, updated_at TEXT);
 CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,
-  task_id TEXT, status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT);
+  task_id TEXT, status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT,
+  provider TEXT);
 """
 
 
@@ -344,9 +345,34 @@ class TestDataLayer(unittest.TestCase):
                      "VALUES('acme','qa','capped','/tmp/c2.log','2026-06-26 20:44:00')")
         snap2 = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
         self.assertTrue(snap2.cap_state)
+        self.assertEqual(snap2.cooling, ["anthropic"])   # NULL provider = the Claude era
         # ... but only for 90 minutes
         snap3 = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 23:59:00")
         self.assertFalse(snap3.cap_state)
+        self.assertEqual(snap3.cooling, [])
+
+    def test_snapshot_cooling_names_only_the_capped_provider(self):
+        # a codex cap after a Claude success cools openai alone — mirrors dispatch.sh's
+        # per-provider gate, so the badge can't claim Claude is cooling when it isn't
+        conn = _seed()
+        conn.execute("INSERT INTO runs(project,agent,status,log_path,started_at,provider) "
+                     "VALUES('acme','qa','capped','/tmp/c3.log','2026-06-26 20:44:00','openai')")
+        snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertEqual(snap.cooling, ["openai"])
+        self.assertTrue(snap.cap_state)
+        out = d.render_plain(snap, color=False)
+        self.assertIn("cooling down", out)
+        self.assertIn("openai", out)
+
+    def test_snapshot_cooling_on_a_db_without_the_provider_column(self):
+        # pre-0007 db: the gate can't tell providers apart, so it cools everything — say so
+        conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA.replace(",\n  provider TEXT", ""))
+        conn.execute("INSERT INTO runs(project,agent,status,log_path,started_at) "
+                     "VALUES('acme','qa','capped','/tmp/c.log','2026-06-26 20:44:00')")
+        snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertTrue(snap.cap_state)
+        self.assertEqual(snap.cooling, ["all"])
 
     def test_snapshot_run_duration(self):
         conn = _seed()

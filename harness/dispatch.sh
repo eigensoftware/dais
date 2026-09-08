@@ -84,31 +84,46 @@ if [ "$DRY" = 0 ]; then
   done
 fi
 
-# --- capacity gate: cool down after a recent cap hit (window resets every ~5h). A run that
-#     SUCCEEDED after the last capped run is proof the window is back — e.g. a manual
-#     `dais run` after the reset — so only caps newer than the latest success count; without
-#     this the loop sat parked up to 90m past an already-reset window. ---
-capped_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='capped'
-                     AND started_at > datetime('now','-90 minutes')
-                     AND started_at > COALESCE((SELECT MAX(started_at) FROM runs
-                                                WHERE status='succeeded'), '');")"
-if [ "${capped_recent:-0}" -gt 0 ]; then
-  tlog "cap cooldown ($capped_recent capped run(s) in 90m)"
-  echo "${CY}tick: hit the subscription cap within 90 min — cooling down until the window frees up${C0}"; exit 20
+# --- capacity gates, scoped PER PROVIDER (runs.provider, migration 0007). Two sets, computed
+#     once per tick and applied per candidate role in the eligible loop below (a cooled
+#     provider's roles are SKIPPED like the no-op throttle skips a role — everything else
+#     still dispatches). They were workspace-wide: one Claude window cap parked codex roles
+#     whose ChatGPT allotment was untouched, and vice versa.
+#     COOLING: providers with a capped run in 90m (the window resets every ~5h) NEWER than
+#       that provider's latest success — a success after the cap proves ITS window is back
+#       (a codex success says nothing about Claude's), so the loop resumes at once.
+#     BACKOFF: providers with 2+ failed runs in 30m newer than their latest success — don't
+#       spin on a persistent fault (execution error, outage); a success after it clears it.
+#     Pre-0007 rows are NULL and read as anthropic (every historical run was Claude). A db
+#     with no provider column at all can't tell providers apart -> 'all' = the old global gate. ---
+COOLING=""; BACKOFF=""
+if [ -n "$(db "SELECT 1 FROM pragma_table_info('runs') WHERE name='provider';" 2>/dev/null)" ]; then
+  COOLING="$(db "SELECT DISTINCT COALESCE(r.provider,'anthropic') FROM runs r WHERE r.status='capped'
+                 AND r.started_at > datetime('now','-90 minutes')
+                 AND r.started_at > COALESCE((SELECT MAX(s.started_at) FROM runs s WHERE s.status='succeeded'
+                       AND COALESCE(s.provider,'anthropic')=COALESCE(r.provider,'anthropic')), '')
+                 ORDER BY 1;" | paste -sd, -)"
+  BACKOFF="$(db "SELECT p FROM (SELECT COALESCE(r.provider,'anthropic') p, COUNT(*) n FROM runs r
+                 WHERE r.status='failed' AND r.started_at > datetime('now','-30 minutes')
+                 AND r.started_at > COALESCE((SELECT MAX(s.started_at) FROM runs s WHERE s.status='succeeded'
+                       AND COALESCE(s.provider,'anthropic')=COALESCE(r.provider,'anthropic')), '')
+                 GROUP BY p) WHERE n >= 2 ORDER BY p;" | paste -sd, -)"
+else
+  n="$(db "SELECT COUNT(*) FROM runs WHERE status='capped' AND started_at > datetime('now','-90 minutes')
+           AND started_at > COALESCE((SELECT MAX(started_at) FROM runs WHERE status='succeeded'), '');")"
+  [ "${n:-0}" -gt 0 ] && COOLING="all"
+  n="$(db "SELECT COUNT(*) FROM runs WHERE status='failed' AND started_at > datetime('now','-30 minutes')
+           AND started_at > COALESCE((SELECT MAX(started_at) FROM runs WHERE status='succeeded'), '');")"
+  [ "${n:-0}" -ge 2 ] && BACKOFF="all"
 fi
-
-# --- error backoff: don't spin on a persistent failure (Execution error, transient outage). A run
-#     that SUCCEEDED after the last failure is proof the fault cleared (e.g. an out-of-credits model
-#     was swapped back to a working one) — only failures newer than the latest success count, so a
-#     recovered loop resumes at once instead of sitting parked the full 30m. ---
-fail_recent="$(db "SELECT COUNT(*) FROM runs WHERE status='failed'
-                   AND started_at > datetime('now','-30 minutes')
-                   AND started_at > COALESCE((SELECT MAX(started_at) FROM runs
-                                              WHERE status='succeeded'), '');")"
-if [ "${fail_recent:-0}" -ge 2 ]; then
-  tlog "error backoff ($fail_recent failed run(s) in 30m)"
-  echo "${CY}tick: 2+ failed runs in last 30 min — backing off (check the latest log; will retry later)${C0}"; exit 20
-fi
+[ -n "$COOLING" ] && tlog "cap cooldown: $COOLING"
+[ -n "$BACKOFF" ] && tlog "error backoff: $BACKOFF"
+# provider_gate <provider> -> prints why this provider is withheld this tick ('' = free to run)
+provider_gate(){
+  case ",$COOLING," in *",$1,"*|*",all,"*) echo "cooling — $1 hit its usage cap within 90m"; return;; esac
+  case ",$BACKOFF," in *",$1,"*|*",all,"*) echo "backing off — 2+ failed $1 runs in 30m";; esac
+}
+withheld=0   # candidates a provider gate skipped this tick (paces the exit code below)
 
 # --- parallel width: how many agents may run at once (default 1 = serial, today's behavior).
 #     Set by `dais watch <interval> <N>` via DAIS_MAX_PARALLEL; clamped to 1..5. ---
@@ -190,6 +205,19 @@ for proj in "${projects[@]}"; do
     # with zero diagnostics anywhere. The journal is exactly the "why didn't it launch?" record.
     cand="$(python3 "$SELF/router.py" "$DAIS_HOME" "$proj" "$excl" "$livespec" 2>>"$TLOG")"
     [ -z "$cand" ] && break
+    # provider gate (see the capacity gates above): only resolve the role's provider when some
+    # provider is actually cooling/backing off — it costs a python startup per candidate.
+    if [ -n "$COOLING$BACKOFF" ]; then
+      cprov="$(python3 "$SELF/router.py" --agent-config "$DAIS_HOME" "$proj" "$cand" 2>/dev/null | sed -n 's/^provider=//p')"
+      gate="$(provider_gate "${cprov:-anthropic}")"
+      if [ -n "$gate" ]; then
+        withheld=$((withheld+1))
+        tlog "$gate; skipping $proj/$cand"
+        echo "${CY}tick[$proj]: $gate — skipping $cand${C0}"
+        excl="${excl:+$excl,}$cand"
+        continue
+      fi
+    fi
     sm="$DAIS_HOME/projects/$proj/.stalled-$cand"
     if [ -f "$sm" ]; then
       if [ -n "$(find "$sm" -mmin +360 2>/dev/null)" ]; then
@@ -308,5 +336,8 @@ fi
 if [ "$launched" -gt 0 ] || [ "$running" -gt 0 ]; then
   [ "$launched" = 0 ] && echo "${CD}tick: pool full ($running/$MAX running) — waiting for a slot${C0}"
   exit 0
+fi
+if [ "$withheld" -gt 0 ]; then
+  echo "${CY}tick: a provider gate withheld $withheld launch(es) — cooling until its window frees up${C0}"; exit 20
 fi
 echo "tick: nothing to run this round"; exit 10

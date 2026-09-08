@@ -367,6 +367,20 @@ class TestChromePanes(unittest.TestCase):
         self.assertNotIn("LIVE", text)        # no hardcoded LIVE contradicting the watch badge
         self.assertNotIn("5h", text)          # NO fake budget bar
 
+    def test_vitals_cooling_badge_names_the_provider(self):
+        app = self._app([("cou-1", "acme", "x", "proposed", "high", None)])
+        try:
+            app.conn.execute("ALTER TABLE runs ADD COLUMN provider TEXT")
+        except Exception:
+            pass
+        app.conn.execute("INSERT INTO runs(project,agent,status,started_at,provider) "
+                         "VALUES('acme','qa','capped',datetime('now'),'openai')")
+        app.snap = d.load_snapshot(app.conn, root=app.root)
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("COOLING openai", text)
+
     def test_vitals_shows_the_build_top_right(self):
         from unittest import mock
         app = self._app([("cou-1", "acme", "x", "proposed", "high", None)])

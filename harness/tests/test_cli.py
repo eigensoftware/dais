@@ -281,6 +281,87 @@ class TestDepBlockedFire(CliTest):
         self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='a-1'")[0], "doing")
 
 
+class TestProviderScopedGates(CliTest):
+    """The cap-cooldown and error-backoff gates are scoped to the PROVIDER that tripped them.
+    They were workspace-global: one Claude subscription-window cap parked every project for 90
+    minutes, including roles on codex whose ChatGPT allotment was untouched (and a codex rate
+    limit would park Claude). A cooled provider's roles are SKIPPED like the no-op throttle
+    skips a role — the tick still runs whatever else is dispatchable."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "Build it", "--id", "d-1", "--status", "ready")
+
+    def _engineer_on(self, provider):
+        with open(os.path.join(self.root, "projects", "demo", "agents", "engineer.md"), "w") as f:
+            f.write("---\nprovider: %s\n---\npersona\n" % provider)
+
+    def _seed_run(self, status, provider, mins_ago, agent="lead"):
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status,provider) "
+                     "VALUES('demo',?,datetime('now','-%d minutes'),"
+                     "datetime('now','-%d minutes'),?,?)" % (mins_ago, mins_ago),
+                     (agent, status, provider))
+        conn.commit(); conn.close()
+
+    def test_claude_cap_does_not_park_a_codex_role(self):
+        self._engineer_on("openai")
+        self._seed_run("capped", "anthropic", 5)
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run engineer", r.stdout)
+
+    def test_claude_cap_still_parks_claude_roles(self):
+        self._engineer_on("anthropic")
+        self._seed_run("capped", "anthropic", 5)
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run engineer", r.stdout)
+        self.assertIn("cooling", r.stdout)
+        self.assertIn("anthropic", r.stdout)
+
+    def test_legacy_null_provider_rows_count_as_anthropic(self):
+        # every run before migration 0007 was Claude
+        self._engineer_on("anthropic")
+        self._seed_run("capped", None, 5)
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run engineer", r.stdout)
+
+    def test_success_on_the_same_provider_clears_its_cooldown(self):
+        self._engineer_on("anthropic")
+        self._seed_run("capped", "anthropic", 10)
+        self._seed_run("succeeded", "anthropic", 5)
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run engineer", r.stdout)
+
+    def test_success_on_another_provider_does_not_clear_it(self):
+        # a codex run succeeding says nothing about the Claude window
+        self._engineer_on("anthropic")
+        self._seed_run("capped", "anthropic", 10)
+        self._seed_run("succeeded", "openai", 5)
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run engineer", r.stdout)
+
+    def test_error_backoff_is_per_provider(self):
+        self._seed_run("failed", "openai", 5)
+        self._seed_run("failed", "openai", 3)
+        self._engineer_on("anthropic")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run engineer", r.stdout)
+        self._engineer_on("openai")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run engineer", r.stdout)
+        self.assertIn("backing off", r.stdout)
+
+    def test_real_tick_reports_backed_off_only_when_a_cooldown_skipped_work(self):
+        # exit 20 = "backed off" paces `dais watch` to the long interval; it must mean a
+        # cooldown actually withheld a launch, not merely that a cap exists somewhere
+        self._engineer_on("anthropic")
+        self._seed_run("capped", "anthropic", 5)
+        r = dais(self.root, "tick", "demo")
+        self.assertEqual(r.returncode, 20, r.stdout + r.stderr)
+
+
 class TestNoopThrottle(CliTest):
     """A role whose LAST run succeeded recently but touched no tasks is NOT re-dispatched — the
     reactive no-progress throttle. Without it the machine hot-loops a role that keeps declining
@@ -830,6 +911,18 @@ class TestPerRoleModelOverride(CliTest):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("claude", r.stdout + r.stderr)
         self.assertEqual(q(self.root, "SELECT COUNT(*) FROM runs")[0], 0)
+
+    def test_run_row_records_the_provider(self):
+        fake = ('echo \'{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"ok"}}\'\n'
+                'echo \'{"type":"turn.completed","usage":{}}\'\n')
+        self._set_role("qa", "provider: openai\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT provider FROM runs ORDER BY id DESC LIMIT 1")[0], "openai")
+        self._set_role("qa", "")
+        r = self._run_agent("qa", env={"DAIS_NOOP_RUN": "true"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT provider FROM runs ORDER BY id DESC LIMIT 1")[0], "anthropic")
 
     def test_openai_top_level_error_marks_run_failed(self):
         # codex exits 0 on an API error (e.g. a model the ChatGPT plan can't use); the run

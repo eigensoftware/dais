@@ -643,7 +643,7 @@ def render_vitals(scr, rect, app):
         badge = "PAUSED" if wstate == "paused" else "watch stopped"
     nproj = len(snap.projects) if snap else 0
     ng = d.gate_count(snap, running_ids) if snap else 0
-    cool = " · COOLING" if (snap and snap.cap_state) else ""
+    cool = (" · COOLING " + ",".join(snap.cooling)) if (snap and snap.cap_state) else ""
     # yolo (design/yolo-mode.md): governance suspended somewhere -> say so on the always-visible
     # strip, naming the projects. One-off marker read; folds into the snapshot signal unification.
     _yp = [p.name for p in (snap.projects if snap else [])
