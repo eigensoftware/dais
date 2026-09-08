@@ -289,6 +289,30 @@ class TestAgentSetup(unittest.TestCase):
         self.assertEqual(s["trigger"], "reactive")
         self.assertEqual(s["prec"], "50")
 
+    # --- the lean agent profile (plan 1.3): context / mcp / plugins ---------------------------
+    def test_context_defaults_to_lean_and_resolves_like_model(self):
+        self._agent("qa")
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["context"], "lean")
+        with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
+            f.write("context: full\n")
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["context"], "full")
+        self._agent("qa", "context: lean\n")                    # frontmatter wins
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["context"], "lean")
+        self._agent("qa", "context: fulll\n")                   # a typo must not widen the profile
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["context"], "lean")
+
+    def test_mcp_and_plugins_allowlists_are_comma_lists(self):
+        self._agent("qa", "mcp: qmd, gbrain\nplugins: supabase\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual(s["mcp"], "qmd,gbrain")
+        self.assertEqual(s["plugins"], "supabase")
+        self._agent("engineer")
+        s = router.agent_setup(self.root, "demo", "engineer")
+        self.assertEqual((s["mcp"], s["plugins"]), ("", ""))
+        with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
+            f.write("plugins: supabase, superpowers\n")          # project-wide default
+        self.assertEqual(router.agent_setup(self.root, "demo", "engineer")["plugins"], "supabase,superpowers")
+
     def test_provider_auth_defaults_and_frontmatter(self):
         self._agent("qa", "provider: openai\nauth: api\n")
         s = router.agent_setup(self.root, "demo", "qa")
@@ -365,6 +389,45 @@ class TestCastFromAgents(unittest.TestCase):
         self.assertEqual(router.cast(self.root, "demo"), [])
 
 
+class TestLeanProfileHelpers(unittest.TestCase):
+    """router.mcp_config_json / plugin_dirs: the lean profile's allowlists resolved against the
+    founder's OWN Claude Code install (~/.claude.json user mcpServers; ~/.claude/plugins/cache).
+    HOME is pointed at a fixture so the tests never read the real config."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="dais-home-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = self.home
+        self.addCleanup(os.environ.__setitem__, "HOME", old)
+        import json
+        with open(os.path.join(self.home, ".claude.json"), "w") as f:
+            json.dump({"mcpServers": {"qmd": {"command": "qmd", "args": ["mcp"]},
+                                      "gbrain": {"command": "gbrain", "args": ["mcp"]}}}, f)
+        for plug, vers in (("supabase", ["1.0.0", "1.2.0"]), ("superpowers", ["6.2.0"])):
+            for v in vers:
+                os.makedirs(os.path.join(self.home, ".claude", "plugins", "cache", "official", plug, v))
+
+    def test_mcp_config_holds_only_the_allowlisted_servers(self):
+        import json
+        cfg = json.loads(router.mcp_config_json("qmd"))
+        self.assertEqual(list(cfg["mcpServers"]), ["qmd"])
+        self.assertEqual(cfg["mcpServers"]["qmd"]["command"], "qmd")
+        self.assertEqual(json.loads(router.mcp_config_json(""))["mcpServers"], {})
+
+    def test_unknown_mcp_name_is_reported_not_silently_dropped(self):
+        import json
+        cfg, missing = router.mcp_config_json("qmd,nope", report=True)
+        self.assertEqual(missing, ["nope"])
+        self.assertEqual(list(json.loads(cfg)["mcpServers"]), ["qmd"])
+
+    def test_plugin_dirs_pick_the_newest_cached_version(self):
+        dirs, missing = router.plugin_dirs("supabase,superpowers,ghost")
+        self.assertEqual([os.path.basename(os.path.dirname(d)) for d in dirs], ["supabase", "superpowers"])
+        self.assertTrue(dirs[0].endswith(os.path.join("supabase", "1.2.0")))
+        self.assertEqual(missing, ["ghost"])
+
+
 class TestLintTransitionWarnings(unittest.TestCase):
     """Transition-period lint: legacy-location warnings (roles file, suffix keys,
     active_agents), orphan cast members (agents/<x>.md with no machine role), and
@@ -405,6 +468,15 @@ class TestLintTransitionWarnings(unittest.TestCase):
         self._with_path("/nonexistent-bin")
         _, warns = router.lint_project(self.root, "demo")
         self.assertTrue(any("codex" in w and "qa" in w for w in warns), warns)
+
+    def test_warns_on_a_full_context_anthropic_role(self):
+        # context: full hands the run the founder's whole Claude Code config — every plugin,
+        # every MCP server (mail, payments…), the personal CLAUDE.md. Say so, per role.
+        self._agent("engineer", "context: full\n")
+        self._agent("qa")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("context: full" in w and "engineer" in w for w in warns), warns)
+        self.assertFalse(any("context: full" in w and "'qa'" in w for w in warns), warns)
 
     def test_no_provider_cli_warning_when_installed(self):
         b = tempfile.mkdtemp(prefix="dais-bin-")

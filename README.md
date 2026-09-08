@@ -293,6 +293,30 @@ runs the CLI as already logged in, nothing to configure.
   The sandbox plus the persona plus the machine's guards are the guard. If structurally
   read-only reviewers matter to you, keep those roles on `anthropic`.
 
+## The agent profile: what a run inherits from your Claude Code
+
+A `claude -p` run inherits your WHOLE Claude Code install by default: every plugin's skills,
+every MCP server (including claude.ai connectors such as mail, calendar, and payments), your
+hooks, and your personal CLAUDE.md. Measured on a real install that was about 10K tokens on
+every turn before dais's own prompt, and it put a mail client in every engineer's tool list
+with permissions bypassed. So roles run **`context: lean`** by default: the run keeps the
+REPO's own settings (`--setting-sources project,local`: its CLAUDE.md and `.claude/settings*.json`
+survive) and gets back exactly what the role allowlists:
+
+```
+---
+mcp: qmd, gbrain          # user-level MCP servers from ~/.claude.json
+plugins: supabase          # installed plugins, from ~/.claude/plugins/cache
+---
+```
+
+Both keys also work project-wide in `project.yaml`. A name that resolves to nothing is said
+at run start and the run proceeds without it. `context: full` restores the historical
+invocation for a role that needs something the allowlists can't express (skills installed
+under `~/.claude/skills` have no per-run loader); `dais lint` warns on every such role. Codex
+roles are unaffected (codex reads its own `~/.codex/config.toml`). Logs now name the skill on
+every `Skill` call, so a week of runs tells you which roles need which `plugins:`.
+
 ## The run ledger: what each run cost
 
 Every run records what it consumed (migration 0008: `dais migrate` with the loop paused): the

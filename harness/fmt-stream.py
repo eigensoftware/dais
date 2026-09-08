@@ -69,8 +69,12 @@ def handle_anthropic(e):
                 emit("  💬 " + brief(b["text"], 400), "cyan")
             elif b.get("type") == "tool_use":
                 inp = b.get("input", {}) or {}
+                # `skill` before description: the lean profile's plugin allowlists are built
+                # from WHICH skills a role invokes, and Skill's input carries neither a
+                # command nor a path
                 hint = inp.get("command") or inp.get("file_path") or inp.get("pattern") \
-                    or inp.get("description") or inp.get("path") or inp.get("prompt") or ""
+                    or inp.get("skill") or inp.get("description") or inp.get("path") \
+                    or inp.get("prompt") or ""
                 emit("  🔧 %s %s" % (b.get("name", "?"), brief(hint)), "yellow")
     elif t == "user":
         for b in e.get("message", {}).get("content", []):

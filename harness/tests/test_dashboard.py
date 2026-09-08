@@ -324,6 +324,19 @@ class TestFmtStreamProvider(unittest.TestCase):
                        capture_output=True, text=True)
         self.assertIsNone(self._sidecar(logpath))
 
+    def test_skill_calls_log_the_skill_name(self):
+        # 293 Skill calls in the workspace logs and not one says WHICH skill — the hint picked
+        # command/file_path/… and Skill's input has neither. The lean profile's plugin
+        # allowlists are built from this evidence.
+        line = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Skill", "input": {"skill": "browse", "args": "https://x"}}]}})
+        with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+            logpath = lf.name
+        self.addCleanup(os.unlink, logpath)
+        subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"), logpath],
+                       input=line + "\n", capture_output=True, text=True)
+        self.assertIn("🔧 Skill browse", open(logpath).read())
+
     def test_fmt_stream_default_is_anthropic_unchanged(self):
         # a claude stream-json line still maps (regression: the provider arg is additive)
         line = json.dumps({"type": "assistant",

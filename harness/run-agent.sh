@@ -24,6 +24,20 @@ TRIG="$(cfg trigger)"; PREC="$(cfg prec)"; ISOLATION="$(cfg isolation)"
 FALLBACK="$(cfg fallback_model)"   # optional backup model for the usage-limit auto-fallback
 [ "$FALLBACK" = "$MODEL" ] && FALLBACK=""   # a fallback == primary is a no-op; disable it
 EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
+CTX="$(cfg context)"               # lean (default) | full — the agent profile (router.py's note)
+
+# The lean profile's claude argv (anthropic only): keep the REPO's settings, drop the founder's
+# user-level plugins/MCP/hooks/CLAUDE.md, add back the role's mcp:/plugins: allowlists. Built
+# once here; names that resolve to nothing are said out loud (the run still goes without them).
+PROFILE=()
+if [ "$PROVIDER" = anthropic ] && [ "$CTX" = lean ]; then
+  PROFILE=(--setting-sources project,local --strict-mcp-config)
+  _lean_err="$(mktemp)"
+  while IFS= read -r _line; do PROFILE+=("$_line"); done \
+    < <(python3 "$SELF/router.py" --lean-flags "$DAIS_HOME" "$PROJECT" "$AGENT" 2>"$_lean_err")
+  [ -s "$_lean_err" ] && sed "s/^/  ⚠ [$PROJECT\/$AGENT] /" "$_lean_err"
+  rm -f "$_lean_err"
+fi
 
 # Secrets transport (auth: api): the provider's standard env var, from the process env,
 # ~/.dais/env (user-level; keep it chmod 600), or $DAIS_HOME/.env (workspace override,
@@ -45,7 +59,7 @@ load_env "$DAIS_HOME/.env"
 
 # Debug seam: print the resolved config and exit WITHOUT calling the provider CLI.
 if [ "${DAIS_SHOW_CONFIG:-0}" = 1 ]; then
-  echo "model=$MODEL effort=$EFF provider=$PROVIDER auth=$AUTH access=$ACCESS playbook=$PB trigger=$TRIG prec=$PREC"; exit 0
+  echo "model=$MODEL effort=$EFF provider=$PROVIDER auth=$AUTH access=$ACCESS playbook=$PB trigger=$TRIG prec=$PREC context=$CTX"; exit 0
 fi
 
 # Provider CLI preflight — the role's adapter needs its CLI on PATH. Fail here, named, BEFORE
@@ -302,6 +316,7 @@ run_agent_anthropic(){
         --model "$MODEL" \
         ${EFFORT_FLAG[@]+"${EFFORT_FLAG[@]}"} \
         "${PERM[@]}" \
+        ${PROFILE[@]+"${PROFILE[@]}"} \
         --add-dir "$WORKDIR" \
         --output-format stream-json --verbose 2>&1 \
         | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG"

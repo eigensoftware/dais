@@ -916,19 +916,73 @@ class TestPerRoleModelOverride(CliTest):
     # A bin dir holding ONLY what run-agent needs (the real python3, sqlite3, git) plus an
     # optional fake `codex`; PATH = that dir + /usr/bin:/bin, so the real provider CLIs
     # (Homebrew / ~/.local/bin) are invisible and the test decides what "installed" means.
-    def _tmpbin(self, fake_codex=None):
+    def _tmpbin(self, fake_codex=None, fake_claude=None):
         import sys
         b = tempfile.mkdtemp(prefix="dais-bin-")
         self.addCleanup(shutil.rmtree, b, ignore_errors=True)
         os.symlink(sys.executable, os.path.join(b, "python3"))
         for tool in ("sqlite3", "git"):
             os.symlink(shutil.which(tool), os.path.join(b, tool))
-        if fake_codex is not None:
-            p = os.path.join(b, "codex")
-            with open(p, "w") as fh:
-                fh.write("#!/bin/bash\n" + fake_codex)
-            os.chmod(p, 0o755)
+        for name, body in (("codex", fake_codex), ("claude", fake_claude)):
+            if body is not None:
+                p = os.path.join(b, name)
+                with open(p, "w") as fh:
+                    fh.write("#!/bin/bash\n" + body)
+                os.chmod(p, 0o755)
         return "%s:/usr/bin:/bin" % b
+
+    # --- the lean agent profile (plan 1.3), asserted on the claude argv via a fake `claude` ---
+    def _fake_claude(self, argv_file):
+        return ('printf "%s\\n" "$@" > "' + argv_file + '"\n'
+                'echo \'{"type":"result","subtype":"success","num_turns":1,"usage":{"input_tokens":5,"output_tokens":1}}\'\n')
+
+    def _fake_home(self):
+        import json
+        home = tempfile.mkdtemp(prefix="dais-home-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        with open(os.path.join(home, ".claude.json"), "w") as f:
+            json.dump({"mcpServers": {"qmd": {"command": "qmd"}, "gbrain": {"command": "gbrain"}}}, f)
+        os.makedirs(os.path.join(home, ".claude", "plugins", "cache", "official", "supabase", "1.2.0"))
+        return home
+
+    def _claude_argv(self, fm):
+        argv = os.path.join(self.root, "claude-argv")
+        self._set_role("qa", fm)
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(argv)),
+                                       "HOME": self._fake_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return open(argv).read().split("\n")
+
+    def test_lean_profile_strips_user_settings_and_mcp(self):
+        import json
+        args = self._claude_argv("")                   # default context: lean
+        self.assertEqual(args[args.index("--setting-sources") + 1], "project,local")
+        self.assertIn("--strict-mcp-config", args)
+        cfg = json.loads(args[args.index("--mcp-config") + 1])
+        self.assertEqual(cfg["mcpServers"], {})
+        self.assertNotIn("--plugin-dir", args)
+
+    def test_lean_profile_allowlists_mcp_and_plugins(self):
+        import json
+        args = self._claude_argv("mcp: qmd\nplugins: supabase\n")
+        cfg = json.loads(args[args.index("--mcp-config") + 1])
+        self.assertEqual(list(cfg["mcpServers"]), ["qmd"])
+        pd = args[args.index("--plugin-dir") + 1]
+        self.assertTrue(pd.endswith(os.path.join("supabase", "1.2.0")), pd)
+
+    def test_full_profile_passes_no_profile_flags(self):
+        args = self._claude_argv("context: full\n")
+        for flag in ("--setting-sources", "--strict-mcp-config", "--mcp-config", "--plugin-dir"):
+            self.assertNotIn(flag, args)
+
+    def test_unknown_plugin_or_mcp_name_is_named_in_the_console(self):
+        argv = os.path.join(self.root, "claude-argv")
+        self._set_role("qa", "plugins: ghost\nmcp: nope\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(argv)),
+                                       "HOME": self._fake_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # the run still goes, without them
+        self.assertIn("ghost", r.stdout + r.stderr)
+        self.assertIn("nope", r.stdout + r.stderr)
 
     def _set_role(self, agent, fm):
         with open(os.path.join(self.root, "projects", "demo", "agents", agent + ".md"), "w") as f:

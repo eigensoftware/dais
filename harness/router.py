@@ -64,7 +64,61 @@ def frontmatter(path):
 
 
 AGENT_CONFIG_KEYS = ("model", "fallback_model", "effort", "provider", "auth", "access", "isolation",
-                     "trigger", "prec", "playbook", "playbook_file", "concurrency")
+                     "trigger", "prec", "playbook", "playbook_file", "concurrency",
+                     "context", "mcp", "plugins")
+
+
+def _csv(v):
+    """'a, b ,c' -> 'a,b,c' (frontmatter/project.yaml comma lists); '' stays ''."""
+    return ",".join(x.strip() for x in str(v or "").split(",") if x.strip())
+
+
+# --- the lean agent profile (plan 1.3). A `claude -p` run inherits the FOUNDER'S whole Claude
+# Code install: every plugin's skills, every MCP server (measured: the claude.ai Gmail /
+# Calendar / Drive / Stripe connectors were in every engineer's tool list, with permissions
+# bypassed), hooks, the personal CLAUDE.md — ~9–13K tokens on every turn, before dais's own
+# prompt. `context: lean` keeps only the REPO's settings (project,local: its CLAUDE.md and
+# .claude/settings*.json survive) and adds back exactly what the role allowlists:
+#   mcp:     user-level servers from ~/.claude.json  (e.g. qmd, gbrain)
+#   plugins: installed plugins from ~/.claude/plugins/cache (e.g. supabase, superpowers)
+# Skills installed under ~/.claude/skills have no per-run loader; a role that needs them
+# stays `context: full`. `full` is exactly the historical invocation. ---
+def _claude_user_config():
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".claude.json")) as fh:
+            import json
+            return json.load(fh) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def mcp_config_json(names, report=False):
+    """The `--mcp-config` JSON holding ONLY the allowlisted user-level servers. With
+    report=True returns (json, [names not found]) so the run can say what it couldn't load."""
+    import json
+    servers = (_claude_user_config().get("mcpServers") or {})
+    want = [n for n in _csv(names).split(",") if n]
+    cfg = {"mcpServers": {n: servers[n] for n in want if n in servers}}
+    missing = [n for n in want if n not in servers]
+    out = json.dumps(cfg, separators=(",", ":"))
+    return (out, missing) if report else out
+
+
+def plugin_dirs(names):
+    """(dirs, missing): the newest cached version dir of each allowlisted plugin, for
+    `--plugin-dir`. Cache layout: ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/."""
+    import glob
+    cache = os.path.join(os.path.expanduser("~"), ".claude", "plugins", "cache")
+    dirs, missing = [], []
+    for n in [x for x in _csv(names).split(",") if x]:
+        cands = [d for d in glob.glob(os.path.join(cache, "*", n, "*")) if os.path.isdir(d)]
+        if not cands:
+            missing.append(n); continue
+        def vkey(d):
+            parts = os.path.basename(d).split(".")
+            return tuple(int(p) if p.isdigit() else 0 for p in parts)
+        dirs.append(max(cands, key=vkey))
+    return dirs, missing
 
 
 def _yaml_line(text, key):
@@ -137,12 +191,20 @@ def agent_setup(root, project, role):
     isolation = (fm.get("isolation") or _yaml_line(ytext, "isolation") or "none").strip()
     if isolation not in ("none", "worktree"):
         isolation = "none"                          # a typo must not silently change run semantics
+    # context: lean (default) | full — see the lean-profile note above. A typo must not widen
+    # the profile, so anything but the literal 'full' is lean.
+    context = (fm.get("context") or _yaml_line(ytext, "context") or "lean").strip()
+    if context != "full":
+        context = "lean"
+    mcp = _csv(fm.get("mcp") or _yaml_line(ytext, "mcp"))
+    plugins = _csv(fm.get("plugins") or _yaml_line(ytext, "plugins"))
     return {"model": model, "fallback_model": fallback_model,
             "effort": effort, "provider": provider, "auth": auth,
             "access": access, "trigger": trigger, "prec": str(prec),
             "playbook": playbook,
             "playbook_file": _playbook_file(root, project, playbook),
-            "concurrency": conc, "isolation": isolation}
+            "concurrency": conc, "isolation": isolation,
+            "context": context, "mcp": mcp, "plugins": plugins}
 
 
 def cast(root, project):
@@ -360,6 +422,11 @@ def lint_project(root, project):
         if raw_conc and s["concurrency"] == "1" and raw_conc != "1":
             warnings.append("role '%s': concurrency '%s' is not an integer 1..5 — treated as 1 "
                             "(serial)" % (r["name"], raw_conc))
+        if s["provider"] == "anthropic" and s["context"] == "full" and s["trigger"] != "none":
+            warnings.append("role '%s': context: full — every run inherits the founder's whole Claude "
+                            "Code install (all plugins, every MCP server incl. mail/payment connectors, "
+                            "the personal CLAUDE.md; ~10K tokens per turn). Prefer context: lean with "
+                            "mcp:/plugins: allowlists" % r["name"])
         cli = PROVIDER_CLI.get(s["provider"])
         if cli and s["trigger"] != "none" and not shutil.which(cli):
             warnings.append("role '%s': provider %s needs `%s`, which is not on PATH — every "
@@ -446,6 +513,21 @@ if __name__ == "__main__":
         s = agent_setup(sys.argv[2], sys.argv[3], sys.argv[4])
         for k in AGENT_CONFIG_KEYS:
             print("%s=%s" % (k, s[k]))
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--lean-flags":
+        # The lean profile's extra `claude -p` argv for one role, one token per line (bash 3.2
+        # reads it into an array): --mcp-config <json> [--plugin-dir <dir>]... Names that
+        # resolve to nothing are reported on stderr so the run can say what it lacks.
+        s = agent_setup(sys.argv[2], sys.argv[3], sys.argv[4])
+        cfg, miss_mcp = mcp_config_json(s["mcp"], report=True)
+        dirs, miss_pl = plugin_dirs(s["plugins"])
+        print("--mcp-config"); print(cfg)
+        for d in dirs:
+            print("--plugin-dir"); print(d)
+        if miss_mcp:
+            print("lean profile: mcp server(s) not in ~/.claude.json: %s" % ", ".join(miss_mcp), file=sys.stderr)
+        if miss_pl:
+            print("lean profile: plugin(s) not in ~/.claude/plugins/cache: %s" % ", ".join(miss_pl), file=sys.stderr)
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--lint":
         root = sys.argv[2]
