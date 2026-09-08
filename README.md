@@ -293,6 +293,17 @@ runs the CLI as already logged in, nothing to configure.
   The sandbox plus the persona plus the machine's guards are the guard. If structurally
   read-only reviewers matter to you, keep those roles on `anthropic`.
 
+## The run ledger: what each run cost
+
+Every run records what it consumed (migration 0008: `dais migrate` with the loop paused): the
+whole prompt in tokens, the cached share, output tokens, turns, and, for claude runs, the
+dollar figure Claude Code itself reports (`total_cost_usd`: the API-equivalent, even on a
+subscription). Codex reports tokens but no dollars, so codex rows show tokens only. **Tokens
+are the unit to compare across providers.** `dais cost` reports per project, role, or task
+(a task's cost is the sum of the runs that touched it), with each role's no-op share: runs
+that succeeded and fired nothing. Runs from before the migration have no usage: the logs did
+not keep it.
+
 ## The CLI
 
 | Command | What it does |
@@ -318,7 +329,8 @@ runs the CLI as already logged in, nothing to configure.
 | `dais migrate --config <project>` | convert a project's legacy roles file into `agents/<role>.md` frontmatter + machine-owned access |
 | `dais schedule install [secs]` | background ticks (launchd on macOS, cron on Linux) |
 | `dais learn <project> "…"` | append a durable decision/gotcha to the project's CONTEXT.md |
-| `dais logs <project> [N]` | recent runs + their saved log paths |
+| `dais logs <project> [N]` | recent runs + their saved log paths (+ tokens · cost per run) |
+| `dais cost [project] [--since 7d] [--by project\|role\|task]` | the run ledger: tokens per project, role, or task, dollars where the provider reported them, no-op share |
 | `dais version` | which build this machine runs |
 
 ## Layout

@@ -372,6 +372,7 @@ run_one(){   # $1 = model id — one attempt: sets STATUS, records the model act
   MODEL="$1"
   db "UPDATE runs SET model='$(sqlesc "$MODEL")' WHERE id=$RUNID;" 2>/dev/null
   : > "$LOG"   # fresh log per attempt so is_capped + the summary reflect THIS model, not a prior cap
+  rm -f "$LOG.usage.json"   # and a fresh usage sidecar: a capped attempt's tokens must not be credited to the fallback
   if [ "$QUIET" = 1 ]; then
     echo "  ${CC}${CB}▶ $PROJECT · $AGENT${C0} ${CD}($MODEL) started (parallel) · log: $LOG${C0}"
     if run_agent >/dev/null; then STATUS=succeeded; else STATUS=failed; fi
@@ -403,6 +404,26 @@ done
 if [ -n "$fell_from" ]; then
   if [ "$STATUS" != capped ]; then printf '%s %s\n' "$(date +%s)" "$fell_from" > "$MARKER"
   else rm -f "$MARKER"; fi
+fi
+
+# The run ledger (migration 0008): fmt-stream normalized the provider's usage report into
+# $LOG.usage.json; store it on the run row and consume the sidecar. Absent sidecar = the run
+# reported nothing (died before a usage event) -> the columns stay NULL, never zero. A pre-0008
+# db has no columns: skip silently, the report says "run dais migrate".
+if [ -f "$LOG.usage.json" ]; then
+  DAIS_USAGE="$LOG.usage.json" DAIS_DB="$DB" DAIS_RUNID="$RUNID" python3 - <<'PY' 2>/dev/null
+import json, os, sqlite3
+u = json.load(open(os.environ["DAIS_USAGE"]))
+cols = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd", "turns", "session_id")
+c = sqlite3.connect(os.environ["DAIS_DB"], timeout=10)
+try:
+    c.execute("UPDATE runs SET " + ", ".join(k + "=?" for k in cols) + " WHERE id=?",
+              [u.get(k) for k in cols] + [int(os.environ["DAIS_RUNID"])])
+    c.commit()
+except sqlite3.OperationalError:
+    pass
+PY
+  rm -f "$LOG.usage.json"
 fi
 
 # Summarize what the run actually changed: tasks it touched during the run, with their new status.

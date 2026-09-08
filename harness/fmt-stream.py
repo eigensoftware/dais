@@ -32,8 +32,37 @@ def brief(d, n=160):
     s = str(d).replace("\n", " ").strip()
     return s[:n] + ("…" if len(s) > n else "")
 
+# --- usage ledger. Each provider reports usage in its own event and shape; normalize both into
+# ONE record and write it to <LOG>.usage.json at end of stream (run-agent stores it on the run
+# row — migration 0008). Fields: input_tokens = the WHOLE prompt (claude's input_tokens EXCLUDES
+# its cache figures, codex's INCLUDES its cached part — both normalized to the total);
+# cache_read_tokens / cache_write_tokens; output_tokens; cost_usd (claude's total_cost_usd, the
+# API-equivalent even on a subscription; None for codex, which reports no dollar figure); turns;
+# session_id (claude only). No usage event -> no sidecar: absent must read as NULL, never zero.
+USAGE = None
+
+def _acc(**kw):
+    global USAGE
+    if USAGE is None:
+        USAGE = {"input_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
+                 "output_tokens": 0, "cost_usd": None, "turns": 0, "session_id": None}
+    for k, v in kw.items():
+        if v is None:
+            continue
+        if k in ("cost_usd", "session_id"):
+            USAGE[k] = v
+        else:
+            USAGE[k] = (USAGE[k] or 0) + int(v or 0)
+
 def handle_anthropic(e):
     t = e.get("type")
+    if t == "result" and isinstance(e.get("usage"), dict):
+        u = e["usage"]
+        inp = int(u.get("input_tokens") or 0); cw = int(u.get("cache_creation_input_tokens") or 0)
+        cr = int(u.get("cache_read_input_tokens") or 0)
+        _acc(input_tokens=inp + cw + cr, cache_read_tokens=cr, cache_write_tokens=cw,
+             output_tokens=u.get("output_tokens"), cost_usd=e.get("total_cost_usd"),
+             turns=e.get("num_turns"), session_id=e.get("session_id"))
     if t == "assistant":
         for b in e.get("message", {}).get("content", []):
             if b.get("type") == "text" and b.get("text", "").strip():
@@ -91,6 +120,11 @@ def handle_openai(e):
     elif t == "item.completed" and it == "reasoning":
         pass                                    # thinking — skip like claude's system noise
     elif t == "turn.completed":
+        u = e.get("usage") or {}
+        if isinstance(u, dict) and u:
+            _acc(input_tokens=u.get("input_tokens"), cache_read_tokens=u.get("cached_input_tokens"),
+                 cache_write_tokens=u.get("cache_write_input_tokens"),
+                 output_tokens=u.get("output_tokens"), turns=1)
         emit("  ✓ done", "green")
     elif t in ("thread.started", "turn.started", "item.started"):
         pass
@@ -111,4 +145,10 @@ for raw in iter(sys.stdin.readline, ""):
     except Exception:
         emit("  " + raw)
 
+if USAGE is not None and len(sys.argv) > 1:
+    try:
+        with open(sys.argv[1] + ".usage.json", "w") as fh:
+            json.dump(USAGE, fh)
+    except Exception:
+        pass                                    # the ledger is best-effort; never fail a run
 sys.exit(1 if FAILED else 0)

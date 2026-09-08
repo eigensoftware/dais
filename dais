@@ -34,7 +34,8 @@ dais — your agent company control panel
   dais run <project> <agent>          run a specific agent now (headless claude)
   dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify; --notes rides along)
   dais edges <task-id>                the fireable edges from a task's current state
-  dais logs <project> [N]             recent runs
+  dais logs <project> [N]             recent runs (+ tokens · cost once the ledger is on)
+  dais cost [project] [--since 7d] [--by project|role|task]   the run ledger: tokens (and dollars where reported) per project, role, or task
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md
   dais lint [project]                 validate a project (roles + project.yaml + required files)
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
@@ -690,7 +691,20 @@ PL
     proj="${1:-}"; n="${2:-8}"
     [[ "$n" =~ ^[0-9]+$ ]] || { echo "logs: N must be an integer"; exit 1; }
     w=""; [ -n "$proj" ] && w="WHERE project='$(sqlesc "$proj")'"
-    db -separator ' | ' "SELECT started_at, project||'/'||agent, status, log_path FROM runs $w ORDER BY id DESC LIMIT $n;" || true ;;
+    # the ledger columns (0008) ride along when the db has them: "12345 tok · $0.50"
+    if [ -n "$(db "SELECT 1 FROM pragma_table_info('runs') WHERE name='input_tokens';" 2>/dev/null)" ]; then
+      db -separator ' | ' "SELECT started_at, project||'/'||agent, status,
+        TRIM(COALESCE(input_tokens||' tok','') || CASE WHEN cost_usd IS NULL THEN '' ELSE ' · $'||printf('%.2f',cost_usd) END),
+        log_path FROM runs $w ORDER BY id DESC LIMIT $n;" || true
+    else
+      db -separator ' | ' "SELECT started_at, project||'/'||agent, status, log_path FROM runs $w ORDER BY id DESC LIMIT $n;" || true
+    fi ;;
+
+  cost)
+    # the run ledger's report (harness/cost.py): tokens per project/role/task, dollars where
+    # the provider reported them. Usage is recorded from migration 0008 on.
+    [ -f "$DB" ] || db_init >/dev/null 2>&1
+    exec python3 "$DAIS_ROOT/harness/cost.py" "$DB" "$@" ;;
 
   ""|help|-h|--help) usage ;;
   *) echo "unknown: $cmd"; usage; exit 1 ;;

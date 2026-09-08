@@ -281,6 +281,42 @@ class TestDepBlockedFire(CliTest):
         self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='a-1'")[0], "doing")
 
 
+class TestCostCommand(CliTest):
+    """`dais cost` and the ledger columns in `dais logs` — the CLI seams over harness/cost.py."""
+
+    def _seed(self):
+        import sqlite3
+        dais(self.root, "scaffold", "demo")
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status,provider,input_tokens,"
+                     "output_tokens,cache_read_tokens,cost_usd,turns,log_path) VALUES('demo','qa',datetime('now'),"
+                     "datetime('now'),'succeeded','anthropic',12345,678,9000,0.5,7,'/tmp/x.log')")
+        conn.commit(); conn.close()
+
+    def test_cost_reports_the_ledger(self):
+        self._seed()
+        r = dais(self.root, "cost")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("1 runs", r.stdout)
+        self.assertIn("12k in", r.stdout)
+        self.assertIn("$0.50", r.stdout)
+        r = dais(self.root, "cost", "demo", "--since", "7d", "--by", "role")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("demo/qa", r.stdout)
+
+    def test_cost_rejects_a_bad_flag(self):
+        self._seed()
+        r = dais(self.root, "cost", "--bye", "role")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_logs_show_tokens_and_cost(self):
+        self._seed()
+        r = dais(self.root, "logs", "demo")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("12345 tok", r.stdout)
+        self.assertIn("$0.50", r.stdout)
+
+
 class TestProviderScopedGates(CliTest):
     """The cap-cooldown and error-backoff gates are scoped to the PROVIDER that tripped them.
     They were workspace-global: one Claude subscription-window cap parked every project for 90
@@ -923,6 +959,26 @@ class TestPerRoleModelOverride(CliTest):
         r = self._run_agent("qa", env={"DAIS_NOOP_RUN": "true"})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(q(self.root, "SELECT provider FROM runs ORDER BY id DESC LIMIT 1")[0], "anthropic")
+
+    def test_run_row_stores_the_usage_sidecar(self):
+        fake = ('echo \'{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"ok"}}\'\n'
+                'echo \'{"type":"turn.completed","usage":{"input_tokens":16276,"cached_input_tokens":11008,'
+                '"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}\'\n')
+        self._set_role("qa", "provider: openai\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        row = q(self.root, "SELECT input_tokens, cache_read_tokens, output_tokens, cost_usd, turns "
+                           "FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row), (16276, 11008, 5, None, 1))
+        logs = os.listdir(os.path.join(self.root, "projects", "demo", "logs"))
+        self.assertFalse(any(f.endswith(".usage.json") for f in logs))   # consumed, not littered
+
+    def test_run_without_a_usage_report_stores_nulls(self):
+        self._set_role("qa", "")
+        r = self._run_agent("qa", env={"DAIS_NOOP_RUN": "true"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        row = q(self.root, "SELECT input_tokens, cost_usd, turns FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row), (None, None, None))
 
     def test_openai_top_level_error_marks_run_failed(self):
         # codex exits 0 on an API error (e.g. a model the ChatGPT plan can't use); the run

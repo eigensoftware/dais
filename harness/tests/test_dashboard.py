@@ -267,6 +267,63 @@ class TestFmtStreamProvider(unittest.TestCase):
         self.assertIn("⚠", log)
         self.assertIn("metadata", log)
 
+    # --- usage sidecar: the ledger's source. Each provider reports usage in its own event and
+    # shape; the formatter normalizes both into <log>.usage.json so run-agent can store it. ---
+    def _sidecar(self, logpath):
+        p = logpath + ".usage.json"
+        self.addCleanup(lambda: os.path.exists(p) and os.unlink(p))
+        return json.load(open(p)) if os.path.exists(p) else None
+
+    def test_openai_usage_lands_in_the_sidecar(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+            logpath = lf.name
+        self.addCleanup(os.unlink, logpath)
+        lines = [{"type": "turn.started"},
+                 {"type": "item.completed", "item": {"id": "i", "type": "agent_message", "text": "ok"}},
+                 {"type": "turn.completed", "usage": {"input_tokens": 16276, "cached_input_tokens": 11008,
+                                                      "cache_write_input_tokens": 0, "output_tokens": 5,
+                                                      "reasoning_output_tokens": 0}}]
+        subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"), logpath, "--provider", "openai"],
+                       input="".join(json.dumps(x) + "\n" for x in lines), capture_output=True, text=True)
+        u = self._sidecar(logpath)
+        self.assertIsNotNone(u)
+        # input_tokens = the whole prompt (codex's figure already includes the cached part)
+        self.assertEqual((u["input_tokens"], u["cache_read_tokens"], u["cache_write_tokens"], u["output_tokens"]),
+                         (16276, 11008, 0, 5))
+        self.assertIsNone(u["cost_usd"])          # codex reports no dollar figure
+        self.assertEqual(u["turns"], 1)
+
+    def test_anthropic_result_usage_lands_in_the_sidecar(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+            logpath = lf.name
+        self.addCleanup(os.unlink, logpath)
+        result = {"type": "result", "subtype": "success", "duration_ms": 91000, "num_turns": 12,
+                  "session_id": "82de652a-0867-47ed-b0f8-67957a6faf80", "total_cost_usd": 0.0462425,
+                  "usage": {"input_tokens": 10, "cache_creation_input_tokens": 22343,
+                            "cache_read_input_tokens": 13615, "output_tokens": 37}}
+        subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"), logpath],
+                       input=json.dumps(result) + "\n", capture_output=True, text=True)
+        u = self._sidecar(logpath)
+        self.assertIsNotNone(u)
+        # input_tokens = the whole prompt: claude's input_tokens EXCLUDES the cache figures
+        self.assertEqual(u["input_tokens"], 10 + 22343 + 13615)
+        self.assertEqual((u["cache_read_tokens"], u["cache_write_tokens"], u["output_tokens"]), (13615, 22343, 37))
+        self.assertAlmostEqual(u["cost_usd"], 0.0462425)
+        self.assertEqual(u["turns"], 12)
+        self.assertEqual(u["session_id"], "82de652a-0867-47ed-b0f8-67957a6faf80")
+
+    def test_no_usage_event_writes_no_sidecar(self):
+        # a run that died before any usage report (API error) leaves nothing to store —
+        # run-agent must read "absent" as NULLs, never as zeros
+        with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+            logpath = lf.name
+        self.addCleanup(os.unlink, logpath)
+        subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"), logpath],
+                       input=json.dumps({"type": "assistant", "message": {"content": [
+                           {"type": "text", "text": "API Error: Unable to connect"}]}}) + "\n",
+                       capture_output=True, text=True)
+        self.assertIsNone(self._sidecar(logpath))
+
     def test_fmt_stream_default_is_anthropic_unchanged(self):
         # a claude stream-json line still maps (regression: the provider arg is additive)
         line = json.dumps({"type": "assistant",
