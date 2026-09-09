@@ -161,6 +161,25 @@ RUNID="$(db "INSERT INTO runs(project,agent,log_path,model,provider) VALUES('$(s
 # Pin the task onto the run row (best-effort metadata; the run is already recorded). Separate
 # UPDATE, not part of the INSERT, so the dual-INSERT schema-gap fallback above stays untouched.
 [ -n "$TASK_ID" ] && db "UPDATE runs SET task_id='$(sqlesc "$TASK_ID")' WHERE id=$RUNID;" >/dev/null 2>&1
+# Session resume (plan 3.2, claude only): the same role re-dispatched on the SAME pinned task
+# within 6h continues its last SUCCEEDED session (runs.session_id, the ledger) instead of
+# re-orienting from scratch — a multi-run task paid the full startup every run. A failed run
+# has no session or is not trusted; a missing session makes claude fail this run, which is
+# then not resumed from: it self-heals to a fresh start. `resume: off` opts a role out.
+RESUME_ID=""
+if [ "$PROVIDER" = anthropic ] && [ -n "$TASK_ID" ] && [ "$(cfg resume)" != "off" ]; then
+  # ONE row decides: the LAST run of this role on this task. It must have succeeded, carry a
+  # session id, and be recent — taking the session from an older row than the one whose
+  # status is checked let a failed run's session be resumed (a test caught it).
+  last="$(db "SELECT status || '|' || COALESCE(session_id,'') || '|' || (started_at > datetime('now','-6 hours'))
+                FROM runs WHERE project='$(sqlesc "$PROJECT")' AND agent='$(sqlesc "$AGENT")'
+                AND task_id='$(sqlesc "$TASK_ID")' AND id<>$RUNID ORDER BY id DESC LIMIT 1;" 2>/dev/null)"
+  case "$last" in
+    succeeded\|?*\|1) RESUME_ID="${last#succeeded|}"; RESUME_ID="${RESUME_ID%|1}";;
+    *) RESUME_ID="";;
+  esac
+fi
+
 # Progress baseline (migration 0010, design/probe-loop-cooldown.md): the role's dispatch-set
 # as it reads NOW, before any work — the next tick compares it (after reconcile) to decide
 # whether this run made net progress. Best-effort: a pre-0010 db just keeps the verb check.
@@ -305,6 +324,15 @@ Work a different task only if $TASK_ID turns out not to be yours to act on right
 
 "
 
+# The continuation prompt for a resumed session: the session already holds the standing rules,
+# both CONTEXT files and the persona; re-sending them would only pay tokens. The task's record
+# as of NOW rides along (the board may have moved since).
+RESUME_PROMPT=""
+[ -n "$RESUME_ID" ] && RESUME_PROMPT="You are RESUMING your previous session as the **$AGENT** on task **$TASK_ID** for the '$PROJECT' project — continue where you left off. The board may have moved since; the task's record as of now:
+$(NO_COLOR=1 "$DAIS_ROOT/dais" task show "$TASK_ID" 2>/dev/null)
+
+Same rules as before: do ONE unit of work, then stop; hand off by firing your role's edge; leave notes the next reader can act on. If $TASK_ID is no longer yours to act on, say so in a note and stop."
+
 STANDING="You are running headless as the **$AGENT** for the '$PROJECT' project.
 
 Stage goal: $STAGE_GOAL
@@ -337,7 +365,7 @@ PERSONA="$(awk 'NR==1 && $0=="---" {infm=1; next} infm && $0=="---" {infm=0; nex
 # Debug seam: dump the assembled agent prompt and exit, WITHOUT calling claude. Lets tests
 # assert prompt wiring (e.g. workspace-context injection) without an end-to-end model run.
 if [ "${DAIS_SHOW_PROMPT:-0}" = 1 ]; then
-  printf '%s\n' "$STANDING"
+  printf '%s\n' "${RESUME_PROMPT:-$STANDING}"
   printf '%s\n' "$PERSONA"
   exit 0
 fi
@@ -357,7 +385,13 @@ cd "$WORKDIR" || { echo "cd failed"; exit 1; }
 # In QUIET mode (parallel runs) we send that terminal stream to /dev/null so N agents don't
 # garble the console — the full log file is still written. pipefail keeps claude's exit code.
 run_agent_anthropic(){
-  claude -p "$STANDING" \
+  local resume_flag=()
+  if [ -n "$RESUME_ID" ]; then
+    resume_flag=(--resume "$RESUME_ID")
+    echo "  ↻ resuming session $RESUME_ID on $TASK_ID (same role, same task, <6h)" | tee -a "$LOG"
+  fi
+  claude -p "${RESUME_PROMPT:-$STANDING}" \
+        ${resume_flag[@]+"${resume_flag[@]}"} \
         --append-system-prompt "$PERSONA" \
         --model "$MODEL" \
         ${EFFORT_FLAG[@]+"${EFFORT_FLAG[@]}"} \

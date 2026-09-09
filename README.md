@@ -325,6 +325,13 @@ full record as of launch, and both CONTEXT files, each capped at 24KB with a lou
 marker (`dais lint` and `dais doctor` warn on an oversized one). Agents still run
 `dais task show` for any OTHER task they touch.
 
+**A multi-run task resumes its session.** When the same role is dispatched again on the same
+task within six hours and its last run on it succeeded, the claude adapter passes `--resume`
+with that run's session id and a short continuation prompt (the session already holds the
+rules, the CONTEXT files, and the persona). A failed run is never resumed from, and a session
+claude can no longer find fails that one run and the next starts fresh. `resume: off` in a
+role's frontmatter or `project.yaml` opts out. Codex roles always start fresh.
+
 ## The agent profile: what a run inherits from your Claude Code
 
 A `claude -p` run inherits your WHOLE Claude Code install by default: every plugin's skills,

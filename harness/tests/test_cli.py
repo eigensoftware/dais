@@ -1414,6 +1414,54 @@ class TestPerRoleModelOverride(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(q(self.root, "SELECT dispatch_fp FROM runs ORDER BY id DESC LIMIT 1")[0], fp)
 
+    # --- session resume (plan 3.2) -----------------------------------------------------------
+    def _prior_run(self, task_id, hours_ago=1, status="succeeded", session="sess-abc", agent="qa"):
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,task_id,status,started_at,ended_at,session_id,provider) "
+                     "VALUES('demo',?,?,?,datetime('now','-%d hours'),datetime('now','-%d hours'),?,'anthropic')"
+                     % (hours_ago, hours_ago), (agent, task_id, status, session))
+        conn.commit(); conn.close()
+
+    def _resume_argv(self, fm="", task_id="d-1"):
+        argv = os.path.join(self.root, "claude-argv")
+        if os.path.exists(argv):
+            os.unlink(argv)
+        self._set_role("qa", fm)
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(argv)),
+                                       "HOME": self._fake_home(), "DAIS_TASK_ID": task_id})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        args = open(argv).read().split("\n")
+        return args, open(argv).read()       # (argv list, the whole argv text — prompts span lines)
+
+    def test_same_role_same_task_resumes_the_recent_session(self):
+        dais(self.root, "task", "add", "demo", "review me", "--id", "d-1", "--status", "qa_review")
+        self._prior_run("d-1")
+        args, prompt = self._resume_argv()
+        self.assertEqual(args[args.index("--resume") + 1], "sess-abc")
+        self.assertIn("resuming", prompt.lower())
+        self.assertIn("d-1", prompt)
+        self.assertNotIn("Workspace context", prompt)      # the short continuation, not the full standing
+        self.assertNotIn("FIRST read", prompt)
+
+    def test_no_resume_when_stale_failed_other_task_or_off(self):
+        dais(self.root, "task", "add", "demo", "review me", "--id", "d-1", "--status", "qa_review")
+        self._prior_run("d-1", hours_ago=10)                 # stale
+        args, prompt = self._resume_argv()
+        self.assertNotIn("--resume", args); self.assertIn("Workspace context", prompt)
+        self._prior_run("d-1", status="failed")             # the last run failed: start fresh
+        args, _ = self._resume_argv()
+        self.assertNotIn("--resume", args)
+        self._prior_run("d-2")                               # a different task's session
+        args, _ = self._resume_argv()
+        self.assertNotIn("--resume", args)
+        self._prior_run("d-1")                               # would resume — but the role opted out
+        args, _ = self._resume_argv("resume: off\n")
+        self.assertNotIn("--resume", args)
+        self._prior_run("d-1")                               # (the off-run itself recorded no session)
+        args, _ = self._resume_argv()                        # and does, by default
+        self.assertIn("--resume", args)
+
     # --- the idle check's marker (plan 1.5): a cadence run records the board as it left it ------
     def test_cadence_run_records_the_board_fingerprint(self):
         # coding template: the lead is every:24h. `echo ok` (not `true`): an EMPTY log is scored

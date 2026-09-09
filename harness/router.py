@@ -65,7 +65,8 @@ def frontmatter(path):
 
 AGENT_CONFIG_KEYS = ("model", "fallback_model", "effort", "provider", "auth", "access", "isolation",
                      "trigger", "prec", "playbook", "playbook_file", "concurrency",
-                     "context", "mcp", "plugins", "max_turns", "max_budget_usd", "max_minutes")
+                     "context", "mcp", "plugins", "max_turns", "max_budget_usd", "max_minutes",
+                     "resume")
 
 
 def _cap(v, integer=False):
@@ -231,7 +232,11 @@ def agent_setup(root, project, role):
     max_turns = _cap(fm.get("max_turns") or _yaml_line(ytext, "max_turns"), integer=True)
     max_budget = _cap(fm.get("max_budget_usd") or _yaml_line(ytext, "max_budget_usd"))
     max_minutes = _cap(fm.get("max_minutes") or _yaml_line(ytext, "max_minutes"))
-    return {"model": model, "fallback_model": fallback_model,
+    # session resume (plan 3.2): on unless the role/project says off — the same role re-dispatched
+    # on the same task within a few hours continues its last succeeded session (claude only)
+    resume = (fm.get("resume") or _yaml_line(ytext, "resume") or "on").strip().lower()
+    resume = "off" if resume in ("off", "false", "no", "0") else "on"
+    return {"model": model, "fallback_model": fallback_model, "resume": resume,
             "effort": effort, "provider": provider, "auth": auth,
             "access": access, "trigger": trigger, "prec": str(prec),
             "playbook": playbook,
