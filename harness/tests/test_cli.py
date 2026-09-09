@@ -3,6 +3,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -2768,3 +2769,59 @@ class TestWorktreeIsolation(CliTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAccessHook(CliTest):
+    """plan 5.6: access enforced by a PreToolUse hook (claude), not only by tool disallows —
+    a review/draft role can read anything but may not push, merge, commit, or destroy."""
+
+    HOOK = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks", "guard.sh")
+
+    def _hook(self, access, command, tool="Bash"):
+        payload = json.dumps({"tool_name": tool, "tool_input": {"command": command}})
+        return subprocess.run(["bash", self.HOOK], input=payload, capture_output=True, text=True,
+                              env=dict(os.environ, DAIS_ACCESS=access))
+
+    def test_review_role_is_blocked_from_outward_git_and_gh(self):
+        for cmd in ("git push origin main", "gh pr merge 7 --squash", "git commit -am x", "gh pr create -f",
+                    "cd /repo && git push --force", "git reset --hard HEAD~1", "rm -rf /repo/src"):
+            r = self._hook("review", cmd)
+            self.assertEqual(r.returncode, 2, cmd)                  # 2 = block, per the hook contract
+            self.assertIn("dais", r.stderr)
+
+    def test_review_role_may_read_and_test(self):
+        for cmd in ("git status", "git log --oneline -5", "bun test", "gh pr view 7 --json state", "ls -la"):
+            self.assertEqual(self._hook("review", cmd).returncode, 0, cmd)
+
+    def test_edit_role_is_not_blocked(self):
+        for cmd in ("git push origin feature", "gh pr merge 7", "git commit -am x"):
+            self.assertEqual(self._hook("edit", cmd).returncode, 0, cmd)
+
+    def test_non_bash_tools_pass_through(self):
+        self.assertEqual(self._hook("review", "", tool="Read").returncode, 0)
+
+    def test_claude_gets_the_hook_only_for_non_edit_roles(self):
+        dais(self.root, "scaffold", "demo")
+        base = tempfile.mkdtemp(prefix="dais-repos-"); self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        os.makedirs(os.path.join(base, "demo"))
+        argv = os.path.join(self.root, "claude-argv")
+        fake = ('printf "%s\\n" "$@" > "' + argv + '"\n'
+                'echo \'{"type":"result","subtype":"success","num_turns":1,"usage":{"input_tokens":5,"output_tokens":1}}\'\n')
+        b = tempfile.mkdtemp(prefix="dais-bin-"); self.addCleanup(shutil.rmtree, b, ignore_errors=True)
+        os.symlink(sys.executable, os.path.join(b, "python3"))
+        for t in ("sqlite3", "git"):
+            os.symlink(shutil.which(t), os.path.join(b, t))
+        with open(os.path.join(b, "claude"), "w") as f:
+            f.write("#!/bin/bash\n" + fake)
+        os.chmod(os.path.join(b, "claude"), 0o755)
+        env = dict(os.environ)
+        env.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root, "DAIS_AGENT_REPOS": base,
+                    "PATH": "%s:/usr/bin:/bin" % b})
+        for role, expect in (("qa", True), ("engineer", False)):     # qa: review · engineer: edit
+            if os.path.exists(argv):
+                os.unlink(argv)
+            r = subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", role],
+                               capture_output=True, text=True, env=env, cwd=self.root)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            args = open(argv).read()
+            self.assertEqual("--settings" in args and "PreToolUse" in args and "guard.sh" in args, expect, role)

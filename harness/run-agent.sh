@@ -418,7 +418,11 @@ fi
 PERM=(--permission-mode bypassPermissions)
 case "$ACCESS" in
   edit) : ;;
-  *)    PERM+=(--disallowedTools Edit Write NotebookEdit) ;;
+  *)    PERM+=(--disallowedTools Edit Write NotebookEdit)
+        # 5.6: and a PreToolUse hook that refuses outward shell — git push/commit/merge, gh pr
+        # merge/create, rm -rf — with a message the model reads (harness/hooks/guard.sh). The
+        # persona said it; now the harness holds it. (claude only: codex keeps its sandbox.)
+        PERM+=(--settings "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"DAIS_ACCESS=$ACCESS $DAIS_ROOT/harness/hooks/guard.sh\"}]}]}}") ;;
 esac
 
 cd "$WORKDIR" || { echo "cd failed"; exit 1; }

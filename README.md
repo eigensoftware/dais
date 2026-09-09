@@ -366,6 +366,12 @@ one set wins. Never put a key in `project.yaml` or a persona file (`dais lint` w
 secret-shaped values); `dais init` gitignores `.env` for you. `auth: subscription` (the default)
 runs the CLI as already logged in, nothing to configure.
 
+**Access is enforced, not just asked.** A claude role that is not `edit` runs with
+`Edit`/`Write` disallowed AND a PreToolUse hook (`harness/hooks/guard.sh`) that refuses outward
+shell with a message the model reads: `git push|commit|merge|rebase|reset`, `gh pr
+merge|create|close`, `rm -rf`. Review and draft roles read and test; only an edit role commits,
+pushes, merges, or deletes. Codex has no hooks; its sandbox is the guard there.
+
 **How codex roles are sandboxed, and why `edit` roles bypass it:**
 - **`edit` roles run codex with its sandbox disabled** (`--dangerously-bypass-approvals-and-sandbox`).
   Codex's `workspace-write` sandbox blocks writes under `.git/`, which breaks an engineer's core
