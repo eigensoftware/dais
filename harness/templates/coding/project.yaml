@@ -3,4 +3,9 @@ repo: __PROJECT__
 github: your-org/__PROJECT__
 model: claude-opus-4-8
 effort: high
+# budget caps per run (unset = unbounded). max_minutes binds both providers (a wall-clock
+# watchdog); max_turns / max_budget_usd are claude flags. `dais cost` shows the distribution.
+# max_minutes: 30
+# max_turns: 60
+# max_budget_usd: 5
 stage_goal: Describe the current milestone for __PROJECT__ here.

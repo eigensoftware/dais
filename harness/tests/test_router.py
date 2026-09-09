@@ -313,6 +313,24 @@ class TestAgentSetup(unittest.TestCase):
             f.write("plugins: supabase, superpowers\n")          # project-wide default
         self.assertEqual(router.agent_setup(self.root, "demo", "engineer")["plugins"], "supabase,superpowers")
 
+    # --- budget caps (plan 1.4): max_turns / max_budget_usd / max_minutes --------------------
+    def test_caps_default_to_unbounded_and_resolve_like_model(self):
+        self._agent("qa")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["max_turns"], s["max_budget_usd"], s["max_minutes"]), ("", "", ""))
+        with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
+            f.write("max_turns: 40\nmax_minutes: 30\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["max_turns"], s["max_minutes"]), ("40", "30"))
+        self._agent("qa", "max_turns: 25\nmax_budget_usd: 2.50\nmax_minutes: 0.5\n")   # frontmatter wins
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["max_turns"], s["max_budget_usd"], s["max_minutes"]), ("25", "2.50", "0.5"))
+
+    def test_caps_that_do_not_parse_are_unbounded_not_surprising(self):
+        self._agent("qa", "max_turns: many\nmax_budget_usd: -1\nmax_minutes: 0\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["max_turns"], s["max_budget_usd"], s["max_minutes"]), ("", "", ""))
+
     def test_provider_auth_defaults_and_frontmatter(self):
         self._agent("qa", "provider: openai\nauth: api\n")
         s = router.agent_setup(self.root, "demo", "qa")
@@ -477,6 +495,16 @@ class TestLintTransitionWarnings(unittest.TestCase):
         _, warns = router.lint_project(self.root, "demo")
         self.assertTrue(any("context: full" in w and "engineer" in w for w in warns), warns)
         self.assertFalse(any("context: full" in w and "'qa'" in w for w in warns), warns)
+
+    def test_warns_when_a_codex_role_sets_a_cap_codex_cannot_enforce(self):
+        # codex exec has no --max-turns / budget flag; only max_minutes (the harness's own
+        # watchdog) binds a codex run. Say so rather than let the founder believe it's capped.
+        self._agent("qa", "provider: openai\nmax_turns: 20\nmax_budget_usd: 1\n")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertTrue(any("max_turns" in w and "openai" in w for w in warns), warns)
+        self._agent("qa", "provider: openai\nmax_minutes: 20\n")
+        _, warns = router.lint_project(self.root, "demo")
+        self.assertFalse(any("max_minutes" in w for w in warns), warns)
 
     def test_no_provider_cli_warning_when_installed(self):
         b = tempfile.mkdtemp(prefix="dais-bin-")

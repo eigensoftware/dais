@@ -324,6 +324,23 @@ class TestFmtStreamProvider(unittest.TestCase):
                        capture_output=True, text=True)
         self.assertIsNone(self._sidecar(logpath))
 
+    def test_claude_cap_stops_are_logged_and_fail_the_run(self):
+        # --max-turns / --max-budget-usd end the run with an error_* result subtype; the run
+        # did not finish its unit, so it must land as 'failed' (feeding the backoff gate),
+        # with the cap named in the log
+        for sub, word in (("error_max_turns", "max turns"), ("error_max_budget_usd", "budget")):
+            with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+                logpath = lf.name
+            self.addCleanup(os.unlink, logpath)
+            self.addCleanup(lambda p=logpath: os.path.exists(p + ".usage.json") and os.unlink(p + ".usage.json"))
+            r = subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"), logpath],
+                               input=json.dumps({"type": "result", "subtype": sub, "num_turns": 25,
+                                                 "usage": {"input_tokens": 1, "output_tokens": 1}}) + "\n",
+                               capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, sub)
+            log = open(logpath).read()
+            self.assertIn("✗", log); self.assertIn(word, log)
+
     def test_skill_calls_log_the_skill_name(self):
         # 293 Skill calls in the workspace logs and not one says WHICH skill — the hint picked
         # command/file_path/… and Skill's input has neither. The lean profile's plugin

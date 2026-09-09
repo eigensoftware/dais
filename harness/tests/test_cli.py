@@ -975,6 +975,34 @@ class TestPerRoleModelOverride(CliTest):
         for flag in ("--setting-sources", "--strict-mcp-config", "--mcp-config", "--plugin-dir"):
             self.assertNotIn(flag, args)
 
+    # --- budget caps (plan 1.4) ---------------------------------------------------------------
+    def test_caps_become_claude_flags_only_when_set(self):
+        args = self._claude_argv("max_turns: 25\nmax_budget_usd: 2.50\n")
+        self.assertEqual(args[args.index("--max-turns") + 1], "25")
+        self.assertEqual(args[args.index("--max-budget-usd") + 1], "2.50")
+        args = self._claude_argv("")
+        self.assertNotIn("--max-turns", args); self.assertNotIn("--max-budget-usd", args)
+
+    def _timeout_run(self, fm, fake_claude=None, fake_codex=None):
+        self._set_role("qa", fm)
+        t0 = time.time()
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_codex=fake_codex, fake_claude=fake_claude),
+                                       "HOME": self._fake_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertLess(time.time() - t0, 20)          # the 60s sleep was cut short
+        row = q(self.root, "SELECT status, log_path FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(row[0], "failed")
+        self.assertIn("timed out", open(row[1]).read())
+        return r
+
+    def test_max_minutes_kills_a_claude_run_and_records_it(self):
+        fake = 'echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}\'\nsleep 60\n'
+        self._timeout_run("max_minutes: 0.05\n", fake_claude=fake)
+
+    def test_max_minutes_kills_a_codex_run_too(self):
+        fake = 'echo \'{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"working"}}\'\nsleep 60\n'
+        self._timeout_run("provider: openai\nmax_minutes: 0.05\n", fake_codex=fake)
+
     def test_unknown_plugin_or_mcp_name_is_named_in_the_console(self):
         argv = os.path.join(self.root, "claude-argv")
         self._set_role("qa", "plugins: ghost\nmcp: nope\n")

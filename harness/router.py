@@ -65,7 +65,21 @@ def frontmatter(path):
 
 AGENT_CONFIG_KEYS = ("model", "fallback_model", "effort", "provider", "auth", "access", "isolation",
                      "trigger", "prec", "playbook", "playbook_file", "concurrency",
-                     "context", "mcp", "plugins")
+                     "context", "mcp", "plugins", "max_turns", "max_budget_usd", "max_minutes")
+
+
+def _cap(v, integer=False):
+    """A budget cap as the text to hand the CLI ('' = unbounded, the historical behavior):
+    a positive number; integer-only for max_turns. Anything else — a word, 0, a negative —
+    is unbounded rather than a surprise, and lint says nothing (an unset cap is legitimate)."""
+    v = str(v or "").strip()
+    try:
+        n = float(v)
+    except ValueError:
+        return ""
+    if n <= 0 or (integer and not v.isdigit()):
+        return ""
+    return v
 
 
 def _csv(v):
@@ -198,13 +212,20 @@ def agent_setup(root, project, role):
         context = "lean"
     mcp = _csv(fm.get("mcp") or _yaml_line(ytext, "mcp"))
     plugins = _csv(fm.get("plugins") or _yaml_line(ytext, "plugins"))
+    # budget caps (plan 1.4): frontmatter -> project.yaml -> unbounded. max_turns and
+    # max_budget_usd map to claude flags (codex has none; lint says so); max_minutes is the
+    # harness's own wall-clock watchdog and binds both providers.
+    max_turns = _cap(fm.get("max_turns") or _yaml_line(ytext, "max_turns"), integer=True)
+    max_budget = _cap(fm.get("max_budget_usd") or _yaml_line(ytext, "max_budget_usd"))
+    max_minutes = _cap(fm.get("max_minutes") or _yaml_line(ytext, "max_minutes"))
     return {"model": model, "fallback_model": fallback_model,
             "effort": effort, "provider": provider, "auth": auth,
             "access": access, "trigger": trigger, "prec": str(prec),
             "playbook": playbook,
             "playbook_file": _playbook_file(root, project, playbook),
             "concurrency": conc, "isolation": isolation,
-            "context": context, "mcp": mcp, "plugins": plugins}
+            "context": context, "mcp": mcp, "plugins": plugins,
+            "max_turns": max_turns, "max_budget_usd": max_budget, "max_minutes": max_minutes}
 
 
 def cast(root, project):
@@ -427,6 +448,10 @@ def lint_project(root, project):
                             "Code install (all plugins, every MCP server incl. mail/payment connectors, "
                             "the personal CLAUDE.md; ~10K tokens per turn). Prefer context: lean with "
                             "mcp:/plugins: allowlists" % r["name"])
+        if s["provider"] == "openai" and (s["max_turns"] or s["max_budget_usd"]):
+            warnings.append("role '%s': max_turns / max_budget_usd are claude flags — codex exec has no "
+                            "equivalent, so this openai role is NOT capped by them; only max_minutes "
+                            "(the harness watchdog) binds a codex run" % r["name"])
         cli = PROVIDER_CLI.get(s["provider"])
         if cli and s["trigger"] != "none" and not shutil.which(cli):
             warnings.append("role '%s': provider %s needs `%s`, which is not on PATH — every "

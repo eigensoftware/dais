@@ -2,4 +2,9 @@ project: __PROJECT__
 repo: __PROJECT__          # any working directory for the analyst's drafts (create it; git optional)
 model: claude-opus-4-8
 effort: high
+# budget caps per run (unset = unbounded). max_minutes binds both providers (a wall-clock
+# watchdog); max_turns / max_budget_usd are claude flags. `dais cost` shows the distribution.
+# max_minutes: 30
+# max_turns: 60
+# max_budget_usd: 5
 stage_goal: Describe what this advisory lane is for (the standing question it helps you answer).

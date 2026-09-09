@@ -25,6 +25,12 @@ FALLBACK="$(cfg fallback_model)"   # optional backup model for the usage-limit a
 [ "$FALLBACK" = "$MODEL" ] && FALLBACK=""   # a fallback == primary is a no-op; disable it
 EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
 CTX="$(cfg context)"               # lean (default) | full — the agent profile (router.py's note)
+# budget caps (plan 1.4). Unset = unbounded (the historical behavior). max_turns/max_budget_usd
+# are claude flags; max_minutes is OUR watchdog (macOS ships no `timeout`), on both providers.
+MAXT="$(cfg max_turns)"; MAXB="$(cfg max_budget_usd)"; MAXMIN="$(cfg max_minutes)"
+CAP_FLAGS=()
+[ -n "$MAXT" ] && CAP_FLAGS+=(--max-turns "$MAXT")
+[ -n "$MAXB" ] && CAP_FLAGS+=(--max-budget-usd "$MAXB")
 
 # The lean profile's claude argv (anthropic only): keep the REPO's settings, drop the founder's
 # user-level plugins/MCP/hooks/CLAUDE.md, add back the role's mcp:/plugins: allowlists. Built
@@ -317,6 +323,7 @@ run_agent_anthropic(){
         ${EFFORT_FLAG[@]+"${EFFORT_FLAG[@]}"} \
         "${PERM[@]}" \
         ${PROFILE[@]+"${PROFILE[@]}"} \
+        ${CAP_FLAGS[@]+"${CAP_FLAGS[@]}"} \
         --add-dir "$WORKDIR" \
         --output-format stream-json --verbose 2>&1 \
         | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG"
@@ -349,7 +356,7 @@ $PERSONA" </dev/null 2>&1 \
         | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG" --provider openai
 }
 
-run_agent(){
+run_agent_unguarded(){
   # Debug seam: run a shell command in WORKDIR instead of the model (tests exercise the worktree
   # lifecycle end-to-end without an LLM call). Same convention as DAIS_SHOW_PROMPT/DAIS_SHOW_CONFIG.
   if [ -n "${DAIS_NOOP_RUN:-}" ]; then ( cd "$WORKDIR" && eval "$DAIS_NOOP_RUN" ) >>"$LOG" 2>&1; return $?; fi
@@ -358,6 +365,21 @@ run_agent(){
     openai)    run_agent_openai;;
     *) echo "  ✗ no adapter for provider '$PROVIDER' (known: anthropic, openai)" | tee -a "$LOG"; return 1;;
   esac
+}
+
+# run_agent — the adapter under the max_minutes watchdog. The agent pipeline runs in the
+# background; a sibling subshell sleeps the cap, then (if the pipeline is still alive) marks
+# $LOG.timeout and TERMs the whole tree (lib.sh kill_tree: wrapper -> claude/codex -> children).
+# The marker, not the exit code, is what run_one reads: a killed pipeline's status is noise.
+run_agent(){
+  if [ -z "$MAXMIN" ]; then run_agent_unguarded; return $?; fi
+  local secs pid wd rc
+  secs="$(awk -v m="$MAXMIN" 'BEGIN{s=int(m*60); if (s<1) s=1; print s}')"
+  run_agent_unguarded & pid=$!
+  ( sleep "$secs"; kill -0 "$pid" 2>/dev/null && { touch "$LOG.timeout"; kill_tree "$pid"; } ) & wd=$!
+  wait "$pid"; rc=$?
+  kill_tree "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  return $rc
 }
 
 # --- run with auto-fallback ------------------------------------------------------------------
@@ -400,6 +422,11 @@ run_one(){   # $1 = model id — one attempt: sets STATUS, records the model act
   # A capped, empty, or "Execution error" run is NOT success.
   if is_capped "$LOG" "$PROVIDER"; then STATUS=capped
   elif [ ! -s "$LOG" ] || grep -qiE "^[[:space:]]*execution error[[:space:]]*$" "$LOG"; then STATUS=failed; fi
+  # the max_minutes watchdog fired: the unit was not finished — failed (feeds the backoff gate)
+  if [ -f "$LOG.timeout" ]; then
+    STATUS=failed; rm -f "$LOG.timeout"
+    echo "  ⏱ timed out after $MAXMIN min — killed by max_minutes; the task stays put" | tee -a "$LOG"
+  fi
 }
 
 fell_from=""

@@ -317,6 +317,25 @@ under `~/.claude/skills` have no per-run loader); `dais lint` warns on every suc
 roles are unaffected (codex reads its own `~/.codex/config.toml`). Logs now name the skill on
 every `Skill` call, so a week of runs tells you which roles need which `plugins:`.
 
+## Budget caps: no run is unbounded unless you say so
+
+Three per-role (or project-wide) caps, all unset by default, which is the historical
+unbounded behavior:
+
+```
+---
+max_minutes: 30        # wall-clock: the harness kills the run's whole process tree (both providers)
+max_turns: 60          # claude only  (--max-turns)
+max_budget_usd: 5      # claude only  (--max-budget-usd; API-equivalent dollars, also on a subscription)
+---
+```
+
+A run that hits any cap is recorded `failed` with the cap named in its log (`⏱ timed out after
+30 min`, `✗ stopped: max turns reached`), so the per-provider error backoff still protects you
+from a role that hits its cap every tick; the task stays where it was. Codex has no turn or
+dollar flag, so only `max_minutes` binds a codex run; `dais lint` says so if you set the others
+on an openai role. Read `dais cost --by role` before choosing numbers.
+
 ## The run ledger: what each run cost
 
 Every run records what it consumed (migration 0008: `dais migrate` with the loop paused): the

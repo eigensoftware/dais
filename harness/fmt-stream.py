@@ -86,7 +86,17 @@ def handle_anthropic(e):
                     emit("     ↳ " + brief(c, 120), "dim")
     elif t == "result":
         extra = "%ds" % (e["duration_ms"] // 1000) if e.get("duration_ms") else ""
-        emit("  ✓ %s %s" % (e.get("subtype", "done"), extra), "green")
+        sub = e.get("subtype", "done")
+        if str(sub).startswith("error_"):
+            # a cap (--max-turns / --max-budget-usd) or an execution error ended the run
+            # before its unit was done: say which, and fail the run (feeds the backoff gate)
+            global FAILED
+            FAILED = True
+            why = {"error_max_turns": "max turns reached (%s)" % e.get("num_turns", "?"),
+                   "error_max_budget_usd": "budget cap reached"}.get(sub, sub)
+            emit("  ✗ stopped: %s %s" % (why, extra), "red")
+        else:
+            emit("  ✓ %s %s" % (sub, extra), "green")
     # type == "system" (init noise) intentionally skipped
 
 # codex `exec --json` event shape (captured live, see tests/fixtures/codex-exec.jsonl):
