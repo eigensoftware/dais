@@ -149,6 +149,11 @@ RUNID="$(db "INSERT INTO runs(project,agent,log_path,model,provider) VALUES('$(s
 # Pin the task onto the run row (best-effort metadata; the run is already recorded). Separate
 # UPDATE, not part of the INSERT, so the dual-INSERT schema-gap fallback above stays untouched.
 [ -n "$TASK_ID" ] && db "UPDATE runs SET task_id='$(sqlesc "$TASK_ID")' WHERE id=$RUNID;" >/dev/null 2>&1
+# Progress baseline (migration 0010, design/probe-loop-cooldown.md): the role's dispatch-set
+# as it reads NOW, before any work — the next tick compares it (after reconcile) to decide
+# whether this run made net progress. Best-effort: a pre-0010 db just keeps the verb check.
+DFP="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$PROJECT" "$AGENT" 2>/dev/null)"
+db "UPDATE runs SET dispatch_fp='$(sqlesc "$DFP")' WHERE id=$RUNID;" >/dev/null 2>&1
 # No run row = no attribution and malformed UPDATEs downstream (WHERE id=;) — fail loud instead
 # of running unrecorded (db locked past the busy timeout, disk full, broken schema).
 [ -n "$RUNID" ] || { echo "[$PROJECT/$AGENT] could not record the run in dais.db — aborting (is the db locked or full?)"; rm -f "$LOCK"; exit 1; }

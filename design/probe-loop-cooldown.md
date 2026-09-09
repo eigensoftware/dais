@@ -1,7 +1,11 @@
 # Probe-loop cooldown
 
-Status: **DESIGN ONLY — not implemented.** Written for founder review per the
-2026-07-18 paper-cuts batch (item F). No code in this doc's commit.
+Status: **IMPLEMENTED 2026-09-09 as option C** (dev plan 2.2). Each run records the
+fingerprint of its role's dispatch-set at launch (`runs.dispatch_fp`, migration 0010,
+written by run-agent after the previous tick's reconcile); the next tick's throttle and
+stall-streak compare it, after reconcile, with the current one. Equal = no net progress,
+whatever verbs fired. Rows without a fingerprint keep the verb check. Written for founder
+review per the 2026-07-18 paper-cuts batch (item F).
 
 ## The incident
 

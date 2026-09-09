@@ -193,6 +193,12 @@ priority · `o` open PR · `w` start/stop watch · `p` pause/resume · `t` tick 
 now · `c` cancel the running agent · `C` cut a release · `P` project setup · `r` runs history ·
 `l` log pager · `L` live log wall · `q` quits (with confirm) · `esc` backs out one level.
 
+**No wasted-run loops.** A role that keeps running without moving anything is throttled
+(45 minutes), then stalled until its world changes. "Moving anything" is a net status diff:
+the role's dispatch set as it read when the run launched versus now, after the tick's
+reconcile, so a claim that an interrupt reverted counts as nothing
+([design/probe-loop-cooldown.md](design/probe-loop-cooldown.md)).
+
 **Why is nothing running?** Every tick that launches nothing journals why
 (`projects/.watch.log`: a throttled role, a stalled one, a cooling provider, an idle-check
 skip, a spent budget, pause). The board reads it back: the ALL row's inspector shows each idle

@@ -278,19 +278,27 @@ for proj in "${projects[@]}"; do
         [ "$DRY" = 0 ] && rm -f "$sm"      # the role's world changed — un-stall and dispatch normally
       fi
     fi
-    last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes'))
-                         || '|' || (SELECT COUNT(*) FROM run_tasks rt
-                                       WHERE rt.run_id=r.id AND rt.verb != 'touch')
+    # "Did the last run make progress?" — design/probe-loop-cooldown.md option C: a run is a
+    # no-op when the role's dispatch-set reads NOW (after this tick's reconcile) exactly as it
+    # did when that run launched (runs.dispatch_fp). A `claim` that a system `interrupt` reverted
+    # therefore counts as nothing — the verb-count signal called it progress 14 times in a row.
+    # Rows without a fingerprint (pre-0010) keep the verb check: any non-touch verb = progress.
+    cur_fp="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$proj" "$cand" 2>/dev/null)"
+    noop_expr="CASE WHEN r.dispatch_fp IS NOT NULL THEN (r.dispatch_fp = '$(sqlesc "$cur_fp")')
+                    ELSE ((SELECT COUNT(*) FROM run_tasks rt WHERE rt.run_id=r.id AND rt.verb != 'touch') = 0) END"
+    if [ -z "$(db "SELECT 1 FROM pragma_table_info('runs') WHERE name='dispatch_fp';" 2>/dev/null)" ]; then
+      noop_expr="((SELECT COUNT(*) FROM run_tasks rt WHERE rt.run_id=r.id AND rt.verb != 'touch') = 0)"
+    fi
+    last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes')) || '|' || ($noop_expr)
                 FROM runs r WHERE r.project='$(sqlesc "$proj")' AND r.agent='$(sqlesc "$cand")'
                 ORDER BY r.id DESC LIMIT 1;" 2>/dev/null)"
-    if [ "$last" = "succeeded|1|0" ]; then
+    if [ "$last" = "succeeded|1|1" ]; then
       streak="$(db "SELECT COUNT(*) FROM (
-                      SELECT r.status s, (SELECT COUNT(*) FROM run_tasks rt
-                                          WHERE rt.run_id=r.id AND rt.verb != 'touch') e
+                      SELECT r.status s, ($noop_expr) n
                       FROM runs r WHERE r.project='$(sqlesc "$proj")'
                         AND r.agent='$(sqlesc "$cand")'
                       ORDER BY r.id DESC LIMIT 2)
-                    WHERE s='succeeded' AND e=0;" 2>/dev/null)"
+                    WHERE s='succeeded' AND n=1;" 2>/dev/null)"
       if [ "${streak:-0}" -ge 2 ] && [ "$DRY" = 0 ]; then
         # A role dispatching into a verify-guarded state (router.py --verify-gated; see
         # machine.role_awaits_verify) must never be PERMANENTLY parked here: that state's own

@@ -460,6 +460,61 @@ class TestSpendLimits(CliTest):
         self.assertIn("budget", r.stdout.lower())
 
 
+class TestProbeLoopCooldown(CliTest):
+    """design/probe-loop-cooldown.md option C (plan 2.2): progress is a NET STATUS DIFF of the
+    role's dispatch-set between launch (runs.dispatch_fp) and now, not a verb count. A claim
+    that a system interrupt reverted is a no-op; a claim that stuck is progress."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        with open(os.path.join(self.root, "projects", "demo", "agents", "lead.md"), "w") as f:
+            f.write("---\ntrigger: none\n---\npersona\n")   # keep the cadence lead out of the way
+        dais(self.root, "task", "add", "demo", "Build it", "--id", "d-1", "--status", "ready")
+
+    def _fp(self, role="engineer"):
+        return subprocess.run([os.path.join(self.root, "harness", "router.py"), "--dispatch-set",
+                               self.root, "demo", role], capture_output=True, text=True).stdout.strip()
+
+    def _seed_run(self, mins_ago, fp, verb="claim"):
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status,dispatch_fp) VALUES('demo',"
+                     "'engineer',datetime('now','-%d minutes'),datetime('now','-%d minutes'),'succeeded',?)"
+                     % (mins_ago, mins_ago), (fp,))
+        rid = conn.execute("SELECT MAX(id) FROM runs").fetchone()[0]
+        if verb:
+            conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(?,?,?)", (rid, "d-1", verb))
+        conn.commit(); conn.close()
+
+    def test_a_reverted_claim_is_a_no_op(self):
+        # the run fired `claim` (the old signal for progress) but the task is back at `ready`:
+        # the dispatch-set reads exactly as it did at launch -> throttled
+        self._seed_run(5, self._fp(), verb="claim")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run engineer", r.stdout)
+
+    def test_a_claim_that_stuck_is_progress(self):
+        fp_at_launch = self._fp()                          # d-1|ready
+        self._seed_run(5, fp_at_launch, verb="claim")
+        dais(self.root, "fire", "d-1", "claim", "--by", "engineer")   # now d-1|doing
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run engineer", r.stdout)     # doing dispatches the engineer again
+
+    def test_pre_migration_rows_keep_the_verb_check(self):
+        self._seed_run(5, None, verb="claim")             # no fingerprint recorded
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run engineer", r.stdout)     # a claim verb still reads as progress
+
+    def test_two_reverted_claims_stall_the_role(self):
+        self._seed_run(50, self._fp(), verb="claim")
+        self._seed_run(5, self._fp(), verb="claim")
+        r = dais(self.root, "tick", "demo")
+        self.assertNotIn("running engineer", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "projects", "demo", ".stalled-engineer")))
+        self.assertIn("STALL", open(os.path.join(self.root, "projects", ".watch.log")).read())
+
+
 class TestDispatcherHygiene(CliTest):
     """Plan 2.1: a dry-run tick is read-only, and only one tick runs at a time."""
 
@@ -1110,6 +1165,16 @@ class TestPerRoleModelOverride(CliTest):
         args = self._claude_argv("context: full\n")
         for flag in ("--setting-sources", "--strict-mcp-config", "--mcp-config", "--plugin-dir"):
             self.assertNotIn(flag, args)
+
+    def test_run_row_records_the_dispatch_fingerprint_at_launch(self):
+        # plan 2.2: the role's dispatch-set as it read when the run started (after reconcile)
+        dais(self.root, "task", "add", "demo", "review me", "--id", "q-1", "--status", "qa_review")
+        fp = subprocess.run([os.path.join(self.root, "harness", "router.py"), "--dispatch-set",
+                             self.root, "demo", "qa"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(fp, "q-1|qa_review")
+        r = self._run_agent("qa", env={"DAIS_NOOP_RUN": "echo ok"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT dispatch_fp FROM runs ORDER BY id DESC LIMIT 1")[0], fp)
 
     # --- the idle check's marker (plan 1.5): a cadence run records the board as it left it ------
     def test_cadence_run_records_the_board_fingerprint(self):
