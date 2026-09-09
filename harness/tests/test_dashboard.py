@@ -477,6 +477,53 @@ class TestDataLayer(unittest.TestCase):
         self.assertFalse(snap2.budget["over"])
         self.assertIsNone(d.load_snapshot(_seed(), root="/nonexistent", now="2026-06-26 20:45:00").budget)
 
+    # --- "why idle" (plan 1.7): the tick journal, attributed per project ---------------------
+    JOURNAL = ("[2026-06-26 20:00:00] launch acme/qa (serial)\n"
+               "[2026-06-26 20:30:00] throttle acme/lead — last run was a recent no-op; cooling 45m (trying next role)\n"
+               "[2026-06-26 20:31:00] idle-check: skipping wb/lead — board unchanged since its last run 5.2h ago (heartbeat 24h)\n"
+               "[2026-06-26 20:40:00] cap cooldown: anthropic\n"
+               "[2026-06-26 20:40:00] cooling — anthropic hit its usage cap within 90m; skipping acme/engineer\n"
+               "[2026-06-26 20:41:00] daily budget spent for wb: 150k/100k tokens — skipping\n")
+
+    def _journal_root(self, text=JOURNAL):
+        root = tempfile.mkdtemp(prefix="dais-tj-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        os.makedirs(os.path.join(root, "projects"))
+        with open(os.path.join(root, "projects", ".watch.log"), "w") as f:
+            f.write(text)
+        return root
+
+    def test_tick_journal_attributes_the_newest_line_per_project(self):
+        j = d.tick_journal(self._journal_root(), ["acme", "wb", "ghost"], now_local="2026-06-26 20:45:00")
+        self.assertEqual(j["projects"]["acme"]["ts"], "2026-06-26 20:40:00")
+        self.assertIn("cooling", j["projects"]["acme"]["text"])
+        self.assertEqual(j["projects"]["wb"]["ts"], "2026-06-26 20:41:00")
+        self.assertIn("budget", j["projects"]["wb"]["text"])
+        self.assertNotIn("ghost", j["projects"])
+        self.assertEqual(j["workspace"]["text"], "cap cooldown: anthropic")
+        self.assertEqual(j["projects"]["acme"]["age_min"], 5)
+
+    def test_tick_reason_line_says_age_and_retry(self):
+        e = {"ts": "2026-06-26 20:30:00", "age_min": 15,
+             "text": "throttle acme/lead — last run was a recent no-op; cooling 45m (trying next role)"}
+        line = d.tick_reason_line(e)
+        self.assertIn("throttle", line); self.assertIn("15m ago", line); self.assertIn("retry ≈30m", line)
+        e = {"ts": "x", "age_min": 100, "text": "STALL acme/lead — 2 consecutive no-op runs; parked until its tasks change (t-1|ready)"}
+        self.assertIn("until its tasks change", d.tick_reason_line(e))
+        self.assertIn("1h40m ago", d.tick_reason_line(e))
+
+    def test_status_shows_the_last_tick_reason_under_an_idle_project(self):
+        root = self._journal_root()
+        snap = d.load_snapshot(_seed(), root=root, now="2026-06-26 20:45:00", now_local="2026-06-26 20:45:00")
+        out = d.render_plain(snap, color=False)
+        self.assertIn("last tick", out)
+        self.assertIn("cooling", out)
+
+    def test_no_journal_means_no_reason_lines(self):
+        snap = d.load_snapshot(_seed(), root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertIsNone(snap.projects[0].last_tick)
+        self.assertNotIn("last tick", d.render_plain(snap, color=False))
+
     def test_snapshot_cooling_names_only_the_capped_provider(self):
         # a codex cap after a Claude success cools openai alone — mirrors dispatch.sh's
         # per-provider gate, so the badge can't claim Claude is cooling when it isn't
@@ -1200,8 +1247,12 @@ class TestRenderProjectCast(unittest.TestCase):
             self.assertIn("anthropic · claude-opus-4-8", out)
 
     def test_render_project_names_the_cli_default_when_a_role_sets_no_model(self):
-        # openai has no tool-side default model (the codex CLI's own config decides) — an
-        # empty cell read as `openai ·  @ high`; say what actually happens instead
+        # openai's default model comes from ~/.codex/config.toml (plan 1.8); with none readable
+        # the cell must still say what happens instead of printing `openai ·  @ high`
+        home = tempfile.mkdtemp(prefix="dais-nohome-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        old = os.environ.get("HOME"); os.environ["HOME"] = home
+        self.addCleanup(os.environ.__setitem__, "HOME", old)
         with tempfile.TemporaryDirectory() as root:
             pdir = os.path.join(root, "projects", "p")
             os.makedirs(os.path.join(pdir, "agents"))

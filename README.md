@@ -193,6 +193,13 @@ priority · `o` open PR · `w` start/stop watch · `p` pause/resume · `t` tick 
 now · `c` cancel the running agent · `C` cut a release · `P` project setup · `r` runs history ·
 `l` log pager · `L` live log wall · `q` quits (with confirm) · `esc` backs out one level.
 
+**Why is nothing running?** Every tick that launches nothing journals why
+(`projects/.watch.log`: a throttled role, a stalled one, a cooling provider, an idle-check
+skip, a spent budget, pause). The board reads it back: the ALL row's inspector shows each idle
+project's last reason with its age and when it retries (`idle · throttle acme/lead — … (12m
+ago, retry ≈33m)`), the vitals strip shows the newest one in a few words when nothing runs,
+and `dais status` prints `⏱ last tick: …` under each idle project.
+
 **Manual vs. the loop.** `dais watch` is the continuous auto-dispatcher. `dais start <id>`,
 `R`, and `t` are on-demand runs that fire one agent now and bypass pause. `start` runs the
 role the machine dispatches for the task's state, honoring the dependency chain.
@@ -265,7 +272,9 @@ designer which provider a new role runs on. `dais lint` warns when a role's prov
 on PATH, and a run refuses to start (recording nothing) until it is. A codex turn that dies on an
 API error, such as a model id your ChatGPT plan can't use, is recorded as a `failed` run, not a
 silent success. Codex runs are `--ephemeral` (no session piles up in `~/.codex` per tick), but
-they DO read your `~/.codex/config.toml`: a `notify` hook there fires on every headless run.
+they DO read your `~/.codex/config.toml`: a `notify` hook there fires on every headless run,
+and its `model = "…"` line is the default for an openai role with no `model:` of its own (shown
+in `dais project`, passed explicitly, recorded on the run).
 
 Resolution (frontmatter → legacy roles file → `project.yaml` → defaults) is one authority,
 `router.agent_setup`, read by every consumer (the scheduler, `run-agent.sh`, `dais project`).

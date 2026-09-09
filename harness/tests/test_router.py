@@ -464,6 +464,10 @@ class TestAgentSetup(unittest.TestCase):
         self.assertEqual((s["provider"], s["auth"]), ("anthropic", "subscription"))
 
     def test_project_model_does_not_leak_across_providers(self):
+        home = tempfile.mkdtemp(prefix="dais-nohome-")     # no ~/.codex/config.toml (plan 1.8 reads it)
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        old = os.environ.get("HOME"); os.environ["HOME"] = home
+        self.addCleanup(os.environ.__setitem__, "HOME", old)
         self._agent("qa", "provider: openai\n")
         s = router.agent_setup(self.root, "demo", "qa")
         self.assertEqual(s["provider"], "openai")
@@ -549,6 +553,29 @@ class TestLeanProfileHelpers(unittest.TestCase):
         for plug, vers in (("supabase", ["1.0.0", "1.2.0"]), ("superpowers", ["6.2.0"])):
             for v in vers:
                 os.makedirs(os.path.join(self.home, ".claude", "plugins", "cache", "official", plug, v))
+
+    def test_openai_default_model_is_the_codex_configs_model(self):
+        # plan 1.8: a codex role with no model: ran on the codex CLI's own default and recorded
+        # '' on the run row; `dais project` showed "(codex default)". Read ~/.codex/config.toml
+        # so the real id is resolved, passed explicitly, and recorded.
+        os.makedirs(os.path.join(self.home, ".codex"))
+        with open(os.path.join(self.home, ".codex", "config.toml"), "w") as f:
+            f.write('model = "gpt-5.6-terra"\nmodel_reasoning_effort = "medium"\n')
+        root = tempfile.mkdtemp(prefix="dais-cdx-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        pdir = os.path.join(root, "projects", "demo"); os.makedirs(os.path.join(pdir, "agents"))
+        with open(os.path.join(pdir, "project.yaml"), "w") as f:
+            f.write("project: demo\nrepo: x\nstage_goal: g\nmodel: claude-opus-5\n")
+        with open(os.path.join(pdir, "agents", "qa.md"), "w") as f:
+            f.write("---\nprovider: openai\n---\npersona\n")
+        self.assertEqual(router.agent_setup(root, "demo", "qa")["model"], "gpt-5.6-terra")
+        with open(os.path.join(pdir, "agents", "qa.md"), "w") as f:
+            f.write("---\nprovider: openai\nmodel: gpt-5.4\n---\npersona\n")   # explicit still wins
+        self.assertEqual(router.agent_setup(root, "demo", "qa")["model"], "gpt-5.4")
+        os.remove(os.path.join(self.home, ".codex", "config.toml"))          # unreadable -> ''
+        with open(os.path.join(pdir, "agents", "qa.md"), "w") as f:
+            f.write("---\nprovider: openai\n---\npersona\n")
+        self.assertEqual(router.agent_setup(root, "demo", "qa")["model"], "")
 
     def test_mcp_config_holds_only_the_allowlisted_servers(self):
         import json

@@ -100,6 +100,67 @@ class Project:
     tasks_by_status: dict = field(default_factory=dict)
     recent_runs: list = field(default_factory=list)
     machine: dict = None              # the project's authored state machine (or None = legacy status routing)
+    last_tick: dict = None            # why the last tick left this project idle (plan 1.7), or None
+
+
+# --- "why idle" (plan 1.7): the tick journal (projects/.watch.log) says why a tick launched
+# nothing — throttle, stall, provider cooling, idle-check, budget, pause — and the board never
+# showed it. Attribute each line to a project by the tokens dispatch.sh writes (`proj/role`,
+# `[proj]`, `for proj:`); keep the newest per project and the newest workspace-level line. ---
+def tick_journal(root, project_names, now_local=None, limit=400):
+    import time as _time
+    path = os.path.join(root, "projects", ".watch.log")
+    out = {"workspace": None, "projects": {}}
+    try:
+        with open(path) as fh:
+            lines = fh.readlines()[-limit:]
+    except OSError:
+        return out
+    now_local = now_local or _time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        now_t = _time.mktime(_time.strptime(now_local, "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        now_t = _time.time()
+
+    def entry(ts, text):
+        try:
+            age = max(0, int((now_t - _time.mktime(_time.strptime(ts, "%Y-%m-%d %H:%M:%S"))) // 60))
+        except ValueError:
+            age = 0
+        return {"ts": ts, "text": text, "age_min": age}
+
+    for raw in lines:
+        raw = raw.rstrip("\n")
+        if not raw.startswith("[") or "] " not in raw:
+            continue
+        ts, text = raw[1:].split("] ", 1)
+        owner = next((n for n in project_names
+                      if (" %s/" % n) in text or ("[%s]" % n) in text or ("for %s:" % n) in text), None)
+        if owner:
+            out["projects"][owner] = entry(ts, text)      # newest wins (lines are in order)
+        elif "/" not in text.split(" — ")[0]:            # a workspace-level line (no proj/role token)
+            out["workspace"] = entry(ts, text)
+    return out
+
+
+def tick_reason_line(e):
+    """One human line for a journal entry: the reason, how long ago, and when it retries when
+    the reason implies a clock (throttle 45m, cap cooldown 90m, error backoff 30m)."""
+    age = e.get("age_min", 0)
+    ago = ("%dm" % age) if age < 60 else ("%dh%02dm" % (age // 60, age % 60))
+    text = e["text"]
+    head = text.lower()
+    hint = ""
+    for key, mins in (("throttle", 45), ("cooling —", 90), ("backing off", 30)):
+        if head.startswith(key):
+            left = mins - age
+            hint = (", retry ≈%dm" % left) if left > 0 else ", retry due"
+            break
+    if head.startswith("idle-check"):
+        hint = ", wakes on a board change"
+    elif head.startswith("daily budget"):
+        hint = ", resumes tomorrow"
+    return "%s (%s ago%s)" % (text if len(text) <= 90 else text[:88] + "…", ago, hint)
 
 
 @dataclass
@@ -113,6 +174,7 @@ class Snapshot:
                                                  # (['all'] on a db without runs.provider)
     budget: dict = None            # the workspace daily budget (plan 1.6): {'limit','unit','spent',
                                    # 'over'}, or None when none is set — mirrors the dispatcher
+    last_tick: dict = None         # the newest tick-journal entry anywhere (plan 1.7), or None
     links: list = field(default_factory=list)   # composition graph: (parent_id, child_id, rel)
                                                 # rows from task_links; [] pre-migration
     archived: list = field(default_factory=list)  # projects hidden from the board (`archived: true`
@@ -296,7 +358,7 @@ _PRIO = ("CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
          "WHEN 'medium' THEN 2 ELSE 3 END")
 
 
-def load_snapshot(conn, root=HOME, now=None, recent=6):
+def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
     now = now or utc_now()
     projects = []
     dep = ",blocked_on" if _has_column(conn, "tasks", "blocked_on") else ""
@@ -377,6 +439,15 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
                 t.blocked_status = status_by_id.get(t.blocked_on) if t.blocked else None
                 t.over_budget = over.get(t.id)
     budget = router.daily_budget_state(root, now=now, conn=conn)
+    # "why idle" (plan 1.7): the tick journal, newest entry per project + the newest overall
+    journal = tick_journal(root, [p.name for p in projects], now_local=now_local)
+    newest = None
+    for p in projects:
+        p.last_tick = journal["projects"].get(p.name)
+        if p.last_tick and (newest is None or p.last_tick["ts"] > newest["ts"]):
+            newest = p.last_tick
+    if journal["workspace"] and (newest is None or journal["workspace"]["ts"] > newest["ts"]):
+        newest = journal["workspace"]
     grows = conn.execute(
         "SELECT id,started_at,ended_at,project,agent,status,summary,log_path,task_id" + mcol + " FROM runs "
         "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()
@@ -413,7 +484,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
     except sqlite3.Error:
         links = []
     return Snapshot(projects=projects, recent_runs=recent_runs,
-                    cap_state=bool(cooling), cooling=cooling, budget=budget, ts=now,
+                    cap_state=bool(cooling), cooling=cooling, budget=budget, last_tick=newest, ts=now,
                     workspace=workspace_name(root), links=links, archived=archived)
 
 

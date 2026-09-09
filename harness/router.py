@@ -106,6 +106,18 @@ def _claude_user_config():
         return {}
 
 
+def codex_default_model():
+    """The codex CLI's own default model (`model = "…"` in ~/.codex/config.toml), '' if
+    unreadable. Plan 1.8: an openai role with no `model:` used to run on this implicitly and
+    record '' — resolve it here so it is shown, passed explicitly, and recorded."""
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".codex", "config.toml")) as fh:
+            m = re.search(r'(?m)^\s*model\s*=\s*"([^"]+)"', fh.read())
+            return m.group(1).strip() if m else ""
+    except OSError:
+        return ""
+
+
 def mcp_config_json(names, report=False):
     """The `--mcp-config` JSON holding ONLY the allowlisted user-level servers. With
     report=True returns (json, [names not found]) so the run can say what it couldn't load."""
@@ -163,7 +175,8 @@ def agent_setup(root, project, role):
     # provider — they must not leak onto a role resolved to a different provider (e.g. a
     # per-role `provider: openai` override), or that CLI gets handed an anthropic model id.
     project_provider = _yaml_line(ytext, "provider") or "anthropic"
-    provider_default_model = "claude-opus-4-8" if provider == "anthropic" else ""
+    provider_default_model = "claude-opus-4-8" if provider == "anthropic" else (
+        codex_default_model() if provider == "openai" else "")
     model = fm.get("model") or (
         (_yaml_line(ytext, "model_" + role) or _yaml_line(ytext, "model")
          or provider_default_model) if provider == project_provider

@@ -419,6 +419,28 @@ class TestChromePanes(unittest.TestCase):
         text = " ".join(s for (_y, _x, s, _a) in scr.calls)
         self.assertIn("BUDGET SPENT", text)
 
+    # --- "why idle" (plan 1.7) in the cockpit ---------------------------------------------
+    def _journaled_app(self):
+        app = self._app([("cou-1", "acme", "x", "approved", "high", None)])     # nothing dispatchable
+        os.makedirs(os.path.join(app.root, "projects"), exist_ok=True)
+        with open(os.path.join(app.root, "projects", ".watch.log"), "w") as fh:
+            fh.write("[2026-06-26 20:30:00] throttle acme/lead — last run was a recent no-op; cooling 45m (trying next role)\n")
+        app.snap = d.load_snapshot(app.conn, root=app.root)
+        return app
+
+    def test_all_row_inspector_says_why_a_project_is_idle(self):
+        app = self._journaled_app()
+        text = "\n".join(pn._workspace_lines(app))
+        self.assertIn("throttle", text)
+        self.assertIn("ago", text)
+
+    def test_vitals_says_why_idle_when_nothing_runs(self):
+        app = self._journaled_app()
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("idle: throttle", text)
+
     def test_vitals_cooling_badge_names_the_provider(self):
         app = self._app([("cou-1", "acme", "x", "proposed", "high", None)])
         try:
@@ -962,6 +984,10 @@ class TestInspectorModelLine(unittest.TestCase):
         self.assertIn("runs as qa · openai · gpt-5.4", body)
 
     def test_inspector_names_the_cli_default_when_a_codex_role_sets_no_model(self):
+        import tempfile
+        home = tempfile.mkdtemp(prefix="dais-nohome-")          # no ~/.codex/config.toml to read
+        old = os.environ.get("HOME"); os.environ["HOME"] = home
+        self.addCleanup(os.environ.__setitem__, "HOME", old)
         papp = self._papp("qa_review", "project: p\nrepo: p\n")
         adir = os.path.join(papp.root, "projects", "p", "agents")
         os.makedirs(adir, exist_ok=True)

@@ -536,7 +536,8 @@ def _workspace_lines(app):
            f"dais {d.tool_version()} · watch {loop}", ""]
     for p in snap.projects:
         run, you, que, wait, done = _rail_counts(app, p.name)
-        act = "▶ " + "+".join(a for a, _, _ in p.running) if p.running else "idle"
+        act = ("▶ " + "+".join(a for a, _, _ in p.running)) if p.running else (
+            "idle · " + d.tick_reason_line(p.last_tick) if getattr(p, "last_tick", None) else "idle")
         roles = [r for r in d.project_roles(app.root, p.name) if r != "founder"]
         models = []
         for r in roles:                                  # distinct, in cast order, de-prefixed
@@ -668,6 +669,9 @@ def render_vitals(scr, rect, app):
     ident = f" DAIS {_BRAND} {ws}" if ws else " DAIS"     # honesty comes from the watch badge, not a literal "LIVE"
     run_dot = _DOT_RUN if threads else _DOT_IDLE
     run_tok = f"{run_dot} {len(threads)} running"
+    if not threads and snap and getattr(snap, "last_tick", None):   # why idle, in a few words (plan 1.7)
+        _why = snap.last_tick["text"].split(" — ")[0].split(";")[0]
+        run_tok += f" · idle: {_why[:40]}"
     gage = d.oldest_gate_age(snap, now) if ng > 0 else ""     # how stale is the WORST gate
     gate_tok = (f"{_DOT_GATE} {ng} NEED YOU" + (f" · {gage}" if gage else "")
                 if ng > 0 else f"{_DOT_IDLE} {ng} need you")

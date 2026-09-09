@@ -49,6 +49,7 @@ from board import (  # noqa: F401
     Task, Run, Project, Snapshot,
     connect, _has_column, _pid_alive, running_agents,
     project_field, agent_model, agent_provider, stage_goal, _load_machine,
+    tick_journal, tick_reason_line,
     _REVERSE_VERBS, _machine_actions, workspace_name,
     _PRIO, load_snapshot, load_runs, attach_run_tasks, runs_touching,
 )
@@ -156,6 +157,8 @@ def render_plain(snap, color=None):
                   f"{c['CD']}({el} · since {to_local_hhmm(since)}){c['C0']}")
         else:
             P(f"  {c['CD']}▶ idle{c['C0']}")
+            if p.last_tick:                                   # why the loop left it idle (plan 1.7)
+                P(f"  {c['CD']}⏱ last tick: {tick_reason_line(p.last_tick)}{c['C0']}")
         if snap.cap_state:
             P(f"  {c['CY']}⏸ cooling down — {', '.join(snap.cooling) or 'recent'} capped "
               f"(that provider's roles wait for its window; others still run){c['C0']}")
