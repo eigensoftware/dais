@@ -264,10 +264,10 @@ def main(argv):
     root = os.environ.get("DAIS_HOME") or ROOT
     token = secrets.token_urlsafe(12)
     srv = make_server(root, "127.0.0.1", port, token)
-    print("dais web — %s" % root)
-    print("  open:  http://127.0.0.1:%d/%s/" % (srv.server_address[1], token))
-    print("  phone: tailscale serve %d   (then the same path on your tailnet name)" % srv.server_address[1])
-    print("  Ctrl-C to stop")
+    print("dais web — %s" % root, flush=True)
+    print("  open:  http://127.0.0.1:%d/%s/" % (srv.server_address[1], token), flush=True)
+    print("  phone: tailscale serve %d   (then the same path on your tailnet name)" % srv.server_address[1], flush=True)
+    print("  Ctrl-C to stop", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
