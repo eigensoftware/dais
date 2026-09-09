@@ -1760,6 +1760,131 @@ class TestPerRoleModelOverride(CliTest):
         self.assertNotEqual(r.returncode, 0)                        # no codex on PATH: say so up front
         self.assertIn("codex", r.stdout + r.stderr)
 
+    # --- 5.4: accounts — a run picks its account, exports the credential, marks caps per account ---
+    def _accounts(self, yaml_text):
+        """A user-level accounts file + marker dir for this test (DAIS_ACCOUNTS_FILE/_DIR)."""
+        d = tempfile.mkdtemp(prefix="dais-accts-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "accounts.yaml"), "w") as f:
+            f.write(yaml_text)
+        os.makedirs(os.path.join(d, "max-a")); os.makedirs(os.path.join(d, "max-b"))
+        return {"DAIS_ACCOUNTS_FILE": os.path.join(d, "accounts.yaml"), "DAIS_ACCOUNTS_DIR": os.path.join(d, "markers"),
+                "_dir": d}
+
+    def _pool_yaml(self, d):
+        return ("accounts:\n"
+                "  max-a: {provider: anthropic, kind: subscription, config_dir: %s/max-a}\n"
+                "  max-b: {provider: anthropic, kind: subscription, config_dir: %s/max-b}\n"
+                "  api-1: {provider: anthropic, kind: api, key_env: ANTHROPIC_KEY_ONE}\n"
+                "  chatgpt: {provider: openai, kind: subscription, config_dir: %s/chatgpt}\n"
+                "pools:\n"
+                "  max: {members: [max-a, max-b], policy: least-recently-capped}\n" % (d, d, d))
+
+    def test_subscription_account_sets_the_clis_config_dir_and_is_recorded(self):
+        acc = self._accounts("")
+        acc.update({"DAIS_ACCOUNTS_FILE": acc["DAIS_ACCOUNTS_FILE"]})
+        with open(acc["DAIS_ACCOUNTS_FILE"], "w") as f:
+            f.write(self._pool_yaml(acc["_dir"]))
+        argv = os.path.join(self.root, "claude-argv")
+        fake = self._fake_claude(argv) + 'echo "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-unset}" >> "' + argv + '"\n'
+        self._set_role("qa", "account: max-b\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=fake), "HOME": self._fake_home(),
+                                       "DAIS_ACCOUNTS_FILE": acc["DAIS_ACCOUNTS_FILE"], "DAIS_ACCOUNTS_DIR": acc["DAIS_ACCOUNTS_DIR"]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("CLAUDE_CONFIG_DIR=%s/max-b" % acc["_dir"], open(argv).read())
+        row = q(self.root, "SELECT status, provider, account FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row), ("succeeded", "anthropic", "max-b"))
+
+    def test_api_account_exports_the_packs_key_var_from_its_key_env(self):
+        acc = self._accounts("")
+        with open(acc["DAIS_ACCOUNTS_FILE"], "w") as f:
+            f.write(self._pool_yaml(acc["_dir"]))
+        argv = os.path.join(self.root, "claude-argv")
+        fake = self._fake_claude(argv) + 'echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-unset}" >> "' + argv + '"\n'
+        self._set_role("qa", "account: api-1\n")
+        env = {"PATH": self._tmpbin(fake_claude=fake), "HOME": self._fake_home(),
+               "DAIS_ACCOUNTS_FILE": acc["DAIS_ACCOUNTS_FILE"], "DAIS_ACCOUNTS_DIR": acc["DAIS_ACCOUNTS_DIR"]}
+        r = self._run_agent("qa", env=env)
+        self.assertNotEqual(r.returncode, 0)                        # the key is not set anywhere: preflight says so
+        self.assertIn("ANTHROPIC_KEY_ONE", r.stdout + r.stderr)
+        r = self._run_agent("qa", env=dict(env, ANTHROPIC_KEY_ONE="sk-one"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("ANTHROPIC_API_KEY=sk-one", open(argv).read())
+        self.assertEqual(q(self.root, "SELECT account FROM runs ORDER BY id DESC LIMIT 1")[0], "api-1")
+
+    def test_pool_rotates_past_a_capped_member_and_marks_it(self):
+        """max-a caps -> its marker is written, the run moves to max-b on the SAME model, succeeds,
+        and max-b's marker (none) stays clear. The next run starts on max-b (max-a is cooling)."""
+        acc = self._accounts("")
+        with open(acc["DAIS_ACCOUNTS_FILE"], "w") as f:
+            f.write(self._pool_yaml(acc["_dir"]))
+        seen = os.path.join(self.root, "seen")
+        fake = ('echo "$CLAUDE_CONFIG_DIR" >> "' + seen + '"\n'
+                'case "$CLAUDE_CONFIG_DIR" in */max-a) echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"You\\u0027ve hit your usage limit"}]}}\';;\n'
+                '  *) echo \'{"type":"result","subtype":"success","num_turns":1,"usage":{"input_tokens":5,"output_tokens":1}}\';; esac\n')
+        self._set_role("qa", "account: pool:max\nmodel: claude-fable-5\n")
+        env = {"PATH": self._tmpbin(fake_claude=fake), "HOME": self._fake_home(),
+               "DAIS_ACCOUNTS_FILE": acc["DAIS_ACCOUNTS_FILE"], "DAIS_ACCOUNTS_DIR": acc["DAIS_ACCOUNTS_DIR"]}
+        r = self._run_agent("qa", env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(open(seen).read().split(), ["%s/max-a" % acc["_dir"], "%s/max-b" % acc["_dir"]])
+        row = q(self.root, "SELECT status, account, model FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row), ("succeeded", "max-b", "claude-fable-5"))
+        self.assertTrue(os.path.exists(os.path.join(acc["DAIS_ACCOUNTS_DIR"], "max-a.cooldown")))
+        self.assertFalse(os.path.exists(os.path.join(acc["DAIS_ACCOUNTS_DIR"], "max-b.cooldown")))
+        self.assertNotIn("⚑", r.stdout)                            # no "backup model" note: same model, other account
+        os.unlink(seen)
+        r = self._run_agent("qa", env=env)
+        self.assertEqual(open(seen).read().split()[0], "%s/max-b" % acc["_dir"])   # cooling max-a is a later probe only
+        self.assertEqual(q(self.root, "SELECT status FROM runs ORDER BY id DESC LIMIT 1")[0], "succeeded")
+
+    def test_all_pool_members_capped_then_the_fallback_account_crosses_providers(self):
+        acc = self._accounts("")
+        with open(acc["DAIS_ACCOUNTS_FILE"], "w") as f:
+            f.write(self._pool_yaml(acc["_dir"]))
+        argv = os.path.join(self.root, "codex-argv")
+        claude = ('echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"You\\u0027ve hit your usage limit"}]}}\'\n')
+        codex = ('printf "%s\\n" "$@" > "' + argv + '"\n'
+                 'echo "CODEX_HOME=${CODEX_HOME:-unset}" >> "' + argv + '"\n'
+                 'echo \'{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"codex took it"}}\'\n'
+                 'echo \'{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":1}}\'\n')
+        self._set_role("qa", "account: pool:max\nmodel: claude-fable-5\nfallback_account: chatgpt\nfallback_model: gpt-5.4\n")
+        env = {"PATH": self._tmpbin(fake_codex=codex, fake_claude=claude), "HOME": self._fake_home(),
+               "DAIS_ACCOUNTS_FILE": acc["DAIS_ACCOUNTS_FILE"], "DAIS_ACCOUNTS_DIR": acc["DAIS_ACCOUNTS_DIR"]}
+        r = self._run_agent("qa", env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        row = q(self.root, "SELECT status, provider, account, model FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row), ("succeeded", "openai", "chatgpt", "gpt-5.4"))
+        self.assertIn("CODEX_HOME=%s/chatgpt" % acc["_dir"], open(argv).read())
+        for m in ("max-a", "max-b"):
+            self.assertTrue(os.path.exists(os.path.join(acc["DAIS_ACCOUNTS_DIR"], m + ".cooldown")), m)
+        self.assertFalse(os.path.exists(os.path.join(acc["DAIS_ACCOUNTS_DIR"], "chatgpt.cooldown")))
+
+    def test_a_success_clears_the_accounts_own_marker(self):
+        acc = self._accounts("")
+        with open(acc["DAIS_ACCOUNTS_FILE"], "w") as f:
+            f.write(self._pool_yaml(acc["_dir"]))
+        os.makedirs(acc["DAIS_ACCOUNTS_DIR"])
+        with open(os.path.join(acc["DAIS_ACCOUNTS_DIR"], "max-b.cooldown"), "w") as f:
+            f.write("%d claude-fable-5\n" % int(time.time()))
+        self._set_role("qa", "account: max-b\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(os.path.join(self.root, "a"))),
+                                       "HOME": self._fake_home(), "DAIS_ACCOUNTS_FILE": acc["DAIS_ACCOUNTS_FILE"],
+                                       "DAIS_ACCOUNTS_DIR": acc["DAIS_ACCOUNTS_DIR"]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(acc["DAIS_ACCOUNTS_DIR"], "max-b.cooldown")))
+
+    def test_roles_without_accounts_still_mark_the_implicit_account(self):
+        acc = self._accounts("")
+        claude = ('echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"You\\u0027ve hit your usage limit"}]}}\'\n')
+        self._set_role("qa", "model: claude-fable-5\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=claude), "HOME": self._fake_home(),
+                                       "DAIS_ACCOUNTS_FILE": os.path.join(acc["_dir"], "none.yaml"),
+                                       "DAIS_ACCOUNTS_DIR": acc["DAIS_ACCOUNTS_DIR"]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status, account FROM runs ORDER BY id DESC LIMIT 1"), ("capped", "anthropic"))
+        self.assertIn("claude-fable-5", open(os.path.join(acc["DAIS_ACCOUNTS_DIR"], "anthropic.cooldown")).read())
+
     # --- budget caps (plan 1.4) ---------------------------------------------------------------
     def test_caps_become_claude_flags_only_when_set(self):
         args = self._claude_argv("max_turns: 25\nmax_budget_usd: 2.50\n")

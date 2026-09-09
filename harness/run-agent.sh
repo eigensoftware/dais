@@ -30,6 +30,9 @@ MODEL_PROVIDER="$(cfg model_provider)"; BASE_URL="$(cfg base_url)"; ENV_KEY="$(c
 # 5.3: the fallback may live on another provider pack
 FALLBACK_PROVIDER="$(cfg fallback_provider)"; [ -n "$FALLBACK_PROVIDER" ] || FALLBACK_PROVIDER="$PROVIDER"
 [ "$FALLBACK_PROVIDER" = "$PROVIDER" ] && [ "$FALLBACK" = "$MODEL" ] && FALLBACK=""
+# 5.4: accounts (accounts.py). ACCOUNT is a name or pool:<p>; the attempt PLAN below lists the
+# concrete accounts to try, same-provider members first, then the fallback tier's.
+ACCOUNT="$(cfg account)"; FALLBACK_ACCOUNT="$(cfg fallback_account)"
 # budget caps (plan 1.4). Unset = unbounded (the historical behavior). max_turns/max_budget_usd
 # are claude flags; max_minutes is OUR watchdog (macOS ships no `timeout`), on both providers.
 MAXT="$(cfg max_turns)"; MAXB="$(cfg max_budget_usd)"; MAXMIN="$(cfg max_minutes)"
@@ -91,8 +94,20 @@ load_pack(){   # $1 = provider -> PACK PACK_CLI KEYVAR; exits, named, when the p
   local meta; meta="$(python3 "$SELF/router.py" --pack-meta "$1" 2>/dev/null)"
   PACK_CLI="$(printf '%s\n' "$meta" | sed -n 's/^cli=//p')"
   KEYVAR="$(printf '%s\n' "$meta" | sed -n 's/^key_var=//p')"
+  CFGDIR_VAR="$(printf '%s\n' "$meta" | sed -n 's/^config_dir_var=//p')"   # 5.4: per-account login dir
 }
 load_pack "$PROVIDER"
+
+# The account plan (5.4): one line per account to try — tier|account|provider|kind|config_dir|key_env.
+# Primary members first (a pool's free members, then its capped ones as probes), then the
+# fallback tier's. The models are joined in below, once the task's priority tier is known.
+PLAN=()
+while IFS= read -r _line; do [ -n "$_line" ] && PLAN+=("$_line"); done \
+  < <(python3 "$SELF/router.py" --account-attempts "$DAIS_HOME" "$PROJECT" "$AGENT" 2>/dev/null)
+[ "${#PLAN[@]}" -gt 0 ] || PLAN=("primary|$PROVIDER|$PROVIDER|subscription||")
+# the primary account's key_env (an `api` account names its own key variable; '' = the pack's)
+_plan_field(){ printf '%s' "$1" | cut -d'|' -f"$2"; }
+PRIMARY_KEY_ENV="$(_plan_field "${PLAN[0]}" 6)"
 
 # Provider CLI preflight — the pack's CLI must be on PATH. Fail here, named, BEFORE the git
 # fetch and before a run row exists: a missing `codex` used to surface as exit 127 deep in the
@@ -114,8 +129,9 @@ fi
 # auth:api preflight — fail fast, before any network/claude work (git fetch is right below),
 # if the provider's key isn't set anywhere (process env / ~/.dais/env / $DAIS_HOME/.env).
 if [ "$AUTH" = "api" ]; then
-  if [ -n "$KEYVAR" ] && [ -z "${!KEYVAR:-}" ]; then
-    echo "[$PROJECT/$AGENT] auth: api but \$$KEYVAR is not set — put it in your environment," \
+  _kv="${PRIMARY_KEY_ENV:-$KEYVAR}"
+  if [ -n "$_kv" ] && [ -z "${!_kv:-}" ]; then
+    echo "[$PROJECT/$AGENT] auth: api but \$$_kv is not set — put it in your environment," \
          "~/.dais/env, or $DAIS_HOME/.env"; exit 1
   fi
 fi
@@ -191,7 +207,8 @@ TS="$(date +%Y%m%d-%H%M%S)"; LOG="$PDIR/logs/$AGENT-$TS.log"
 # dais.db that hasn't run `dais migrate` yet — run recording must never break on a schema gap.
 # Three shapes, newest first: +provider (0007, the per-provider cap gate reads it), +model
 # (0006), legacy. Each falls back to the next on a schema gap.
-RUNID="$(db "INSERT INTO runs(project,agent,log_path,model,provider) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")','$(sqlesc "$PROVIDER")'); SELECT last_insert_rowid();" 2>/dev/null)"
+RUNID="$(db "INSERT INTO runs(project,agent,log_path,model,provider,account) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")','$(sqlesc "$PROVIDER")','$(sqlesc "$(_plan_field "${PLAN[0]}" 2)")'); SELECT last_insert_rowid();" 2>/dev/null)"
+[ -n "$RUNID" ] || RUNID="$(db "INSERT INTO runs(project,agent,log_path,model,provider) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")','$(sqlesc "$PROVIDER")'); SELECT last_insert_rowid();" 2>/dev/null)"
 [ -n "$RUNID" ] || RUNID="$(db "INSERT INTO runs(project,agent,log_path,model) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")','$(sqlesc "$MODEL")'); SELECT last_insert_rowid();" 2>/dev/null)"
 [ -n "$RUNID" ] || RUNID="$(db "INSERT INTO runs(project,agent,log_path) VALUES('$(sqlesc "$PROJECT")','$(sqlesc "$AGENT")','$(sqlesc "$LOG")'); SELECT last_insert_rowid();")"
 # Pin the task onto the run row (best-effort metadata; the run is already recorded). Separate
@@ -475,21 +492,52 @@ if [ -n "$FALLBACK" ] && [ -f "$MARKER" ]; then
   else rm -f "$MARKER"; fi                # window reset — give the primary another shot
 fi
 
-# attempts are provider|model pairs (5.3): the fallback may run on another pack
-if [ -n "$FALLBACK" ] && [ "$AUTH" != "api" ]; then
-  if [ "$start_on_backup" = 1 ]; then ATTEMPTS=("$FALLBACK_PROVIDER|$FALLBACK"); else ATTEMPTS=("$PROVIDER|$MODEL" "$FALLBACK_PROVIDER|$FALLBACK"); fi
-else
-  ATTEMPTS=("$PROVIDER|$MODEL")
-fi
+# attempts are provider|model|account|kind|config_dir|key_env (5.3 + 5.4): the PLAN's primary
+# accounts run the role's model; its fallback accounts run the fallback model (or the same model
+# when the fallback tier stays on the same provider). The old single-account rule holds: a
+# fallback MODEL on the same credential only helps under a subscription (api shares one balance);
+# another ACCOUNT is another credential, so it is always worth trying.
+ATTEMPTS=()
+for _pl in "${PLAN[@]}"; do
+  IFS='|' read -r _tier _acct _prov _kind _cfg _key <<<"$_pl"
+  if [ "$_tier" = primary ]; then
+    [ "$start_on_backup" = 1 ] && continue
+    ATTEMPTS+=("$_prov|$MODEL|$_acct|$_kind|$_cfg|$_key")
+  else
+    _m="$FALLBACK"; [ -n "$_m" ] || { [ "$_prov" = "$PROVIDER" ] && _m="$MODEL"; }
+    [ -n "$_m" ] || continue                       # a cross-provider fallback needs fallback_model
+    [ "$AUTH" = api ] && [ "$_acct" = "$(_plan_field "${PLAN[0]}" 2)" ] && continue
+    ATTEMPTS+=("$_prov|$_m|$_acct|$_kind|$_cfg|$_key")
+  fi
+done
+[ "${#ATTEMPTS[@]}" -gt 0 ] || ATTEMPTS=("$PROVIDER|$MODEL|$PROVIDER|subscription||")
+_att_model(){ _plan_field "$1" 2; }
+_att_acct(){ _plan_field "$1" 3; }
 
-run_one(){   # $1 = provider|model — one attempt: sets STATUS, records what actually ran
-  local a_prov="${1%%|*}"
-  MODEL="${1#*|}"
+# The credential for one attempt: a subscription account's login dir goes into the pack's
+# config_dir_var (CLAUDE_CONFIG_DIR / CODEX_HOME); an api account's key_env is exported under the
+# pack's key_var. The previous attempt's variable is unset first — a session belongs to one login.
+ACCT_ENV_VAR=""
+apply_account(){   # $1 = kind, $2 = config_dir, $3 = key_env
+  [ -n "$ACCT_ENV_VAR" ] && unset "$ACCT_ENV_VAR"; ACCT_ENV_VAR=""
+  if [ "$1" = api ] && [ -n "$3" ] && [ -n "$KEYVAR" ]; then
+    export "$KEYVAR"="${!3:-}"
+  elif [ -n "$2" ] && [ -n "$CFGDIR_VAR" ]; then
+    export "$CFGDIR_VAR"="$2"; ACCT_ENV_VAR="$CFGDIR_VAR"
+  fi
+}
+
+run_one(){   # $1 = provider|model|account|kind|config_dir|key_env — one attempt: sets STATUS, records what ran
+  local a_prov a_acct a_kind a_cfg a_key
+  IFS='|' read -r a_prov MODEL a_acct a_kind a_cfg a_key <<<"$1"
+  A_ACCT="$a_acct"
   if [ "$a_prov" != "$PROVIDER" ]; then           # a cross-provider attempt: switch packs
     PROVIDER="$a_prov"; load_pack "$PROVIDER"; . "$PACK/run.sh"; provider_profile "$PROVIDER"
     RESUME_ID=""; RESUME_PROMPT=""                # a session belongs to one CLI
   fi
-  db "UPDATE runs SET model='$(sqlesc "$MODEL")', provider='$(sqlesc "$PROVIDER")' WHERE id=$RUNID;" 2>/dev/null
+  apply_account "$a_kind" "$a_cfg" "$a_key"
+  db "UPDATE runs SET model='$(sqlesc "$MODEL")', provider='$(sqlesc "$PROVIDER")', account='$(sqlesc "$a_acct")' WHERE id=$RUNID;" 2>/dev/null \
+    || db "UPDATE runs SET model='$(sqlesc "$MODEL")', provider='$(sqlesc "$PROVIDER")' WHERE id=$RUNID;" 2>/dev/null
   : > "$LOG"   # fresh log per attempt so is_capped + the summary reflect THIS model, not a prior cap
   rm -f "$LOG.usage.json"   # and a fresh usage sidecar: a capped attempt's tokens must not be credited to the fallback
   if [ "$QUIET" = 1 ]; then
@@ -515,11 +563,18 @@ fell_from=""
 for idx in "${!ATTEMPTS[@]}"; do
   run_one "${ATTEMPTS[$idx]}"
   nxt="${ATTEMPTS[$((idx+1))]:-}"
-  if [ "$STATUS" = capped ] && [ -n "$nxt" ]; then
-    echo "  ${CY}⤳ ${ATTEMPTS[$idx]#*|} (${ATTEMPTS[$idx]%%|*}) hit the usage limit — falling back to ${nxt#*|} (${nxt%%|*})${C0}"
-    fell_from="${ATTEMPTS[$idx]#*|}"
-    cp "$LOG" "$LOG.capped-${ATTEMPTS[$idx]#*|}" 2>/dev/null   # keep the capped attempt's trace (bug 8)
-    continue
+  if [ "$STATUS" = capped ]; then
+    # cap state lives on the ACCOUNT (5.4): the marker keeps this credential out of pool
+    # selection for its window, and the dispatcher's cooling gate reads the run row
+    python3 "$SELF/accounts.py" mark "$A_ACCT" "$MODEL" 2>/dev/null
+    if [ -n "$nxt" ]; then
+      echo "  ${CY}⤳ $MODEL on $A_ACCT ($PROVIDER) hit the usage limit — falling back to $(_att_model "$nxt") on $(_att_acct "$nxt") (${nxt%%|*})${C0}"
+      [ "$(_att_model "$nxt")" != "$MODEL" ] && fell_from="$MODEL"   # a MODEL change (the .exhausted marker's case)
+      cp "$LOG" "$LOG.capped-$MODEL" 2>/dev/null   # keep the capped attempt's trace (bug 8)
+      continue
+    fi
+  elif [ "$STATUS" = succeeded ]; then
+    python3 "$SELF/accounts.py" clear "$A_ACCT" 2>/dev/null   # this credential's window is back
   fi
   break
 done

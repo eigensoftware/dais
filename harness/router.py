@@ -718,6 +718,9 @@ def lint_project(root, project):
     for aname, a in reg["accounts"].items():
         if a["provider"] not in provider_packs():
             errors.append("%s: account '%s' names provider '%s', which has no pack" % (AC.accounts_file(), aname, a["provider"]))
+        elif a["config_dir"] and not provider_packs()[a["provider"]].get("config_dir_var"):
+            errors.append("%s: account '%s' has a config_dir but the %s pack declares no config_dir_var — "
+                          "its CLI cannot be pointed at a per-account login" % (AC.accounts_file(), aname, a["provider"]))
     fm_of = lambda role: frontmatter(os.path.join(root, "projects", project, "agents", role + ".md"))
     for r in cast(root, project):
         s = agent_setup(root, project, r["name"])
@@ -863,7 +866,9 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--pack-meta":
         # run-agent's seam: `cli=…` and `key_var=…` for a provider pack ('' lines when unknown)
         m = provider_packs().get(sys.argv[2], {})
-        print("cli=%s" % m.get("cli", "")); print("key_var=%s" % m.get("key_var", "")); sys.exit(0)
+        print("cli=%s" % m.get("cli", "")); print("key_var=%s" % m.get("key_var", ""))
+        print("config_dir_var=%s" % m.get("config_dir_var", "")); sys.exit(0)   # 5.4: per-account login dir
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--daily-budget":
         # dispatch.sh's seam: "spent|limit|unit|over" for the workspace (or one project);
         # nothing printed = no budget applies

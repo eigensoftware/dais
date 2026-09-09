@@ -1,3 +1,3 @@
-{"cli": "codex", "key_var": "OPENAI_API_KEY", "default_model": "", "default_model_from": "codex-config",
+{"cli": "codex", "config_dir_var": "CODEX_HOME", "key_var": "OPENAI_API_KEY", "default_model": "", "default_model_from": "codex-config",
  "supports": ["effort"],
  "note": "OpenAI codex CLI (`codex exec --json`). ChatGPT login or OPENAI_API_KEY. No turn/budget flags; only max_minutes binds it."}

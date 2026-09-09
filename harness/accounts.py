@@ -259,9 +259,20 @@ def attempts(setup, now=None, runs_today=None, reg=None):
     then the fallback tier's, when the role has a fallback model."""
     reg = reg or load()
     out = [("primary", resolve(n, reg)) for n in order(setup["account"], now, runs_today, reg)]
+    # the fallback tier runs the fallback MODEL, so the same account may appear again (a model
+    # swap on one credential is the historical fallback); only an identical tier is dropped
     if setup.get("fallback_model") or (setup.get("fallback_account") and setup["fallback_account"] != setup["account"]):
-        seen = {a["name"] for _, a in out}
         for n in order(setup["fallback_account"], now, runs_today, reg):
-            if n not in seen:
-                out.append(("fallback", resolve(n, reg)))
+            out.append(("fallback", resolve(n, reg)))
     return [(t, a) for t, a in out if a]
+
+
+if __name__ == "__main__":
+    # run-agent's marker seam: accounts.py mark <account> <model> | clear <account>
+    if len(sys.argv) >= 3 and sys.argv[1] == "mark":
+        mark_capped(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
+    elif len(sys.argv) >= 3 and sys.argv[1] == "clear":
+        clear_capped(sys.argv[2])
+    else:
+        print("usage: accounts.py mark <account> [model] | clear <account>", file=sys.stderr)
+        sys.exit(2)
