@@ -930,6 +930,7 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
             raise GuardFailure(f"task {tid} left state {task['status']!r} concurrently — "
                                f"re-check with: dais edges {tid}")
         _stamp_entered(conn, tid)                   # when it entered `to` (plan 2.3; 0011)
+        _log_event(conn, tid, task["project"], verb, task["status"], to, actor)   # 0014
         # Keep `assignee` meaning WHO CARRIES THIS TASK NOW. On a handoff into a state a DIFFERENT
         # role dispatches, re-stamp to that role — so a task the lead promotes into `ready` reads as
         # the engineer's, not frozen on whoever last touched it. Only AUTO-stamps move: an assignee
@@ -975,6 +976,18 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         conn.execute("RELEASE SAVEPOINT dais_fire")
         conn.commit()
     return result
+
+
+def _log_event(conn, tid, project, verb, from_state, to_state, actor):
+    """task_events (migration 0014): every transition, whoever fired it — the founder's own
+    approve / request_changes / greenlight were recorded nowhere (run_tasks needs a run), so
+    the yolo-calibration question "how often do I approve this gate unchanged?" had no data.
+    `dais retro` reads it. Pre-0014 db: no-op."""
+    try:
+        conn.execute("INSERT INTO task_events(task_id,project,verb,from_state,to_state,actor) VALUES(?,?,?,?,?,?)",
+                     (tid, project, verb, from_state, to_state, actor))
+    except sqlite3.OperationalError:
+        pass
 
 
 def _stamp_entered(conn, tid):

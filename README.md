@@ -475,6 +475,7 @@ not keep it.
 | `dais learn <project> "…"` | a durable decision/gotcha for the project's CONTEXT.md — an agent's learn lands in a review queue (`--review`, `--accept N\|all`, `--drop N`); the founder's own writes CONTEXT.md directly |
 | `dais doctor` | preflight: provider CLIs + logins, API keys for `auth: api` roles, pending migrations, each project's repo, CONTEXT sizes, dispatcher markers; exit 1 on a blocker |
 | `dais logs <project> [N]` | recent runs + their saved log paths (+ tokens · cost per run) |
+| `dais retro [--since 30d]` | your loop, measured from the transition log: per gate, how many decisions, how often approved unchanged, the median wait on you; QA pass/fail per project; bounced tasks; what shipped; and the yolo candidates (≥90% approved unchanged over ≥10 decisions) |
 | `dais cost [project] [--since 7d] [--by project\|role\|task]` | the run ledger: tokens per project, role, or task, dollars where the provider reported them, no-op share |
 | `dais version` | which build this machine runs |
 

@@ -38,6 +38,7 @@ dais — your agent company control panel
   dais check <task-id> [<check>] [--branch B]   run the machine's declared check in a worktree of the task's PR branch; record it (verify: honors it)
   dais logs <project> [N]             recent runs (+ tokens · cost once the ledger is on)
   dais cost [project] [--since 7d] [--by project|role|task]   the run ledger: tokens (and dollars where reported) per project, role, or task
+  dais retro [--since 30d]            your loop, measured: gate decisions + how long they waited on you, QA pass/fail, bounces, throughput, yolo candidates
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md (an agent's lands in a review queue)
   dais learn <project> --review | --accept N|all | --drop N   review what agents learned before it reaches every prompt
   dais doctor                         preflight: provider CLIs + logins, API keys, pending migrations, repos, markers
@@ -809,6 +810,12 @@ PL
     else
       db -separator ' | ' "SELECT started_at, project||'/'||agent, status, log_path FROM runs $w ORDER BY id DESC LIMIT $n;" || true
     fi ;;
+
+  retro)
+    # the founder's loop, measured (plan 4.2): gate decisions + wait, QA rates, bounces,
+    # throughput, yolo candidates — from the transition log (migration 0014).
+    [ -f "$DB" ] || db_init >/dev/null 2>&1
+    exec python3 "$DAIS_ROOT/harness/retro.py" "$DB" "$@" ;;
 
   cost)
     # the run ledger's report (harness/cost.py): tokens per project/role/task, dollars where

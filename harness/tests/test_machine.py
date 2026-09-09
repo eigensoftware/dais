@@ -301,6 +301,19 @@ class TestAssigneeStamp(unittest.TestCase):
     def _row(self, tid):
         return self.conn.execute("SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()
 
+    def test_every_fire_appends_a_task_event(self):
+        # plan 4.2: the founder's own fires were recorded nowhere (run_tasks needs a run)
+        c = _db()
+        c.executescript("CREATE TABLE task_events(id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, project TEXT,"
+                        " verb TEXT, from_state TEXT, to_state TEXT, actor TEXT, at TEXT DEFAULT (datetime('now')));")
+        t = M.create_task(c, self.m, "proj", "x", "proposal_review")
+        M.fire(c, self.m, t, "request_changes", "founder")
+        ev = c.execute("SELECT task_id, project, verb, from_state, to_state, actor FROM task_events").fetchall()
+        self.assertEqual([tuple(r) for r in ev], [(t, "proj", "request_changes", "proposal_review", "proposed", "founder")])
+        c2 = _db(); t2 = M.create_task(c2, self.m, "proj", "y", "ready")     # no table (pre-0014): still fires
+        M.fire(c2, self.m, t2, "claim", "engineer")
+        self.assertEqual(_status(c2, t2), "doing")
+
     def test_similar_open_tasks_flags_near_duplicate_titles(self):
         # plan 2.8: leads and engineers re-file work because "don't re-file" is a prompt rule
         c = _db(); c.execute("ALTER TABLE tasks ADD COLUMN notes TEXT")
