@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dais</title>
+<style>
+  /* theme tokens: light on :root, dark under the system preference unless the user chose light,
+     dark again when the user chose dark — the select (#theme) writes data-theme + localStorage */
+  :root { --bg:#f7f7f5; --fg:#1b1b1b; --dim:#6b6b6b; --line:#dcdcd8; --card:#ffffff; --accent:#2b5fd9;
+          --need:#b7791f; --need-bg:#fff4dc; --live:#1f8a4c; --live-bg:#e6f5ea; --bad:#c0392b; --bad-bg:#fbe9e7;
+          --hold:#7a5c00; --mono:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+          --bg:#121316; --fg:#e8e8e6; --dim:#9a9a96; --line:#2a2c31; --card:#1a1c20; --accent:#7aa2ff;
+          --need:#e0b45a; --need-bg:#2a2410; --live:#5fd08a; --live-bg:#10261a; --bad:#ff7b6b; --bad-bg:#2d1512; --hold:#e0c060; } }
+  :root[data-theme="dark"] { --bg:#121316; --fg:#e8e8e6; --dim:#9a9a96; --line:#2a2c31; --card:#1a1c20; --accent:#7aa2ff;
+          --need:#e0b45a; --need-bg:#2a2410; --live:#5fd08a; --live-bg:#10261a; --bad:#ff7b6b; --bad-bg:#2d1512; --hold:#e0c060; }
+  * { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system,system-ui,Segoe UI,Roboto,sans-serif }
+  a { color:var(--accent) } button { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:6px; padding:4px 10px }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent) } button:disabled { opacity:.5; cursor:default }
+  select, input, textarea { font:inherit; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 8px }
+  header { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:5 }
+  header .tok { padding:2px 8px; border-radius:999px; border:1px solid var(--line); white-space:nowrap }
+  .tok.live { background:var(--live-bg); color:var(--live); border-color:transparent } .tok.need { background:var(--need-bg); color:var(--need); border-color:transparent; font-weight:600 }
+  .tok.bad { background:var(--bad-bg); color:var(--bad); border-color:transparent } .grow { flex:1 }
+  nav.tabs { display:flex; gap:4px; padding:8px 14px 0 } nav.tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent) }
+  main { display:grid; grid-template-columns:200px 1fr 420px; gap:12px; padding:12px 14px } @media (max-width:1000px){ main { grid-template-columns:1fr } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px }
+  .rail button { display:flex; justify-content:space-between; width:100%; margin-bottom:4px; text-align:left } .rail button.on { border-color:var(--accent) }
+  .band h3 { margin:12px 0 4px; font-size:12px; letter-spacing:.06em; color:var(--dim); text-transform:uppercase }
+  .row { display:flex; gap:8px; align-items:baseline; padding:5px 6px; border-radius:6px; cursor:pointer } .row:hover { background:var(--bg) } .row.on { outline:2px solid var(--accent) }
+  .row .id { font-family:var(--mono); color:var(--dim); min-width:70px } .row .st { font-size:12px; color:var(--dim); min-width:120px } .row .age { margin-left:auto; color:var(--dim); font-size:12px }
+  .row.need { border-left:3px solid var(--need) } .row.run { border-left:3px solid var(--live) }
+  pre { white-space:pre-wrap; font:12px/1.4 var(--mono); margin:0 } .muted { color:var(--dim) }
+  .edge { display:flex; gap:8px; align-items:center; margin:6px 0 } .edge code { font:12px var(--mono); color:var(--dim) }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:10 } .modal.on { display:flex }
+  .modal .box { background:var(--card); color:var(--fg); border-radius:12px; padding:16px; min-width:320px; max-width:560px; width:92% } .modal label { display:block; margin:8px 0 }
+  svg text { font:11px var(--mono); fill:var(--fg) } svg .node rect { fill:var(--card); stroke:var(--line); rx:8 } svg .node.need rect { stroke:var(--need); stroke-width:2 }
+  svg .node.term rect { stroke-dasharray:4 3 } svg .edge path { stroke:var(--dim); fill:none; marker-end:url(#arr) } svg .edge text { fill:var(--dim); font-size:10px }
+  svg .count { font-weight:700; fill:var(--accent) } table { border-collapse:collapse; width:100% } td, th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); font-size:13px }
+  .hidden { display:none } .toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:var(--fg); color:var(--bg); padding:8px 14px; border-radius:8px; display:none; z-index:20 }
+</style>
+</head>
+<body>
+<header>
+  <strong>DAIS</strong> <span id="ws" class="muted"></span>
+  <span id="run" class="tok"></span><span id="gates" class="tok"></span><span id="extra" class="tok hidden"></span>
+  <span class="grow"></span>
+  <span id="watch" class="tok"></span>
+  <button id="pause">pause</button><button id="resume">resume</button>
+  <label class="muted">theme <select id="theme"><option value="">system</option><option value="light">light</option><option value="dark">dark</option></select></label>
+  <span id="clock" class="muted"></span>
+</header>
+<nav class="tabs"><button data-tab="board" class="on">board</button><button data-tab="machine">machine</button><button data-tab="runs">runs</button><button data-tab="cost">cost</button><button data-tab="retro">retro</button></nav>
+<main>
+  <aside class="card rail" id="rail"></aside>
+  <section class="card" id="center"></section>
+  <section class="card" id="side"><span class="muted">select a task</span></section>
+</main>
+<div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
+<div class="toast" id="toast"></div>
+<script>
+(function(){
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  // theme: system by default; the user's choice persists per browser
+  const themeSel = $('#theme');
+  try { const t = localStorage.getItem('dais-theme') || ''; document.documentElement.dataset.theme = t; themeSel.value = t; } catch (e) {}
+  themeSel.onchange = () => { document.documentElement.dataset.theme = themeSel.value; try { localStorage.setItem('dais-theme', themeSel.value); } catch (e) {} };
+
+  const api = p => fetch('./api/' + p).then(r => r.ok ? r : Promise.reject(r));
+  const post = (p, body) => fetch('./api/' + p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+        .then(async r => ({ok: r.ok, code: r.status, body: await r.json().catch(() => ({}))}));
+  const toast = m => { const t = $('#toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 3500); };
+  const age = ts => { if (!ts) return ''; const s = (Date.now() - Date.parse(ts.replace(' ', 'T') + 'Z')) / 1000; if (s < 60) return ''; if (s < 3600) return Math.floor(s/60) + 'm'; if (s < 172800) return Math.floor(s/3600) + 'h'; return Math.floor(s/86400) + 'd'; };
+  const tokens = n => !n ? '' : n < 1000 ? String(n) : n < 1e6 ? Math.round(n/1000) + 'k' : (n/1e6).toFixed(2) + 'M';
+
+  let snap = null, tab = 'board', project = null, selected = null;
+  const state = { edges: null, brief: '' };
+
+  function renderHeader() {
+    if (!snap) return;
+    $('#ws').textContent = snap.workspace || '';
+    const running = snap.projects.reduce((n, p) => n + (p.running || []).length, 0);
+    const run = $('#run'); run.textContent = (running ? '● ' : '○ ') + running + ' running'; run.className = 'tok' + (running ? ' live' : '');
+    const g = $('#gates'); g.textContent = '◆ ' + snap.gates + ' need you'; g.className = 'tok' + (snap.gates ? ' need' : '');
+    const ex = []; if (snap.cooling && snap.cooling.length) ex.push('COOLING ' + snap.cooling.join(','));
+    if (snap.budget && snap.budget.over) ex.push('BUDGET SPENT'); if (snap.over_budget && snap.over_budget.length) ex.push(snap.over_budget.length + ' OVER BUDGET');
+    const e = $('#extra'); e.textContent = ex.join(' · '); e.className = 'tok bad' + (ex.length ? '' : ' hidden');
+    const w = snap.watch || {}; $('#watch').textContent = 'watch ' + (w.state || '?') + (w.interval ? ' ' + w.interval + 's' : '') + (w.parallel ? ' x' + w.parallel : '');
+    $('#clock').textContent = (snap.ts || '').slice(11, 19) + ' UTC';
+  }
+  function renderRail() {
+    const r = $('#rail'); const all = snap.projects.reduce((n, p) => n + Object.values(p.tasks_by_status).flat().filter(t => !['done','cancelled'].includes(t.status)).length, 0);
+    let h = `<button class="${project ? '' : 'on'}" data-p=""><span>ALL</span><span class="muted">${all}</span></button>`;
+    for (const p of snap.projects) {
+      const gates = Object.entries(p.tasks_by_status).filter(([st]) => (p.bands['NEEDS YOU'] || []).includes(st)).reduce((n, [, ts]) => n + ts.length, 0);
+      h += `<button class="${project === p.name ? 'on' : ''}" data-p="${esc(p.name)}"><span>${(p.running||[]).length ? '● ' : ''}${esc(p.name)}</span><span class="muted">${gates ? '◆' + gates : ''}</span></button>`;
+    }
+    r.innerHTML = h; r.querySelectorAll('button').forEach(b => b.onclick = () => { project = b.dataset.p || null; render(); });
+  }
+  function bandRows(p, band) {
+    const rows = []; for (const st of (p.bands[band] || [])) for (const t of (p.tasks_by_status[st] || [])) rows.push([p, t]);
+    return rows;
+  }
+  function renderBoard() {
+    const ps = snap.projects.filter(p => !project || p.name === project); let h = '';
+    const runRows = []; for (const p of ps) for (const r of (p.running || [])) runRows.push(`<div class="row run"><span class="id">${esc(p.name)}</span><span>▶ ${esc(r.agent)}</span><span class="age">${age(r.since)}</span></div>`);
+    if (runRows.length) h += `<div class="band"><h3>running</h3>${runRows.join('')}</div>`;
+    for (const band of ['NEEDS YOU', 'QUEUED', 'WAITING']) {
+      const rows = ps.flatMap(p => bandRows(p, band)); if (!rows.length) continue;
+      h += `<div class="band"><h3>${band}</h3>` + rows.map(([p, t]) => {
+        const badge = t.over_budget ? '⛔ ' : t.blocked ? '⛓ ' : ''; const st = t.status.replace(/_/g, ' ');
+        return `<div class="row ${band === 'NEEDS YOU' ? 'need' : ''} ${selected === t.id ? 'on' : ''}" data-t="${esc(t.id)}"><span class="id">${esc(t.id)}</span><span class="st">${esc(st)}${ps.length > 1 ? ' · ' + esc(p.name) : ''}</span><span>${badge}${esc(t.title)}</span><span class="age">${age(t.state_entered_at || t.updated_at)}</span></div>`;
+      }).join('') + '</div>';
+    }
+    const done = ps.flatMap(p => bandRows(p, 'ARCHIVE')).slice(-8).reverse();
+    if (done.length) h += `<div class="band"><h3>archive (latest)</h3>` + done.map(([p, t]) => `<div class="row muted" data-t="${esc(t.id)}"><span class="id">${esc(t.id)}</span><span class="st">${esc(t.status)}</span><span>${esc(t.title)}</span></div>`).join('') + '</div>';
+    $('#center').innerHTML = h || '<span class="muted">nothing on the board</span>';
+    $('#center').querySelectorAll('.row[data-t]').forEach(r => r.onclick = () => select(r.dataset.t));
+  }
+  function renderMachine() {
+    const p = snap.projects.find(x => x.name === (project || (snap.projects[0] || {}).name)); if (!p) { $('#center').innerHTML = '<span class="muted">no project</span>'; return; }
+    api('machine/' + encodeURIComponent(p.name)).then(r => r.json()).then(m => {
+      // layered layout: BFS from the initial states along edges (bounce targets included)
+      const names = Object.keys(m.states); const level = {}; const q = [];
+      for (const s of names) if (m.states[s].initial) { level[s] = 0; q.push(s); }
+      while (q.length) { const s = q.shift(); for (const e of m.edges) { const tgts = [e.to]; if (e.bounce && e.bounce.to) tgts.push(e.bounce.to); for (const t of tgts) if (t in m.states && !(t in level)) { level[t] = level[s] + 1; q.push(t); } } }
+      for (const s of names) if (!(s in level)) level[s] = 0;
+      const cols = {}; for (const s of names) (cols[level[s]] = cols[level[s]] || []).push(s);
+      const W = 150, H = 44, GX = 60, GY = 22, pos = {}; let maxCol = 0;
+      for (const [l, ss] of Object.entries(cols)) ss.forEach((s, i) => { pos[s] = {x: 20 + l * (W + GX), y: 20 + i * (H + GY)}; maxCol = Math.max(maxCol, +l); });
+      const width = 40 + (maxCol + 1) * (W + GX), height = 40 + Math.max(...Object.values(cols).map(c => c.length)) * (H + GY);
+      const need = new Set(m.bands['NEEDS YOU'] || []);
+      let svg = `<svg viewBox="0 0 ${width} ${height}" width="100%" style="max-height:78vh"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--dim)"/></marker></defs>`;
+      for (const e of m.edges) { if (!(e.from in pos) || !(e.to in pos)) continue; const a = pos[e.from], b = pos[e.to];
+        const x1 = a.x + W, y1 = a.y + H/2, x2 = b.x, y2 = b.y + H/2; const back = x2 <= x1; const dx = back ? -40 : 40;
+        const d = back ? `M${a.x + W/2},${a.y} C${a.x + W/2},${a.y - 30} ${b.x + W/2},${b.y - 30} ${b.x + W/2},${b.y}` : `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+        const mx = back ? (a.x + b.x + W) / 2 : (x1 + x2) / 2, my = back ? Math.min(a.y, b.y) - 22 : (y1 + y2) / 2 - 4;
+        svg += `<g class="edge"><path d="${d}"/><text x="${mx}" y="${my}" text-anchor="middle">${esc(e.verb)}${e.by === 'founder' ? ' ◆' : ''}</text></g>`; }
+      for (const s of names) { const {x, y} = pos[s]; const n = m.counts[s] || 0; const cls = 'node' + (need.has(s) ? ' need' : '') + (m.states[s].terminal ? ' term' : '');
+        svg += `<g class="${cls}"><rect x="${x}" y="${y}" width="${W}" height="${H}"/><text x="${x + 10}" y="${y + 18}">${esc(s.replace(/_/g, ' '))}</text><text x="${x + 10}" y="${y + 34}" class="muted">${esc(m.bands ? Object.entries(m.bands).find(([, ss]) => ss.includes(s))?.[0].toLowerCase() || '' : '')}</text>${n ? `<text x="${x + W - 12}" y="${y + 26}" text-anchor="end" class="count">${n}</text>` : ''}</g>`; }
+      svg += '</svg>';
+      $('#center').innerHTML = `<div class="muted" style="margin-bottom:6px">${esc(p.name)} · ${esc(m.name)} · counts are live · ◆ = a founder edge</div>` + svg;
+    }).catch(() => $('#center').innerHTML = '<span class="muted">could not load the machine</span>');
+  }
+  function renderRuns() {
+    const runs = (snap.recent_runs || []); $('#center').innerHTML = '<table><tr><th>started</th><th>run</th><th>status</th><th>dur</th><th>model</th><th>tokens</th><th>cost</th><th>task</th></tr>' +
+      runs.map(r => `<tr><td class="muted">${esc((r.started_at || '').slice(5, 16))}</td><td>${esc(r.agent)}</td><td>${esc(r.status)}</td><td>${r.dur_min != null ? r.dur_min + 'm' : ''}</td><td class="muted">${esc((r.model || '').replace('claude-', ''))}</td><td>${tokens(r.input_tokens)}</td><td>${r.cost_usd != null ? '$' + r.cost_usd.toFixed(2) : ''}</td><td class="muted">${esc(r.task_id || '')}</td></tr>`).join('') + '</table>';
+  }
+  function renderReport(kind) {
+    const extra = kind === 'cost' ? '?by=role&since=7d' : '?since=30d';
+    api(kind + extra).then(r => r.text()).then(t => $('#center').innerHTML = `<pre>${esc(t)}</pre>`).catch(() => $('#center').innerHTML = '<span class="muted">unavailable</span>');
+  }
+  function findTask(id) { for (const p of snap.projects) for (const ts of Object.values(p.tasks_by_status)) for (const t of ts) if (t.id === id) return [p, t]; return [null, null]; }
+  function select(id) { selected = id; render(); loadSide(); }
+  function loadSide() {
+    if (!selected) return; const [p, t] = findTask(selected); if (!t) { $('#side').innerHTML = '<span class="muted">gone</span>'; return; }
+    Promise.all([api('edges/' + encodeURIComponent(selected)).then(r => r.json()), api('brief/' + encodeURIComponent(selected)).then(r => r.text())]).then(([edges, brief]) => {
+      state.edges = edges; state.brief = brief;
+      let h = `<div><strong>${esc(t.id)}</strong> <span class="muted">${esc(t.status.replace(/_/g, ' '))} · ${esc(p.name)} · prio ${esc(t.priority)}</span></div>`;
+      h += `<div style="margin:6px 0 10px">${esc(t.title)}</div>`;
+      if (t.pr_url) h += `<div><a href="${esc(t.pr_url)}" target="_blank" rel="noopener">${esc(t.pr_url)}</a></div>`;
+      if (edges.edges.length) { h += '<div style="margin:10px 0 4px" class="muted">fire</div>';
+        for (const e of edges.edges) h += `<div class="edge"><button class="${e.human ? 'primary' : ''}" data-verb="${esc(e.verb)}">${esc(e.verb.replace(/_/g, ' '))}</button><code>→ ${esc(e.to)} · by ${esc(e.by)}${e.guards.length ? ' {' + esc(e.guards.join(', ')) + '}' : ''}${e.effects.spawn ? ' · spawns ' + esc(e.effects.spawn.template) : ''}${e.effects.aggregate ? ' · sweeps' : ''}</code></div>`; }
+      h += `<div style="margin:10px 0 4px" class="muted">note</div><textarea id="note" rows="2" style="width:100%" placeholder="append to the task's log"></textarea><div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap"><button id="noteBtn">add note</button>
+            <select id="prio"><option value="">priority…</option>${['critical','high','medium','low'].map(x => `<option ${t.priority === x ? 'selected' : ''}>${x}</option>`).join('')}</select>${t.over_budget ? '<button id="lift">lift budget</button>' : ''}</div>`;
+      h += `<div style="margin:12px 0 4px" class="muted">brief</div><pre>${esc(brief)}</pre>`;
+      $('#side').innerHTML = h;
+      $('#side').querySelectorAll('button[data-verb]').forEach(b => b.onclick = () => fireFlow(edges.edges.find(e => e.verb === b.dataset.verb)));
+      $('#noteBtn').onclick = () => { const v = $('#note').value.trim(); if (!v) return; post('task', {task: selected, notes: v}).then(r => { toast(r.ok ? 'note added' : (r.body.error || 'failed')); refresh(); }); };
+      $('#prio').onchange = () => { const v = $('#prio').value; if (!v || v === t.priority) return; post('task', {task: selected, priority: v}).then(r => { toast(r.ok ? 'priority ' + v : (r.body.error || 'failed')); refresh(); }); };
+      const lift = $('#lift'); if (lift) lift.onclick = () => post('task', {task: selected, budget_lift: true}).then(r => { toast(r.ok ? 'budget lifted' : (r.body.error || 'failed')); refresh(); });
+    }).catch(() => $('#side').innerHTML = '<span class="muted">could not load the task</span>');
+  }
+  // the guard elicitation: exactly what the engine's prompts_for says the edge needs
+  function fireFlow(e) {
+    const prompts = e.prompts || []; const box = $('#modalBox'); let h = `<h3 style="margin:0 0 6px">${esc(e.verb.replace(/_/g, ' '))} → ${esc(e.to)}</h3><div class="muted">${esc(selected)}</div>`;
+    for (const p of prompts) {
+      if (p.kind === 'typed') h += `<label>type the task id <strong>${esc(selected)}</strong> to confirm<br><input id="g-typed" autocomplete="off"></label>`;
+      if (p.kind === 'attest') h += `<label><input type="checkbox" class="g-attest" value="${esc(p.fact)}"> I attest: <strong>${esc(p.fact)}</strong></label>`;
+      if (p.kind === 'verify') h += `<label><input type="checkbox" class="g-verify" value="${esc(p.check)}"> I ran the check <strong>${esc(p.check)}</strong>${p.declared ? ' <span class="muted">(or the machine runs it)</span>' : ''}</label>`;
+      if (p.kind === 'note') h += `<label>this edge carries your input<br><textarea id="g-note" rows="3" style="width:100%"></textarea></label>`;
+      if (p.kind === 'confirm') h += `<div class="muted">a click confirms</div>`;
+    }
+    if (!prompts.length) h += '<div class="muted">no guard on this edge</div>';
+    h += `<label>note (optional)<br><input id="g-extra" style="width:100%"></label><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button id="g-cancel">cancel</button><button class="primary" id="g-go">fire ${esc(e.verb.replace(/_/g, ' '))}</button></div>`;
+    box.innerHTML = h; $('#modal').classList.add('on');
+    $('#g-cancel').onclick = () => $('#modal').classList.remove('on');
+    $('#g-go').onclick = () => {
+      const body = {task: selected, verb: e.verb};
+      for (const p of prompts) {
+        if (p.kind === 'confirm') body.confirm = true;
+        if (p.kind === 'typed') body.typed = ($('#g-typed').value || '').trim();
+        if (p.kind === 'note') body.notes = ($('#g-note').value || '').trim();
+      }
+      body.attest = [...box.querySelectorAll('.g-attest:checked')].map(x => x.value);
+      body.verify = [...box.querySelectorAll('.g-verify:checked')].map(x => x.value);
+      const extra = ($('#g-extra').value || '').trim(); if (extra) body.notes = body.notes ? body.notes + ' ' + extra : extra;
+      post('fire', body).then(r => { $('#modal').classList.remove('on'); toast(r.ok ? (r.body.output || 'fired') : ('refused: ' + (r.body.error || r.code))); refresh(); });
+    };
+  }
+  function render() { if (!snap) return; renderHeader(); renderRail(); ({board: renderBoard, machine: renderMachine, runs: renderRuns, cost: () => renderReport('cost'), retro: () => renderReport('retro')})[tab](); }
+  function refresh() { api('snapshot').then(r => r.json()).then(s => { snap = s; render(); if (selected) loadSide(); }); }
+  document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => { document.querySelectorAll('nav.tabs button').forEach(x => x.classList.remove('on')); b.classList.add('on'); tab = b.dataset.tab; render(); });
+  $('#pause').onclick = () => post('loop', {action: 'pause'}).then(r => { toast(r.body.output || 'paused'); refresh(); });
+  $('#resume').onclick = () => post('loop', {action: 'resume'}).then(r => { toast(r.body.output || 'resumed'); refresh(); });
+  // live: one SSE stream; the board re-renders on each frame (the side panel only on selection or actions)
+  try { const es = new EventSource('./api/events'); es.onmessage = ev => { snap = JSON.parse(ev.data); if (tab !== 'machine' && tab !== 'cost' && tab !== 'retro') render(); else renderHeader(); }; es.onerror = () => setTimeout(refresh, 3000); } catch (e) { refresh(); setInterval(refresh, 5000); }
+  refresh();
+})();
+</script>
+</body>
+</html>

@@ -17,6 +17,7 @@ dais — your agent company control panel
 
   dais status                         everything at a glance (tasks + recent runs)
   dais top [secs]                     live control panel — act on tasks, fire guarded edges (default 2s refresh)
+  dais web [port]                     the same board in your browser (localhost + token): briefs, the machine diagram, runs, cost, retro; fire gates with the same guards
   dais project <name>                 a project's setup: cast + models, machine dispatch map, config
   dais tasks <project> [--assignee A] [--status S]
   dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."] [--touches-migrations true|false]
@@ -488,6 +489,11 @@ effort: <optional low|medium|high, or blank>
       test) exec python3 "$DAIS_ROOT/harness/notify.py" send "$DAIS_HOME" "${*:-test message from dais}" ;;
       *) echo "usage: dais notify test \"message\""; exit 1 ;;
     esac ;;
+
+  web)
+    # the local web page (plan 4.5): the board, briefs, the machine diagram, runs, cost and
+    # retro, with actions through `dais fire`. Localhost + a per-launch token. harness/web.py.
+    exec python3 "$DAIS_ROOT/harness/web.py" "$@" ;;
 
   doctor)
     # the preflight (plan 2.9): provider CLIs + logins, API keys, pending migrations, repos,

@@ -237,6 +237,20 @@ notify: curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" -d "
 `R`, and `t` are on-demand runs that fire one agent now and bypass pause. `start` runs the
 role the machine dispatches for the task's state, honoring the dependency chain.
 
+## The web page (`dais web`)
+
+The same board in your browser, over the same data layer as `dais top`: `dais web [port]`
+prints a localhost URL with a per-launch token (a wrong token is a 404 everywhere). Tabs:
+the **board** by band per project with the selected task's brief and its fireable edges;
+the **machine** as a live diagram (counts on each state, founder edges marked); **runs** with
+tokens and cost; **cost** and **retro**. Actions go through `dais fire` in a subprocess, so
+the engine enforces every guard exactly as the CLI does: the page asks for what
+`prompts_for` says the edge needs (typing the task id, naming the attest, a note, a click)
+and can never fire a gate the CLI would refuse. Notes, priority, and a budget lift go through
+`dais task set`; pause and resume through the CLI. Light and dark follow the system, with a
+selector that persists per browser. Phone: `tailscale serve <port>`; the token keeps a shared
+network from being enough. Stdlib only, one HTML file, no build step.
+
 ## Playbooks: running any craft
 
 The agent prompt is two layers: a **neutral coordination contract** (the board, the machine,
