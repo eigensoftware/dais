@@ -367,6 +367,38 @@ env_key: DEEPSEEK_API_KEY                 # the env var codex reads the key from
 (recorded as such on the run row, the ledger, and the per-provider cap gate). Both CLIs are
 preflighted; a cross-provider attempt never resumes a session (a session belongs to one CLI).
 
+**Accounts: more than one login per provider.** Two 5x Max plans beat one 20x for
+throughput, and a cap on one says nothing about the other. Name them once, user-level, in
+`~/.dais/accounts.yaml` (credentials never live in a workspace):
+
+```yaml
+accounts:
+  max-a:   {provider: anthropic, kind: subscription, config_dir: ~/.dais/accounts/max-a}
+  max-b:   {provider: anthropic, kind: subscription, config_dir: ~/.dais/accounts/max-b, window: 5h}
+  api-1:   {provider: anthropic, kind: api, key_env: ANTHROPIC_API_KEY_1}
+  chatgpt: {provider: openai,    kind: subscription, config_dir: ~/.dais/accounts/chatgpt}
+pools:
+  max: {members: [max-a, max-b], policy: least-recently-capped}   # or round-robin | first-free
+```
+
+Log each subscription in once by hand: `dais account login max-b` runs the CLI's own login
+with that account's config directory (`CLAUDE_CONFIG_DIR` for claude, `CODEX_HOME` for codex;
+the pack declares which). A role names an account or a pool the same way it names a model:
+`account: max-a` / `account: pool:max` in its frontmatter (or `account_<role>` / `account` in
+`project.yaml`); `fallback_account: chatgpt` with `fallback_model: gpt-5.4` is the next tier.
+The account decides the provider and the auth kind, so `provider:`/`auth:` become the shortcut
+for each provider's implicit account (the ambient login), and a workspace without the file
+changes nothing.
+
+A run tries the pool's free members first (same provider first, then the fallback tier), and a
+capped attempt marks that ACCOUNT for its window (`~/.dais/accounts/<name>.cooldown`; a later
+success clears it). The dispatcher's cooling gate keys on the account too: a role is withheld
+only when every account in its plan is cooling, and `dais status`/top/web name the cooling
+accounts. `dais account list` shows each account's cap state, `dais account clear <name>` drops
+a marker, `dais doctor` checks every used account's login (or key), and `dais cost --by
+account` splits the ledger by credential. `dais lint` rejects an unknown account, a pool
+naming one, or an account that contradicts an explicit `provider:`.
+
 **`auth: api`** reads the provider's standard key (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) from
 the process environment, then `~/.dais/env`, then `$DAIS_HOME/.env` (workspace override); first
 one set wins. Never put a key in `project.yaml` or a persona file (`dais lint` warns on
@@ -556,10 +588,11 @@ not keep it.
 | `dais migrate --config <project>` | convert a project's legacy roles file into `agents/<role>.md` frontmatter + machine-owned access |
 | `dais schedule install [secs]` | background ticks (launchd on macOS, cron on Linux) |
 | `dais learn <project> "…"` | a durable decision/gotcha for the project's CONTEXT.md — an agent's learn lands in a review queue (`--review`, `--accept N\|all`, `--drop N`); the founder's own writes CONTEXT.md directly |
-| `dais doctor` | preflight: provider CLIs + logins, API keys for `auth: api` roles, pending migrations, each project's repo, CONTEXT sizes, dispatcher markers; exit 1 on a blocker |
+| `dais doctor` | preflight: provider CLIs + logins, every used account's login or key, API keys for `auth: api` roles, pending migrations, each project's repo, CONTEXT sizes, dispatcher markers; exit 1 on a blocker |
+| `dais account list\|login <name>\|clear <name>` | the founder's accounts (`~/.dais/accounts.yaml`): each account's cap state and the pools; log a subscription account in under its own config dir; drop a cap marker |
 | `dais logs <project> [N]` | recent runs + their saved log paths (+ tokens · cost per run) |
 | `dais retro [--since 30d]` | your loop, measured from the transition log: per gate, how many decisions, how often approved unchanged, the median wait on you; QA pass/fail per project; bounced tasks; what shipped; and the yolo candidates (≥90% approved unchanged over ≥10 decisions) |
-| `dais cost [project] [--since 7d] [--by project\|role\|task]` | the run ledger: tokens per project, role, or task, dollars where the provider reported them, no-op share |
+| `dais cost [project] [--since 7d] [--by project\|role\|task\|account]` | the run ledger: tokens per project, role, task, or account, dollars where the provider reported them, no-op share |
 | `dais version` | which build this machine runs |
 
 ## Layout

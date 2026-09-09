@@ -38,11 +38,12 @@ dais — your agent company control panel
   dais brief <task-id>                the decision packet for a gate: what it encompasses (PRs, verdicts, checks), migrations, spend, notes, what you can fire
   dais check <task-id> [<check>] [--branch B]   run the machine's declared check in a worktree of the task's PR branch; record it (verify: honors it)
   dais logs <project> [N]             recent runs (+ tokens · cost once the ledger is on)
-  dais cost [project] [--since 7d] [--by project|role|task]   the run ledger: tokens (and dollars where reported) per project, role, or task
+  dais cost [project] [--since 7d] [--by project|role|task|account]   the run ledger: tokens (and dollars where reported) per project, role, task, or account
   dais retro [--since 30d]            your loop, measured: gate decisions + how long they waited on you, QA pass/fail, bounces, throughput, yolo candidates
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md (an agent's lands in a review queue)
   dais learn <project> --review | --accept N|all | --drop N   review what agents learned before it reaches every prompt
-  dais doctor                         preflight: provider CLIs + logins, API keys, pending migrations, repos, markers
+  dais doctor                         preflight: provider CLIs + logins, accounts, API keys, pending migrations, repos, markers
+  dais account list|login <n>|clear <n>   the founder's accounts (~/.dais/accounts.yaml): cap state per account; log one in; drop a cap marker
   dais notify test "message"          try the workspace's `notify:` command (dais.yaml); the loop uses it when work newly waits on you
   dais lint [project]                 validate a project (roles + project.yaml + required files)
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
@@ -494,6 +495,11 @@ effort: <optional low|medium|high, or blank>
     # the local web page (plan 4.5): the board, briefs, the machine diagram, runs, cost and
     # retro, with actions through `dais fire`. Localhost + a per-launch token. harness/web.py.
     exec python3 "$DAIS_ROOT/harness/web.py" "$@" ;;
+
+  account)
+    # the founder's accounts (plan 5.4): ~/.dais/accounts.yaml — list them with their cap state,
+    # log a subscription account in under its own config dir, clear a cap marker.
+    exec python3 "$DAIS_ROOT/harness/accounts.py" "$@" ;;
 
   doctor)
     # the preflight (plan 2.9): provider CLIs + logins, API keys, pending migrations, repos,

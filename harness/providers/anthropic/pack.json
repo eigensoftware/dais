@@ -1,3 +1,4 @@
 {"cli": "claude", "config_dir_var": "CLAUDE_CONFIG_DIR", "key_var": "ANTHROPIC_API_KEY", "default_model": "claude-opus-4-8",
+ "login": ["claude", "auth", "login"], "login_status": ["claude", "auth", "status"],
  "supports": ["effort", "resume", "lean", "max_turns", "max_budget_usd"],
  "note": "Claude Code headless (`claude -p`, stream-json). Subscription login or ANTHROPIC_API_KEY."}

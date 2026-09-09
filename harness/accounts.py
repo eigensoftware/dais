@@ -267,12 +267,84 @@ def attempts(setup, now=None, runs_today=None, reg=None):
     return [(t, a) for t, a in out if a]
 
 
+def _age(secs):
+    secs = int(secs)
+    return "%dh%02dm" % (secs // 3600, secs % 3600 // 60) if secs >= 3600 else "%dm" % (secs // 60)
+
+
+def list_text(reg=None, now=None):
+    """`dais account list`: every account with its provider, kind, credential, and cap state;
+    the pools; the implicit accounts."""
+    import time
+    reg = reg or load()
+    now = now if now is not None else time.time()
+    import router
+    implicit = set(router.provider_packs())
+    out = ["accounts (%s)" % accounts_file()]
+    named = [n for n in reg["accounts"] if n not in implicit]
+    if not named:
+        out.append("  (none — every role runs on its provider's ambient login)")
+    for n in named:
+        a = reg["accounts"][n]
+        cred = a["config_dir"] if a["kind"] == "subscription" else ("$" + a["key_env"] if a["key_env"] else "(no key_env)")
+        since = capped_since(n, now=now, reg=reg)
+        state = ("cooling %s (%s; window %s)" % (_age(now - since), capped_model(n) or "?", _age(window_seconds(a)))
+                 if since is not None else "free")
+        out.append("  %-10s %-10s %-13s %-40s %s" % (n, a["provider"], a["kind"], cred, state))
+    for pn, pool in reg["pools"].items():
+        out.append("  pool %s: %s (%s)" % (pn, ", ".join(pool["members"]), pool["policy"]))
+    cooling = [n for n in sorted(implicit) if capped_since(n, now=now, reg=reg) is not None]
+    out.append("  implicit: %s (each provider's ambient login%s)"
+               % (", ".join(sorted(implicit)), "; cooling: " + ", ".join(cooling) if cooling else ""))
+    return "\n".join(out)
+
+
+def login(name, reg=None):
+    """`dais account login <name>`: run the pack's login command with the account's config dir
+    exported under the pack's config_dir_var. Returns the exit status."""
+    import subprocess
+    import router
+    reg = reg or load()
+    a = resolve(name, reg)
+    if not a:
+        print("dais account: no account '%s' in %s" % (name, accounts_file()), file=sys.stderr); return 1
+    if a["kind"] != "subscription":
+        print("dais account: '%s' is an api account — set $%s (env, ~/.dais/env, or $DAIS_HOME/.env); "
+              "only subscription accounts log in (its key_env is the credential)" % (name, a["key_env"] or "?"),
+              file=sys.stderr); return 1
+    pack = router.provider_packs().get(a["provider"], {})
+    cmd, var = pack.get("login"), pack.get("config_dir_var", "")
+    if not cmd:
+        print("dais account: the %s pack declares no login command" % a["provider"], file=sys.stderr); return 1
+    env = dict(os.environ)
+    if a["config_dir"]:
+        if not var:
+            print("dais account: the %s pack declares no config_dir_var; the login would land in the ambient profile"
+                  % a["provider"], file=sys.stderr); return 1
+        os.makedirs(a["config_dir"], exist_ok=True)
+        env[var] = a["config_dir"]
+    print("dais account: logging in '%s' — %s%s" % (name, " ".join(cmd), (" with %s=%s" % (var, a["config_dir"])) if a["config_dir"] else ""))
+    try:
+        return subprocess.call(cmd, env=env)
+    except OSError as ex:
+        print("dais account: %s" % ex, file=sys.stderr); return 1
+
+
+def main(argv):
+    sub = argv[0] if argv else ""
+    if sub == "list" or sub == "status":
+        print(list_text()); return 0
+    if sub == "mark" and len(argv) >= 2:
+        mark_capped(argv[1], argv[2] if len(argv) > 2 else ""); return 0
+    if sub == "clear" and len(argv) >= 2:
+        if not resolve(argv[1]):
+            print("dais account: no account '%s'" % argv[1], file=sys.stderr); return 1
+        clear_capped(argv[1]); print("cleared the cap marker for %s" % argv[1]); return 0
+    if sub == "login" and len(argv) >= 2:
+        return login(argv[1])
+    print("usage: dais account list | login <name> | clear <name>", file=sys.stderr)
+    return 2
+
+
 if __name__ == "__main__":
-    # run-agent's marker seam: accounts.py mark <account> <model> | clear <account>
-    if len(sys.argv) >= 3 and sys.argv[1] == "mark":
-        mark_capped(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
-    elif len(sys.argv) >= 3 and sys.argv[1] == "clear":
-        clear_capped(sys.argv[2])
-    else:
-        print("usage: accounts.py mark <account> [model] | clear <account>", file=sys.stderr)
-        sys.exit(2)
+    sys.exit(main(sys.argv[1:]))

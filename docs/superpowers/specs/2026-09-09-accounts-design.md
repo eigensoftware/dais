@@ -1,6 +1,6 @@
 # Accounts: pooling, rotation, and per-account cap state
 
-Status: approved (decisions below) · 2026-09-09 · dev plan 5.4 (spec first; no code in this commit)
+Status: implemented 2026-09-09 (slices 1–4 on branch codex-either-or; decisions below) · 2026-09-09 · dev plan 5.4 (spec first; no code in this commit)
 
 ## Why
 
@@ -69,8 +69,9 @@ A run resolves its account at launch:
      ties → round-robin by run count today. Spreads load so both windows drain evenly.
    - `round-robin`: strict alternation by run count.
    - `first-free`: members in declared order.
-3. Every member capped → the pool is capped → the fallback tier (`fallback_account`), else the
-   run is scored `capped` as today.
+3. Every member capped → the members are still listed after the free ones, oldest cap first,
+   as probes (a cap answers at once and a success clears the marker); then the fallback tier
+   (`fallback_account`). All attempts capped → the run is scored `capped` as today.
 
 The run row records the account (`runs.account`, migration 0015) beside provider and model,
 so `dais cost --by account` and the cap gate can read it.

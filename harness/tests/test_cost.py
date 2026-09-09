@@ -13,7 +13,7 @@ CREATE TABLE tasks(id TEXT PRIMARY KEY, project TEXT, title TEXT, status TEXT,
   priority TEXT, assignee TEXT, notes TEXT, updated_at TEXT);
 CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT, task_id TEXT,
   status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT, model TEXT,
-  provider TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+  provider TEXT, account TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
   cache_write_tokens INTEGER, cost_usd REAL, turns INTEGER, session_id TEXT);
 CREATE TABLE run_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, task_id TEXT,
   verb TEXT, at TEXT);
@@ -105,3 +105,23 @@ class TestCostReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCostByAccount(unittest.TestCase):
+    """5.4: `--by account` groups on runs.account; a NULL account is the provider's implicit one."""
+    def test_by_account_groups_and_defaults_null_to_the_provider(self):
+        c = _db()
+        c.execute("UPDATE runs SET account='max-a' WHERE id IN (1,2)")
+        c.execute("UPDATE runs SET account='max-b' WHERE id=3")
+        out = cost.report(c, by="account", now=NOW)
+        rows = {l.split()[0]: l for l in out.splitlines() if l.startswith("  ") and not l.strip().startswith("account")}
+        self.assertIn("max-a", rows); self.assertIn("max-b", rows)
+        self.assertIn("2", rows["max-a"].split()[1])
+        self.assertIn("anthropic", rows)           # runs 4, 5 (NULL account, claude) read as the implicit account
+        self.assertIn("openai", rows)              # the codex run
+        self.assertIn("account", out.splitlines()[2])   # the header names the column
+
+    def test_by_account_on_a_db_without_the_column_says_migrate(self):
+        c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+        c.executescript(SCHEMA.replace(", account TEXT", ""))
+        self.assertIn("migrate", cost.report(c, by="account", now=NOW))

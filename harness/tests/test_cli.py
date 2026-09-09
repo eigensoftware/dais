@@ -571,6 +571,88 @@ class TestDoctor(CliTest):
         self.assertIn("repo", r.stdout.lower())
 
 
+class TestAccountCommands(CliTest):
+    """`dais account` (plan 5.4): list the founder's accounts with their cap state, log one in under
+    its own config dir, clear a marker. doctor lists accounts with their login state."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        self.d = tempfile.mkdtemp(prefix="dais-accts-"); self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        os.makedirs(os.path.join(self.d, "max-b"))
+        with open(os.path.join(self.d, "accounts.yaml"), "w") as f:
+            f.write("accounts:\n"
+                    "  max-a: {provider: anthropic, kind: subscription, config_dir: %s/max-a}\n"
+                    "  max-b: {provider: anthropic, kind: subscription, config_dir: %s/max-b}\n"
+                    "  api-1: {provider: anthropic, kind: api, key_env: ANTHROPIC_KEY_ONE}\n"
+                    "  chatgpt: {provider: openai, kind: subscription, config_dir: %s/chatgpt}\n"
+                    "pools:\n  max: {members: [max-a, max-b]}\n" % (self.d, self.d, self.d))
+        self.env = {"DAIS_ACCOUNTS_FILE": os.path.join(self.d, "accounts.yaml"), "DAIS_ACCOUNTS_DIR": os.path.join(self.d, "m")}
+
+    def _bin(self, argv_file):
+        b = tempfile.mkdtemp(prefix="dais-bin-"); self.addCleanup(shutil.rmtree, b, ignore_errors=True)
+        os.symlink(sys.executable, os.path.join(b, "python3"))
+        for t in ("sqlite3", "git"):
+            os.symlink(shutil.which(t), os.path.join(b, t))
+        for t in ("claude", "codex"):
+            with open(os.path.join(b, t), "w") as f:      # records argv + the config dir; `status` fails for max-a
+                f.write("#!/bin/bash\necho \"%s $* CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-unset} CODEX_HOME=${CODEX_HOME:-unset}\" >> '%s'\n"
+                        "case \"$*\" in *status*) case \"${CLAUDE_CONFIG_DIR:-}${CODEX_HOME:-}\" in */max-a) exit 1;; esac;; esac\nexit 0\n" % (t, argv_file))
+            os.chmod(os.path.join(b, t), 0o755)
+        return "%s:/usr/bin:/bin" % b
+
+    def test_account_list_shows_accounts_pools_and_cap_state(self):
+        os.makedirs(self.env["DAIS_ACCOUNTS_DIR"])
+        with open(os.path.join(self.env["DAIS_ACCOUNTS_DIR"], "max-a.cooldown"), "w") as f:
+            f.write("%d claude-fable-5\n" % (int(time.time()) - 600))
+        r = dais(self.root, "account", "list", env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        a = next(l for l in r.stdout.splitlines() if l.strip().startswith("max-a"))
+        self.assertIn("anthropic", a); self.assertIn("subscription", a); self.assertIn("cooling", a); self.assertIn("10m", a)
+        b = next(l for l in r.stdout.splitlines() if l.strip().startswith("max-b"))
+        self.assertIn("free", b)
+        self.assertIn("ANTHROPIC_KEY_ONE", r.stdout)                    # the api account names its key
+        self.assertIn("pool max", r.stdout); self.assertIn("least-recently-capped", r.stdout)
+        self.assertIn("anthropic", r.stdout.split("implicit", 1)[1])   # the implicit accounts are listed too
+
+    def test_account_clear_drops_the_marker(self):
+        os.makedirs(self.env["DAIS_ACCOUNTS_DIR"])
+        m = os.path.join(self.env["DAIS_ACCOUNTS_DIR"], "max-a.cooldown")
+        open(m, "w").write("%d x\n" % int(time.time()))
+        r = dais(self.root, "account", "clear", "max-a", env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(m))
+        self.assertNotEqual(dais(self.root, "account", "clear", "ghost", env=self.env).returncode, 0)
+
+    def test_account_login_runs_the_packs_login_under_the_config_dir(self):
+        argv = os.path.join(self.root, "cli-argv")
+        env = dict(self.env, PATH=self._bin(argv))
+        r = dais(self.root, "account", "login", "max-b", env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("claude auth login CLAUDE_CONFIG_DIR=%s/max-b" % self.d, open(argv).read())
+        r = dais(self.root, "account", "login", "chatgpt", env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("codex login CLAUDE_CONFIG_DIR=unset CODEX_HOME=%s/chatgpt" % self.d, open(argv).read())
+        self.assertTrue(os.path.isdir(os.path.join(self.d, "chatgpt")))     # the dir is created for the login
+        r = dais(self.root, "account", "login", "api-1", env=env)
+        self.assertNotEqual(r.returncode, 0)                                # an api account has no login
+        self.assertIn("key_env", r.stdout + r.stderr)
+
+    def test_doctor_lists_accounts_with_their_login_state(self):
+        argv = os.path.join(self.root, "cli-argv")
+        env = dict(self.env, PATH=self._bin(argv))
+        with open(os.path.join(self.root, "projects", "demo", "agents", "qa.md"), "w") as f:
+            f.write("---\naccount: pool:max\n---\npersona\n")
+        with open(os.path.join(self.root, "projects", "demo", "agents", "engineer.md"), "w") as f:
+            f.write("---\naccount: api-1\n---\npersona\n")
+        r = dais(self.root, "doctor", env=env)
+        out = r.stdout
+        self.assertIn("account max-b", out); self.assertIn("login ok", out.split("account max-b", 1)[1].splitlines()[0])
+        self.assertIn("account max-a", out); self.assertIn("NOT logged in", out.split("account max-a", 1)[1].splitlines()[0])
+        self.assertIn("account api-1", out); self.assertIn("ANTHROPIC_KEY_ONE is not set", out)
+        self.assertNotIn("account chatgpt", out)                            # no role uses it: not checked
+
+
 class TestLearnReviewQueue(CliTest):
     """`dais learn` (plan 2.10, bug 5): an AGENT's learning lands in a pending queue the founder
     reviews; the founder's own learn still writes CONTEXT.md directly. Nothing an agent writes

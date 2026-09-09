@@ -7,7 +7,7 @@ even on a subscription; codex reports none, so codex-only rows show no figure). 
 is the dispatcher's definition: succeeded, and no run_tasks verb other than 'touch' — the
 runs the harness-side idle check (plan 1.5) is meant to remove.
 
-    cost.py <db> [project] [--since Nd] [--by project|role|task]
+    cost.py <db> [project] [--since Nd] [--by project|role|task|account]
 """
 import sqlite3
 import sys
@@ -81,8 +81,13 @@ def report(conn, project=None, since_days=None, by="project", now=None):
                 _usd(r["cost"] if r["priced"] else None), r["title"][:60]))
         return "\n".join(out)
 
-    key = "r.project" if by == "project" else "r.project || '/' || r.agent"
-    label = "project" if by == "project" else "project/role"
+    if by == "account":                          # 5.4: runs.account (0015); NULL = the provider's implicit account
+        if "account" not in cols:
+            return "  (by account needs runs.account — run `dais migrate`)"
+        key, label = "COALESCE(r.account, r.provider, 'anthropic')", "account"
+    else:
+        key = "r.project" if by == "project" else "r.project || '/' || r.agent"
+        label = "project" if by == "project" else "project/role"
     rows = conn.execute("SELECT %s k, %s FROM runs r WHERE %s GROUP BY k ORDER BY tin DESC, k"
                         % (key, agg, W), args).fetchall()
     out.append("  %-18s %5s %8s %7s %8s %8s %-12s %s" % (label, "runs", "in", "cached", "out", "cost", "no-op", "avg in/run"))
@@ -98,7 +103,7 @@ def report(conn, project=None, since_days=None, by="project", now=None):
 
 def _main(argv):
     if not argv:
-        print("usage: cost.py <db> [project] [--since Nd] [--by project|role|task]", file=sys.stderr)
+        print("usage: cost.py <db> [project] [--since Nd] [--by project|role|task|account]", file=sys.stderr)
         return 2
     db, project, since, by = argv[0], None, None, "project"
     rest = argv[1:]
@@ -112,8 +117,8 @@ def _main(argv):
             since = int(v); i += 2
         elif a == "--by":
             by = rest[i + 1]
-            if by not in ("project", "role", "task"):
-                print("cost: --by project|role|task", file=sys.stderr); return 1
+            if by not in ("project", "role", "task", "account"):
+                print("cost: --by project|role|task|account", file=sys.stderr); return 1
             i += 2
         elif a.startswith("--"):
             print("cost: unknown flag %s" % a, file=sys.stderr); return 1

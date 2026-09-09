@@ -90,13 +90,19 @@ def run(home, root):
 
     # the cast: which providers, auths, and repos are actually in use
     projects = _projects(home)
-    providers, api_roles, full_roles = set(), [], []
+    providers, api_roles, full_roles, used_accounts = set(), [], [], {}
+    import accounts as AC
+    reg = AC.load()
     for p in projects:
         for r in router.cast(home, p):
             s = router.agent_setup(home, p, r["name"])
             if s["trigger"] == "none":
                 continue
             providers.add(s["provider"])
+            for ref in (s["account"], s["fallback_account"]):     # 5.4: the named accounts the cast runs on
+                for a in AC.members(ref, reg):
+                    if a["name"] not in router.provider_packs():  # implicit accounts are the CLI-login lines above
+                        used_accounts.setdefault(a["name"], a)
             if s["auth"] == "api":
                 api_roles.append((p, r["name"], s["provider"]))
             if s["provider"] == "anthropic" and s["context"] == "full":
@@ -116,6 +122,29 @@ def run(home, root):
                     warn("codex login status could not be checked")
         else:
             fail("%s not on PATH — every role on provider %s fails at preflight" % (cli, prov))
+    for name in sorted(used_accounts):                          # accounts: login state per config dir / key
+        a = used_accounts[name]
+        pack = router.provider_packs().get(a["provider"], {})
+        if a["kind"] == "api":
+            var = a["key_env"]
+            if var and (os.environ.get(var) or _env_files_have(home, var)):
+                ok("account %s: %s api — %s is set" % (name, a["provider"], var))
+            else:
+                fail("account %s: %s api but %s is not set (env, ~/.dais/env, or %s/.env)" % (name, a["provider"], var or "key_env", home))
+            continue
+        cmd, var = pack.get("login_status"), pack.get("config_dir_var", "")
+        where = ("%s=%s" % (var, a["config_dir"])) if (var and a["config_dir"]) else "the ambient login"
+        if not cmd or not shutil.which(cmd[0]):
+            warn("account %s: %s subscription at %s — login state not checked (%s)" % (name, a["provider"], where, "no CLI on PATH" if cmd else "the pack has no login_status"))
+            continue
+        env = dict(os.environ)
+        if var and a["config_dir"]:
+            env[var] = a["config_dir"]
+        try:
+            rc = subprocess.run(cmd, capture_output=True, timeout=20, env=env).returncode
+            (ok if rc == 0 else warn)("account %s: %s subscription at %s — login %s" % (name, a["provider"], where, "ok" if rc == 0 else "NOT logged in — run `dais account login %s`" % name))
+        except (OSError, subprocess.TimeoutExpired):
+            warn("account %s: login status could not be checked" % name)
     if shutil.which("gh"):
         ok("gh on PATH (PRs, dais check)")
     else:
