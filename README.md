@@ -339,6 +339,27 @@ roles resolved to that project's *default* provider; it never leaks a `claude-op
 onto a role you've overridden to `provider: openai` (or vice versa). Give a per-role override
 its own `model:` in that role's frontmatter instead.
 
+**Any OpenAI-compatible endpoint, through the openai pack.** Codex talks to whatever
+`model_providers` entry you name; dais writes it from the role's frontmatter (or project-wide):
+
+```
+---
+provider: openai
+model: deepseek-chat
+model_provider: deepseek                  # any name; codex's config key
+base_url: https://api.deepseek.com/v1     # OpenRouter, Groq, DeepSeek, vLLM, …
+env_key: DEEPSEEK_API_KEY                 # the env var codex reads the key from
+---
+```
+
+`local: ollama` (with `model: llama3`) runs a local model instead. A claude role takes
+`base_url:` too, exported as `ANTHROPIC_BASE_URL` for a gateway such as LiteLLM.
+
+**Fallback across providers.** `fallback_model:` may live on another pack: add
+`fallback_provider: openai` and the run that hits the Claude usage limit finishes on codex
+(recorded as such on the run row, the ledger, and the per-provider cap gate). Both CLIs are
+preflighted; a cross-provider attempt never resumes a session (a session belongs to one CLI).
+
 **`auth: api`** reads the provider's standard key (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) from
 the process environment, then `~/.dais/env`, then `$DAIS_HOME/.env` (workspace override); first
 one set wins. Never put a key in `project.yaml` or a persona file (`dais lint` warns on

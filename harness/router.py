@@ -99,7 +99,8 @@ def frontmatter(path):
 AGENT_CONFIG_KEYS = ("model", "fallback_model", "effort", "provider", "auth", "access", "isolation",
                      "trigger", "prec", "playbook", "playbook_file", "concurrency",
                      "context", "mcp", "plugins", "max_turns", "max_budget_usd", "max_minutes",
-                     "resume", "model_by_priority", "effort_by_priority")
+                     "resume", "model_by_priority", "effort_by_priority",
+                     "model_provider", "base_url", "env_key", "local", "fallback_provider")
 
 
 def _cap(v, integer=False):
@@ -275,7 +276,13 @@ def agent_setup(root, project, role):
     # run-agent overrides model/effort for the run when the task's priority has a tier
     mbp = _csv(fm.get("model_by_priority") or _yaml_line(ytext, "model_by_priority"))
     ebp = _csv(fm.get("effort_by_priority") or _yaml_line(ytext, "effort_by_priority"))
+    # 5.2: an OpenAI-compatible endpoint for codex (model_provider + base_url [+ env_key]) or a
+    # local model (local: ollama); a proxy base_url for claude (ANTHROPIC_BASE_URL). 5.3: the
+    # fallback may live on ANOTHER provider (fallback_provider; default = the role's own).
+    ext = {k: (fm.get(k) or _yaml_line(ytext, k)).strip() for k in ("model_provider", "base_url", "env_key", "local")}
+    fallback_provider = (fm.get("fallback_provider") or _yaml_line(ytext, "fallback_provider") or "").strip()
     return {"model": model, "fallback_model": fallback_model, "resume": resume,
+            "fallback_provider": fallback_provider, **ext,
             "model_by_priority": mbp, "effort_by_priority": ebp,
             "effort": effort, "provider": provider, "auth": auth,
             "access": access, "trigger": trigger, "prec": str(prec),

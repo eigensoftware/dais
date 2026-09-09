@@ -8,6 +8,8 @@ provider_run(){
     resume_flag=(--resume "$RESUME_ID")
     echo "  ↻ resuming session $RESUME_ID on ${TASK_ID:-?} (same role, same task, <6h)" | tee -a "$LOG"
   fi
+  # 5.2: a proxy / gateway (LiteLLM, Bedrock-fronting…) via ANTHROPIC_BASE_URL, per role
+  [ -n "${BASE_URL:-}" ] && export ANTHROPIC_BASE_URL="$BASE_URL"
   claude -p "${RESUME_PROMPT:-$STANDING}" \
         ${resume_flag[@]+"${resume_flag[@]}"} \
         --append-system-prompt "$PERSONA" \

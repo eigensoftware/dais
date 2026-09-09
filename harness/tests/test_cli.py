@@ -1661,6 +1661,67 @@ class TestPerRoleModelOverride(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", ".cadence-lead")))
 
+    # --- 5.2: codex against any OpenAI-compatible endpoint; a proxy base URL for claude -----------
+    def _codex_argv(self, fm):
+        argv = os.path.join(self.root, "codex-argv")
+        if os.path.exists(argv):
+            os.unlink(argv)
+        fake = ('printf "%s\\n" "$@" > "' + argv + '"\n'
+                'echo \'{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"ok"}}\'\n'
+                'echo \'{"type":"turn.completed","usage":{}}\'\n')
+        self._set_role("qa", "provider: openai\n" + fm)
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_codex=fake)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return open(argv).read().split("\n")
+
+    def test_codex_model_provider_and_base_url_pass_through(self):
+        args = self._codex_argv("model: deepseek-chat\nmodel_provider: deepseek\nbase_url: https://api.deepseek.com/v1\nenv_key: DEEPSEEK_API_KEY\n")
+        self.assertEqual(args[args.index("-m") + 1], "deepseek-chat")
+        self.assertIn('model_provider="deepseek"', args)
+        self.assertIn('model_providers.deepseek.base_url="https://api.deepseek.com/v1"', args)
+        self.assertIn('model_providers.deepseek.env_key="DEEPSEEK_API_KEY"', args)
+        self.assertIn('model_providers.deepseek.name="deepseek"', args)
+        args = self._codex_argv("")                                 # unset: nothing added
+        self.assertFalse(any(a.startswith("model_provider") or a.startswith("model_providers") for a in args))
+
+    def test_codex_local_provider_flag(self):
+        args = self._codex_argv("model: llama3\nlocal: ollama\n")
+        self.assertIn("--oss", args)
+        self.assertEqual(args[args.index("--local-provider") + 1], "ollama")
+
+    def test_claude_base_url_reaches_the_cli_environment(self):
+        argv = os.path.join(self.root, "claude-argv")
+        fake = self._fake_claude(argv) + 'echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-unset}" >> "' + argv + '"\n'
+        self._set_role("qa", "base_url: http://127.0.0.1:4000\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=fake), "HOME": self._fake_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("ANTHROPIC_BASE_URL=http://127.0.0.1:4000", open(argv).read())
+
+    # --- 5.3: cross-provider fallback ------------------------------------------------------------
+    def test_fallback_can_cross_to_another_provider(self):
+        argv = os.path.join(self.root, "codex-argv")
+        claude = ('echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"You\\u0027ve hit your usage limit"}]}}\'\n')
+        codex = ('printf "%s\\n" "$@" > "' + argv + '"\n'
+                 'echo \'{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"codex took it"}}\'\n'
+                 'echo \'{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":1}}\'\n')
+        self._set_role("qa", "model: claude-fable-5\nfallback_provider: openai\nfallback_model: gpt-5.4\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_codex=codex, fake_claude=claude), "HOME": self._fake_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        row = q(self.root, "SELECT status, provider, model, log_path FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row[:3]), ("succeeded", "openai", "gpt-5.4"))
+        self.assertIn("codex took it", open(row[3]).read())
+        self.assertTrue(os.path.exists(row[3] + ".capped-claude-fable-5"))
+        args = open(argv).read().split("\n")
+        self.assertEqual(args[args.index("-m") + 1], "gpt-5.4")
+        marker = open(os.path.join(self.root, "projects", "demo", ".model-qa.exhausted")).read()
+        self.assertIn("claude-fable-5", marker)
+
+    def test_fallback_provider_needs_its_cli_too(self):
+        self._set_role("qa", "model: claude-fable-5\nfallback_provider: openai\nfallback_model: gpt-5.4\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(os.path.join(self.root, "a")))})
+        self.assertNotEqual(r.returncode, 0)                        # no codex on PATH: say so up front
+        self.assertIn("codex", r.stdout + r.stderr)
+
     # --- budget caps (plan 1.4) ---------------------------------------------------------------
     def test_caps_become_claude_flags_only_when_set(self):
         args = self._claude_argv("max_turns: 25\nmax_budget_usd: 2.50\n")

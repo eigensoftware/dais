@@ -25,6 +25,11 @@ FALLBACK="$(cfg fallback_model)"   # optional backup model for the usage-limit a
 [ "$FALLBACK" = "$MODEL" ] && FALLBACK=""   # a fallback == primary is a no-op; disable it
 EFFORT_FLAG=(); [ -n "$EFF" ] && EFFORT_FLAG=(--effort "$EFF")
 CTX="$(cfg context)"               # lean (default) | full — the agent profile (router.py's note)
+# 5.2: endpoint passthrough (codex: model_provider/base_url/env_key or local:; claude: base_url)
+MODEL_PROVIDER="$(cfg model_provider)"; BASE_URL="$(cfg base_url)"; ENV_KEY="$(cfg env_key)"; LOCAL_PROVIDER="$(cfg local)"
+# 5.3: the fallback may live on another provider pack
+FALLBACK_PROVIDER="$(cfg fallback_provider)"; [ -n "$FALLBACK_PROVIDER" ] || FALLBACK_PROVIDER="$PROVIDER"
+[ "$FALLBACK_PROVIDER" = "$PROVIDER" ] && [ "$FALLBACK" = "$MODEL" ] && FALLBACK=""
 # budget caps (plan 1.4). Unset = unbounded (the historical behavior). max_turns/max_budget_usd
 # are claude flags; max_minutes is OUR watchdog (macOS ships no `timeout`), on both providers.
 MAXT="$(cfg max_turns)"; MAXB="$(cfg max_budget_usd)"; MAXMIN="$(cfg max_minutes)"
@@ -35,15 +40,18 @@ CAP_FLAGS=()
 # The lean profile's claude argv (anthropic only): keep the REPO's settings, drop the founder's
 # user-level plugins/MCP/hooks/CLAUDE.md, add back the role's mcp:/plugins: allowlists. Built
 # once here; names that resolve to nothing are said out loud (the run still goes without them).
-PROFILE=()
-if [ "$PROVIDER" = anthropic ] && [ "$CTX" = lean ]; then
-  PROFILE=(--setting-sources project,local --strict-mcp-config)
-  _lean_err="$(mktemp)"
-  while IFS= read -r _line; do PROFILE+=("$_line"); done \
-    < <(python3 "$SELF/router.py" --lean-flags "$DAIS_HOME" "$PROJECT" "$AGENT" 2>"$_lean_err")
-  [ -s "$_lean_err" ] && sed "s/^/  ⚠ [$PROJECT\/$AGENT] /" "$_lean_err"
-  rm -f "$_lean_err"
-fi
+provider_profile(){   # $1 = provider -> PROFILE for it (the lean profile is a claude thing)
+  PROFILE=()
+  if [ "$1" = anthropic ] && [ "$CTX" = lean ]; then
+    PROFILE=(--setting-sources project,local --strict-mcp-config)
+    local _lean_err; _lean_err="$(mktemp)"
+    while IFS= read -r _line; do PROFILE+=("$_line"); done \
+      < <(python3 "$SELF/router.py" --lean-flags "$DAIS_HOME" "$PROJECT" "$AGENT" 2>"$_lean_err")
+    [ -s "$_lean_err" ] && sed "s/^/  ⚠ [$PROJECT\/$AGENT] /" "$_lean_err"
+    rm -f "$_lean_err"
+  fi
+}
+provider_profile "$PROVIDER"
 
 # Secrets transport (auth: api): the provider's standard env var, from the process env,
 # ~/.dais/env (user-level; keep it chmod 600), or $DAIS_HOME/.env (workspace override,
@@ -74,21 +82,33 @@ fi
 # (the adapter), pack.json names the CLI and the API key variable, caps.txt the usage-limit
 # patterns, stream.py the event mapping. A missing pack is a config error: say so, name the
 # packs that exist, and record nothing.
-PACK="$DAIS_ROOT/harness/providers/$PROVIDER"
-if [ ! -f "$PACK/run.sh" ]; then
-  echo "[$PROJECT/$AGENT] no provider pack '$PROVIDER' under harness/providers/ (packs: $(ls "$DAIS_ROOT/harness/providers" 2>/dev/null | tr '\n' ' '))"
-  exit 1
-fi
-PACK_META="$(python3 "$SELF/router.py" --pack-meta "$PROVIDER" 2>/dev/null)"
-PACK_CLI="$(printf '%s\n' "$PACK_META" | sed -n 's/^cli=//p')"
-KEYVAR="$(printf '%s\n' "$PACK_META" | sed -n 's/^key_var=//p')"
+load_pack(){   # $1 = provider -> PACK PACK_CLI KEYVAR; exits, named, when the pack is missing
+  PACK="$DAIS_ROOT/harness/providers/$1"
+  if [ ! -f "$PACK/run.sh" ]; then
+    echo "[$PROJECT/$AGENT] no provider pack '$1' under harness/providers/ (packs: $(ls "$DAIS_ROOT/harness/providers" 2>/dev/null | tr '\n' ' '))"
+    exit 1
+  fi
+  local meta; meta="$(python3 "$SELF/router.py" --pack-meta "$1" 2>/dev/null)"
+  PACK_CLI="$(printf '%s\n' "$meta" | sed -n 's/^cli=//p')"
+  KEYVAR="$(printf '%s\n' "$meta" | sed -n 's/^key_var=//p')"
+}
+load_pack "$PROVIDER"
 
 # Provider CLI preflight — the pack's CLI must be on PATH. Fail here, named, BEFORE the git
 # fetch and before a run row exists: a missing `codex` used to surface as exit 127 deep in the
 # pipeline, recorded as a failed run that then fed the error-backoff gate. The DAIS_NOOP_RUN
-# test seam stands in for the CLI, so it is exempt.
+# test seam stands in for the CLI, so it is exempt. A cross-provider fallback (5.3) needs ITS
+# CLI too — say so now rather than discover it mid-cap.
 if [ -z "${DAIS_NOOP_RUN:-}" ] && [ -n "$PACK_CLI" ]; then
   need "$PACK_CLI" "install it and log in — role '$AGENT' runs on provider $PROVIDER (see $PACK/pack.json)"
+fi
+if [ -n "$FALLBACK" ] && [ "$FALLBACK_PROVIDER" != "$PROVIDER" ]; then
+  _fb_meta="$(python3 "$SELF/router.py" --pack-meta "$FALLBACK_PROVIDER" 2>/dev/null)"
+  _fb_cli="$(printf '%s\n' "$_fb_meta" | sed -n 's/^cli=//p')"
+  [ -f "$DAIS_ROOT/harness/providers/$FALLBACK_PROVIDER/run.sh" ] || { echo "[$PROJECT/$AGENT] fallback_provider '$FALLBACK_PROVIDER' has no pack"; exit 1; }
+  if [ -z "${DAIS_NOOP_RUN:-}" ] && [ -n "$_fb_cli" ]; then
+    need "$_fb_cli" "the fallback_provider $FALLBACK_PROVIDER needs it — role '$AGENT'"
+  fi
 fi
 
 # auth:api preflight — fail fast, before any network/claude work (git fetch is right below),
@@ -451,15 +471,21 @@ if [ -n "$FALLBACK" ] && [ -f "$MARKER" ]; then
   else rm -f "$MARKER"; fi                # window reset — give the primary another shot
 fi
 
+# attempts are provider|model pairs (5.3): the fallback may run on another pack
 if [ -n "$FALLBACK" ] && [ "$AUTH" != "api" ]; then
-  if [ "$start_on_backup" = 1 ]; then ATTEMPTS=("$FALLBACK"); else ATTEMPTS=("$MODEL" "$FALLBACK"); fi
+  if [ "$start_on_backup" = 1 ]; then ATTEMPTS=("$FALLBACK_PROVIDER|$FALLBACK"); else ATTEMPTS=("$PROVIDER|$MODEL" "$FALLBACK_PROVIDER|$FALLBACK"); fi
 else
-  ATTEMPTS=("$MODEL")
+  ATTEMPTS=("$PROVIDER|$MODEL")
 fi
 
-run_one(){   # $1 = model id — one attempt: sets STATUS, records the model actually used
-  MODEL="$1"
-  db "UPDATE runs SET model='$(sqlesc "$MODEL")' WHERE id=$RUNID;" 2>/dev/null
+run_one(){   # $1 = provider|model — one attempt: sets STATUS, records what actually ran
+  local a_prov="${1%%|*}"
+  MODEL="${1#*|}"
+  if [ "$a_prov" != "$PROVIDER" ]; then           # a cross-provider attempt: switch packs
+    PROVIDER="$a_prov"; load_pack "$PROVIDER"; . "$PACK/run.sh"; provider_profile "$PROVIDER"
+    RESUME_ID=""; RESUME_PROMPT=""                # a session belongs to one CLI
+  fi
+  db "UPDATE runs SET model='$(sqlesc "$MODEL")', provider='$(sqlesc "$PROVIDER")' WHERE id=$RUNID;" 2>/dev/null
   : > "$LOG"   # fresh log per attempt so is_capped + the summary reflect THIS model, not a prior cap
   rm -f "$LOG.usage.json"   # and a fresh usage sidecar: a capped attempt's tokens must not be credited to the fallback
   if [ "$QUIET" = 1 ]; then
@@ -486,9 +512,9 @@ for idx in "${!ATTEMPTS[@]}"; do
   run_one "${ATTEMPTS[$idx]}"
   nxt="${ATTEMPTS[$((idx+1))]:-}"
   if [ "$STATUS" = capped ] && [ -n "$nxt" ]; then
-    echo "  ${CY}⤳ ${ATTEMPTS[$idx]} hit the usage limit — falling back to $nxt${C0}"
-    fell_from="${ATTEMPTS[$idx]}"
-    cp "$LOG" "$LOG.capped-${ATTEMPTS[$idx]}" 2>/dev/null   # keep the capped attempt's trace (bug 8)
+    echo "  ${CY}⤳ ${ATTEMPTS[$idx]#*|} (${ATTEMPTS[$idx]%%|*}) hit the usage limit — falling back to ${nxt#*|} (${nxt%%|*})${C0}"
+    fell_from="${ATTEMPTS[$idx]#*|}"
+    cp "$LOG" "$LOG.capped-${ATTEMPTS[$idx]#*|}" 2>/dev/null   # keep the capped attempt's trace (bug 8)
     continue
   fi
   break
