@@ -362,8 +362,10 @@ def workspace_name(home=HOME):
 # --------------------------------------------------------------------------- #
 # the snapshot — one coherent read of the whole workspace
 # --------------------------------------------------------------------------- #
-_PRIO = ("CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
-         "WHEN 'medium' THEN 2 ELSE 3 END")
+# derived from machine.PRIORITY_ORDER (the one owner; bug 10): "CASE priority WHEN 'critical'
+# THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
+_PRIO = ("CASE priority " + " ".join("WHEN '%s' THEN %d" % (p, i) for i, p in enumerate(MC.PRIORITY_ORDER[:-1]))
+         + " ELSE %d END" % (len(MC.PRIORITY_ORDER) - 1))
 
 
 def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):

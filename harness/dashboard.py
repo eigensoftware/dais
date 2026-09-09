@@ -283,7 +283,7 @@ def render_plain(snap, color=None):
 # TUI-support pure functions
 # --------------------------------------------------------------------------- #
 # task priorities low→critical (the `+`/`-` cycle + the set-priority picker)
-PRIORITIES = ("low", "medium", "high", "critical")
+PRIORITIES = tuple(reversed(MC.PRIORITY_ORDER))   # ascending for cycling; one owner (bug 10)
 
 # short, scannable tokens for the contextual action bar / confirm prompts, keyed by
 # action id. Falls back to the engine's full label for anything not listed.

@@ -17,7 +17,8 @@ class Action:
     confirm: bool  # whether the UI must pop a y/N before executing
 
 
-_PRIORITIES = ["low", "medium", "high", "critical"]
+from machine import PRIORITY_ORDER as _ORDER
+_PRIORITIES = list(reversed(_ORDER))   # ascending for cycling; the one owner is machine.PRIORITY_ORDER
 
 
 def priority_cycle(current, direction):

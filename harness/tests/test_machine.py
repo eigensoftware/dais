@@ -301,6 +301,42 @@ class TestAssigneeStamp(unittest.TestCase):
     def _row(self, tid):
         return self.conn.execute("SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()
 
+    def test_then_effect_prefers_the_system_edge_and_lint_demands_one(self):
+        # bug 9 (plan 2.4): `then: encompassed:approved->done` matched the FIRST edge with that
+        # from/to regardless of owner; with a founder edge listed first the nested fire ran as
+        # 'system', failed the actor check, and rolled the whole release back.
+        m = {"name": "t", "entry": "approved",
+             "roles": {"founder": {"human": True}, "engineer": {"access": "edit"}},
+             "states": {"approved": {"initial": True}, "release_open": {"initial": True},
+                        "release_review": {}, "done": {"terminal": True}},
+             "edges": [
+                 {"from": "approved", "to": "done", "by": "founder", "verb": "close"},       # listed first
+                 {"from": "approved", "to": "done", "by": "system", "verb": "released"},
+                 {"from": "release_open", "to": "release_review", "by": "engineer", "verb": "assemble",
+                  "effect": {"aggregate": {"select": "state=approved"}}},
+                 {"from": "release_review", "to": "done", "by": "engineer", "verb": "shipped",
+                  "effect": {"then": "encompassed:approved->done"}}]}
+        c = _db()
+        a = M.create_task(c, m, "proj", "a", "approved")
+        rel = M.create_task(c, m, "proj", "rel", "release_open")
+        M.fire(c, m, rel, "assemble", "engineer")
+        M.fire(c, m, rel, "shipped", "engineer")           # must not roll back
+        self.assertEqual(_status(c, a), "done")
+        self.assertEqual(M.lint(m)[0], [])
+        m["edges"].pop(1)                                   # drop the system edge -> lint error
+        errs, _ = M.lint(m)
+        self.assertTrue(any("E7" in e and "approved->done" in e for e in errs), errs)
+
+    def test_priority_order_has_one_owner(self):
+        # bug 10 (plan 2.4): four hardcoded copies (machine, board SQL, panel, actions)
+        import board, panel, actions, dashboard
+        self.assertEqual(M.PRIORITY_ORDER, ("critical", "high", "medium", "low"))
+        self.assertIs(panel._PRIO_RANK, M.PRIORITY_RANK)
+        self.assertEqual(tuple(actions._PRIORITIES), tuple(reversed(M.PRIORITY_ORDER)))
+        self.assertEqual(tuple(dashboard.PRIORITIES), tuple(reversed(M.PRIORITY_ORDER)))
+        for p in M.PRIORITY_ORDER[:-1]:
+            self.assertIn("'%s'" % p, board._PRIO)
+
     def test_fire_and_create_stamp_state_entered_at(self):
         # plan 2.3: gate age reads WHEN the task entered its state, not updated_at (which any
         # note bumps). fire() stamps it on every transition; create_task at birth.

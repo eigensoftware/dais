@@ -1113,6 +1113,65 @@ class TestPerRoleModelOverride(CliTest):
         out = self._show_config("qa")               # preflight passes; config seam prints
         self.assertIn("auth=api", out)
 
+    def test_env_file_without_a_trailing_newline_still_supplies_the_key(self):
+        # bug 6 (plan 2.4): `while read` drops a final line with no newline — the common
+        # `printf 'KEY=…' > .env` shape silently lost the key and the preflight refused to run
+        agent = os.path.join(self.root, "projects", "demo", "agents", "qa.md")
+        with open(agent, "w") as f:
+            f.write("---\nauth: api\n---\npersona\n")
+        with open(os.path.join(self.root, ".env"), "w") as f:
+            f.write("ANTHROPIC_API_KEY=sk-test-not-real")          # no trailing newline
+        # a REAL run (not the config seam, which exits before the preflight) against a fake claude
+        argv = os.path.join(self.root, "claude-argv")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(argv)),
+                                       "HOME": self._fake_home(), "ANTHROPIC_API_KEY": ""})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("is not set", r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(argv), "the run must reach the CLI")
+
+    def test_lock_slot_claim_skips_a_live_peer_and_reclaims_a_dead_one(self):
+        # bug 7 (plan 2.4): the claim is now atomic (noclobber create); behaviorally, a live
+        # holder still means "skip" and a dead one is reclaimed
+        argv = os.path.join(self.root, "claude-argv")
+        lock = os.path.join(self.root, "projects", "demo", ".lock-qa")
+        holder = subprocess.Popen(["sleep", "30"]); self.addCleanup(holder.kill)
+        with open(lock, "w") as f:
+            f.write("%d\n" % holder.pid)
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(argv)),
+                                       "HOME": self._fake_home()})
+        self.assertIn("skipping", r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(argv))
+        self.assertEqual(open(lock).read().strip(), str(holder.pid))   # the peer's lock is untouched
+        with open(lock, "w") as f:
+            f.write("999999\n")                                         # dead holder
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(argv)),
+                                       "HOME": self._fake_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(argv))
+        self.assertFalse(os.path.exists(lock))                          # released on exit
+
+    def test_fallback_keeps_the_capped_attempts_log(self):
+        # bug 8 (plan 2.4): the fallback attempt truncated the log, so the capped primary
+        # attempt left no trace; keep it beside the final log
+        argv = os.path.join(self.root, "claude-argv")
+        fake = ('printf "%s\\n" "$@" >> "' + argv + '"\n'
+                'm=""; while [ $# -gt 0 ]; do [ "$1" = "--model" ] && m="$2"; shift; done\n'
+                'if [ "$m" = "claude-fable-5" ]; then\n'
+                '  echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"You\\u0027ve hit your usage limit for Fable"}]}}\'\n'
+                'else\n'
+                '  echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"fallback working"}]}}\'\n'
+                '  echo \'{"type":"result","subtype":"success","num_turns":1,"usage":{"input_tokens":5,"output_tokens":1}}\'\n'
+                'fi\n')
+        self._set_role("qa", "model: claude-fable-5\nfallback_model: claude-opus-5\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=fake), "HOME": self._fake_home()})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        row = q(self.root, "SELECT status, model, log_path FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual((row[0], row[1]), ("succeeded", "claude-opus-5"))
+        self.assertIn("fallback working", open(row[2]).read())
+        kept = row[2] + ".capped-claude-fable-5"
+        self.assertTrue(os.path.exists(kept), "the capped attempt's log must be kept")
+        self.assertIn("usage limit", open(kept).read())
+
     def test_unknown_provider_fails_with_named_error(self):
         agent = os.path.join(self.root, "projects", "demo", "agents", "qa.md")
         with open(agent, "w") as f:

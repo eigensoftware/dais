@@ -1321,7 +1321,7 @@ def _task_row(proj, task, tag):
 
 
 _PRIO_TAG = {"critical": "CRIT", "high": "HIGH", "medium": "MED", "low": "LOW"}
-_PRIO_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+_PRIO_RANK = MC.PRIORITY_RANK      # the one owner (machine.PRIORITY_ORDER; bug 10)
 
 
 def _machine_work_rows(snap, projects, project, expanded, root):

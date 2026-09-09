@@ -51,7 +51,9 @@ fi
 load_env(){
   local f="$1" line k
   [ -f "$f" ] || return 0
-  while IFS= read -r line; do
+  # `|| [ -n "$line" ]`: a final line with no trailing newline makes `read` return 1 with the
+  # line still populated — without this the common `printf 'KEY=…' > .env` shape lost its key
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue;; esac
     k="${line%%=*}"
     # bash indirect expansion, NOT eval: these files are data, and an eval here executes shell
@@ -112,18 +114,28 @@ fi
 # so concurrency:1 is byte-identical to the old singleton). Prefer the slot the dispatcher
 # pre-claimed with our pid; otherwise the first free/stale one; none free = at capacity.
 CONC="$(cfg concurrency)"; [[ "$CONC" =~ ^[1-5]$ ]] || CONC=1
+slot_file(){ f="$PDIR/.lock-$AGENT"; [ "$1" -gt 1 ] && f="$f.$1"; printf '%s' "$f"; }
 LOCK=""
-for i in $(seq 1 "$CONC"); do
-  f="$PDIR/.lock-$AGENT"; [ "$i" -gt 1 ] && f="$f.$i"
-  pid="$(cat "$f" 2>/dev/null)"
-  if [ "$pid" = "$$" ]; then LOCK="$f"; break; fi              # dispatcher pre-claimed for us
-  if [ -e "$f" ] && kill -0 "$pid" 2>/dev/null; then continue; fi   # live peer holds this slot
-  [ -z "$LOCK" ] && LOCK="$f"                                  # first free slot (keep scanning for a pre-claim)
+for i in $(seq 1 "$CONC"); do                                   # pass 1: a dispatcher pre-claim?
+  f="$(slot_file "$i")"
+  [ "$(cat "$f" 2>/dev/null)" = "$$" ] && { LOCK="$f"; break; }
 done
+if [ -z "$LOCK" ]; then                                         # pass 2: claim a free/stale slot
+  for i in $(seq 1 "$CONC"); do
+    f="$(slot_file "$i")"
+    pid="$(cat "$f" 2>/dev/null)"
+    if [ -e "$f" ] && kill -0 "$pid" 2>/dev/null; then continue; fi   # live peer holds this slot
+    # ATOMIC claim (bug 7): drop a stale file, then create with noclobber — two direct starts
+    # (`dais start` twice, two terminals) racing for the same slot can't both win; the loser
+    # sees the file appear and moves to the next slot. The old read-then-write let both proceed
+    # and the first to finish deleted the shared lock out from under the survivor.
+    rm -f "$f"
+    if ( set -o noclobber; echo $$ > "$f" ) 2>/dev/null; then LOCK="$f"; break; fi
+  done
+fi
 if [ -z "$LOCK" ]; then
   echo "[$PROJECT/$AGENT] all $CONC slot(s) running — skipping"; exit 0
 fi
-echo $$ > "$LOCK"
 
 # Pin the dispatching task to this run so run->task attribution is EXACT (not reconstructed from
 # run_tasks after a claim). An explicit DAIS_TASK_ID from the caller (`dais start <id>`) wins;
@@ -441,6 +453,7 @@ for idx in "${!ATTEMPTS[@]}"; do
   if [ "$STATUS" = capped ] && [ -n "$nxt" ]; then
     echo "  ${CY}⤳ ${ATTEMPTS[$idx]} hit the usage limit — falling back to $nxt${C0}"
     fell_from="${ATTEMPTS[$idx]}"
+    cp "$LOG" "$LOG.capped-${ATTEMPTS[$idx]}" 2>/dev/null   # keep the capped attempt's trace (bug 8)
     continue
   fi
   break

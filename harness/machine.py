@@ -81,6 +81,7 @@ def lint(m):
     _lint_e4_entry_exits(m, states, errors)
     _lint_e5_duplicate_edges(edges, errors)
     _lint_e6_yolo_strong_guard(edges, errors)
+    _lint_e7_then_needs_system_edge(edges, errors)
     _lint_w1_reachability(states, edges, out, warns)
     _lint_w2_terminal_reach(states, edges, warns)
     _lint_w3_unguarded_outward(states, edges, warns)
@@ -212,6 +213,26 @@ def _lint_e6_yolo_strong_guard(edges, errors):
                           f"consciously or untag the edge")
 
 
+def _lint_e7_then_needs_system_edge(edges, errors):
+    """E7: a `then: encompassed:<from>-><to>` effect fires that edge as 'system' on each child;
+    without a system-owned <from>-><to> edge the nested fire fails the actor check and the
+    whole outer fire (a release's `shipped`) rolls back at the worst moment."""
+    for e in edges:
+        spec = (e.get("effect") or {}).get("then")
+        if not spec:
+            continue
+        scope, _, transition = str(spec).partition(":")
+        frm, _, to = transition.partition("->")
+        if scope != "encompassed" or not (frm and to):
+            errors.append(f"E7 {e.get('from')}--{e.get('verb')}-->{e.get('to')}: malformed then "
+                          f"effect {spec!r} (want encompassed:<from>-><to>)")
+            continue
+        if not any(x.get("from") == frm and x.get("to") == to and x.get("by") == "system" for x in edges):
+            errors.append(f"E7 {e.get('from')}--{e.get('verb')}-->{e.get('to')}: then effect "
+                          f"{frm}->{to} needs a system-owned edge {frm}--…-->{to} (the nested fire "
+                          f"runs as 'system'; without it the whole fire rolls back)")
+
+
 def _lint_w4_yolo_outward(edges, warns):
     """W4: a yolo-tagged edge with an outward script effect publishes/deploys with no human in
     the loop while yolo is on. Legitimate (that is the point of the mode) but must be conscious."""
@@ -303,7 +324,11 @@ def _find_edge(m, state, verb):
     return None
 
 
-_PRIORITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+# THE priority vocabulary, rank order first. Every other reader derives from this (board's SQL
+# CASE, the panel's sort, the action engine's cycle) — bug 10: four hardcoded copies.
+PRIORITY_ORDER = ("critical", "high", "medium", "low")
+PRIORITY_RANK = {p: i for i, p in enumerate(PRIORITY_ORDER)}
+_PRIORITY_RANK = PRIORITY_RANK
 
 
 def _dep_open(conn, tid):
@@ -898,14 +923,21 @@ def _effect_then(conn, m, task, spec, ctx):
         return
     kids = conn.execute("SELECT child_id FROM task_links WHERE parent_id=? AND rel='encompasses'",
                         (task["id"],)).fetchall()
-    child_edge = next((e for e in m["edges"]
-                       if e["from"] == from_state and e["to"] == to_state), None)
+    child_edge = _then_edge(m, from_state, to_state)
     for (cid,) in kids:
         c = task_row(conn, cid)
         if c and c["status"] == from_state and child_edge:
             # nested: joins the outer fire's transaction — the release and every
             # child close together, or the whole fire rolls back.
             fire(conn, m, cid, child_edge["verb"], "system", ctx, _nested=True)
+
+
+def _then_edge(m, from_state, to_state):
+    """The edge a `then: encompassed:<from>-><to>` fires on each child — the nested fire runs as
+    'system', so prefer the system-owned edge (bug 9: the first from/to match was taken, and a
+    founder edge listed first failed the actor check and rolled the whole release back)."""
+    cands = [e for e in m.get("edges", []) if e.get("from") == from_state and e.get("to") == to_state]
+    return next((e for e in cands if e.get("by") == "system"), cands[0] if cands else None)
 
 
 def _system_edge_sweep(conn, m, project, match):
