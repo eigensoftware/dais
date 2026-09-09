@@ -1,0 +1,3 @@
+you'?ve (hit|reached) your (usage|session|5-?hour|weekly) limit
+rate limit reached
+you'?ve hit your usage limit

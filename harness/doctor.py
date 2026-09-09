@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import router  # noqa: E402
 
-KEYVAR = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+KEYVAR = {n: m.get("key_var", "") for n, m in router.provider_packs().items()}   # from the packs (5.1)
 
 
 def _env_files_have(home, var):
@@ -104,7 +104,7 @@ def run(home, root):
     for prov in sorted(providers):
         cli = router.PROVIDER_CLI.get(prov)
         if not cli:
-            warn("provider %r has no adapter (known: %s)" % (prov, ", ".join(router.PROVIDER_CLI)))
+            warn("provider %r has no pack under harness/providers/ (packs: %s)" % (prov, ", ".join(router.provider_packs()) or "none"))
             continue
         if shutil.which(cli):
             ok("%s on PATH (roles on provider %s)" % (cli, prov))

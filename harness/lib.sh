@@ -229,10 +229,16 @@ fi
 # under auth:api — a 429/credits error)? $2 = provider (default anthropic). Match only
 # genuine limit MESSAGES, not an agent merely discussing rate limits in its reasoning.
 is_capped(){
-  local pats="you'?ve (hit|reached) your (usage|session|5-?hour|weekly) limit"
-  case "${2:-anthropic}" in
-    openai) pats="$pats|rate limit reached|you'?ve hit your usage limit" ;;
-  esac
+  # provider-specific patterns come from the pack (harness/providers/<p>/caps.txt, one grep -E
+  # pattern per line; plan 5.1); the metered-API shapes below apply to every provider
+  local pats="" f="$DAIS_ROOT/harness/providers/${2:-anthropic}/caps.txt" line
+  if [ -f "$f" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in ''|\#*) continue;; esac
+      pats="${pats:+$pats|}$line"
+    done < "$f"
+  fi
+  [ -n "$pats" ] || pats="you'?ve (hit|reached) your (usage|session|5-?hour|weekly) limit"
   # "out of usage credits" is the Claude CLI's metered-model exhaustion (e.g. Fable 5 on the
   # subscription: "You're out of usage credits. Run /usage-credits ... or /model to switch");
   # phrased nothing like the subscription-window limit above, so match it explicitly — without

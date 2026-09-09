@@ -70,25 +70,30 @@ if [ "${DAIS_SHOW_CONFIG:-0}" = 1 ]; then
   echo "model=$MODEL effort=$EFF provider=$PROVIDER auth=$AUTH access=$ACCESS playbook=$PB trigger=$TRIG prec=$PREC context=$CTX"; exit 0
 fi
 
-# Provider CLI preflight — the role's adapter needs its CLI on PATH. Fail here, named, BEFORE
-# the git fetch and before a run row exists: a missing `codex` used to surface as exit 127
-# deep in the pipeline, recorded as a failed run that then fed the error-backoff gate. The
-# DAIS_NOOP_RUN test seam stands in for the CLI, so it is exempt.
-if [ -z "${DAIS_NOOP_RUN:-}" ]; then
-  case "$PROVIDER" in
-    anthropic) need claude "install Claude Code (https://claude.com/claude-code) — role '$AGENT' runs on provider anthropic";;
-    openai)    need codex  "install OpenAI's codex CLI (npm i -g @openai/codex) and 'codex login' — role '$AGENT' runs on provider openai";;
-  esac
+# The provider PACK (plan 5.1): harness/providers/<provider>/ — run.sh defines provider_run
+# (the adapter), pack.json names the CLI and the API key variable, caps.txt the usage-limit
+# patterns, stream.py the event mapping. A missing pack is a config error: say so, name the
+# packs that exist, and record nothing.
+PACK="$DAIS_ROOT/harness/providers/$PROVIDER"
+if [ ! -f "$PACK/run.sh" ]; then
+  echo "[$PROJECT/$AGENT] no provider pack '$PROVIDER' under harness/providers/ (packs: $(ls "$DAIS_ROOT/harness/providers" 2>/dev/null | tr '\n' ' '))"
+  exit 1
+fi
+PACK_META="$(python3 "$SELF/router.py" --pack-meta "$PROVIDER" 2>/dev/null)"
+PACK_CLI="$(printf '%s\n' "$PACK_META" | sed -n 's/^cli=//p')"
+KEYVAR="$(printf '%s\n' "$PACK_META" | sed -n 's/^key_var=//p')"
+
+# Provider CLI preflight — the pack's CLI must be on PATH. Fail here, named, BEFORE the git
+# fetch and before a run row exists: a missing `codex` used to surface as exit 127 deep in the
+# pipeline, recorded as a failed run that then fed the error-backoff gate. The DAIS_NOOP_RUN
+# test seam stands in for the CLI, so it is exempt.
+if [ -z "${DAIS_NOOP_RUN:-}" ] && [ -n "$PACK_CLI" ]; then
+  need "$PACK_CLI" "install it and log in — role '$AGENT' runs on provider $PROVIDER (see $PACK/pack.json)"
 fi
 
 # auth:api preflight — fail fast, before any network/claude work (git fetch is right below),
 # if the provider's key isn't set anywhere (process env / ~/.dais/env / $DAIS_HOME/.env).
 if [ "$AUTH" = "api" ]; then
-  case "$PROVIDER" in
-    anthropic) KEYVAR="ANTHROPIC_API_KEY";;
-    openai)    KEYVAR="OPENAI_API_KEY";;
-    *)         KEYVAR="";;
-  esac
   if [ -n "$KEYVAR" ] && [ -z "${!KEYVAR:-}" ]; then
     echo "[$PROJECT/$AGENT] auth: api but \$$KEYVAR is not set — put it in your environment," \
          "~/.dais/env, or $DAIS_HOME/.env"; exit 1
@@ -398,64 +403,20 @@ esac
 
 cd "$WORKDIR" || { echo "cd failed"; exit 1; }
 
-# fmt-stream writes the PLAIN log file (always) and colors the terminal on its stdout.
-# In QUIET mode (parallel runs) we send that terminal stream to /dev/null so N agents don't
-# garble the console — the full log file is still written. pipefail keeps claude's exit code.
-run_agent_anthropic(){
-  local resume_flag=()
-  if [ -n "$RESUME_ID" ]; then
-    resume_flag=(--resume "$RESUME_ID")
-    echo "  ↻ resuming session $RESUME_ID on $TASK_ID (same role, same task, <6h)" | tee -a "$LOG"
-  fi
-  claude -p "${RESUME_PROMPT:-$STANDING}" \
-        ${resume_flag[@]+"${resume_flag[@]}"} \
-        --append-system-prompt "$PERSONA" \
-        --model "$MODEL" \
-        ${EFFORT_FLAG[@]+"${EFFORT_FLAG[@]}"} \
-        "${PERM[@]}" \
-        ${PROFILE[@]+"${PROFILE[@]}"} \
-        ${CAP_FLAGS[@]+"${CAP_FLAGS[@]}"} \
-        --add-dir "$WORKDIR" \
-        --output-format stream-json --verbose 2>&1 \
-        | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG"
-}
-
-# codex wraps runs in its own filesystem sandbox, and workspace-write blocks .git/ writes —
-# which breaks an edit role's core job (commit/branch/PR). So edit roles run with the sandbox
-# BYPASSED (founder decision 2026-07-04): trust parity with anthropic's bypassPermissions,
-# where the protection is the machine's guards + the founder gates, not a sandbox. Non-edit
-# roles keep the write sandbox (repo + DAIS_HOME so `dais fire` still works) — codex has no
-# per-tool disallows like claude's --disallowedTools, so the sandbox is their structural guard.
-run_agent_openai(){
-  local sandbox_flags
-  if [ "$ACCESS" = "edit" ]; then
-    sandbox_flags=(--dangerously-bypass-approvals-and-sandbox)
-  else
-    sandbox_flags=(--sandbox workspace-write
-                   -c 'sandbox_workspace_write.writable_roots=["'"$DAIS_HOME"'"]')
-  fi
-  # --ephemeral: a headless run is not a session to resume — don't pile one into ~/.codex per tick.
-  # </dev/null: codex "reads additional input from stdin" until EOF — under an interactive
-  # `dais watch` that is the founder's terminal, so a run would sit waiting on a keypress.
-  codex exec --json --ephemeral --skip-git-repo-check --cd "$WORKDIR" \
-        ${MODEL:+-m "$MODEL"} \
-        ${EFF:+-c model_reasoning_effort="$EFF"} \
-        "${sandbox_flags[@]}" \
-        "$STANDING
-
-$PERSONA" </dev/null 2>&1 \
-        | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG" --provider openai
-}
+# The adapter is the pack's provider_run (harness/providers/<provider>/run.sh), sourced here so it
+# sees this run's variables (MODEL EFF EFFORT_FLAG PERM PROFILE CAP_FLAGS RESUME_ID RESUME_PROMPT
+# STANDING PERSONA WORKDIR LOG ACCESS TASK_ID). fmt-stream writes the PLAIN log file (always) and
+# colors the terminal on its stdout. In QUIET mode (parallel runs) that terminal stream goes to
+# /dev/null so N agents don't garble the console — the full log file is still written. pipefail
+# keeps the CLI's exit code.
+# shellcheck disable=SC1090
+. "$PACK/run.sh"
 
 run_agent_unguarded(){
   # Debug seam: run a shell command in WORKDIR instead of the model (tests exercise the worktree
   # lifecycle end-to-end without an LLM call). Same convention as DAIS_SHOW_PROMPT/DAIS_SHOW_CONFIG.
   if [ -n "${DAIS_NOOP_RUN:-}" ]; then ( cd "$WORKDIR" && eval "$DAIS_NOOP_RUN" ) >>"$LOG" 2>&1; return $?; fi
-  case "$PROVIDER" in
-    anthropic) run_agent_anthropic;;
-    openai)    run_agent_openai;;
-    *) echo "  ✗ no adapter for provider '$PROVIDER' (known: anthropic, openai)" | tee -a "$LOG"; return 1;;
-  esac
+  provider_run
 }
 
 # run_agent — the adapter under the max_minutes watchdog. The agent pipeline runs in the

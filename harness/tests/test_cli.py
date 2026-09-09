@@ -1431,7 +1431,62 @@ class TestPerRoleModelOverride(CliTest):
         out = self._show_config("qa")
         self.assertIn("provider=gemini", out)      # resolution passes it through
         r = self._run_agent("qa")                  # the run itself fails, named
-        self.assertIn("no adapter for provider 'gemini'", r.stdout + r.stderr)
+        self.assertIn("no provider pack 'gemini'", r.stdout + r.stderr)
+        self.assertIn("anthropic", r.stdout + r.stderr)   # the packs it does have
+
+    # --- provider packs (plan 5.1): a third provider is a directory, not a code change ---------
+    def _fake_pack(self, name="fakeprov"):
+        d = os.path.join(self.root, "harness", "providers", name)
+        os.makedirs(d)
+        with open(os.path.join(d, "pack.json"), "w") as f:
+            f.write(json.dumps({"cli": "fakecli", "key_var": "FAKE_API_KEY", "default_model": "fake-1"}))
+        with open(os.path.join(d, "caps.txt"), "w") as f:
+            f.write("fake quota exhausted\n")
+        with open(os.path.join(d, "run.sh"), "w") as f:
+            f.write('provider_run(){\n  fakecli "$MODEL" "$WORKDIR" "$STANDING" 2>&1 | python3 -u "$DAIS_ROOT/harness/fmt-stream.py" "$LOG" --provider fakeprov\n}\n')
+        with open(os.path.join(d, "stream.py"), "w") as f:
+            f.write("def handle(e, emit, acc):\n"
+                    "    if e.get('type') == 'say': emit('  💬 ' + e.get('text', ''), 'cyan')\n"
+                    "    elif e.get('type') == 'done': acc(input_tokens=e.get('tokens', 0), output_tokens=1, turns=1); emit('  ✓ done', 'green')\n")
+        b = tempfile.mkdtemp(prefix="dais-bin-"); self.addCleanup(shutil.rmtree, b, ignore_errors=True)
+        import sys as _sys
+        os.symlink(_sys.executable, os.path.join(b, "python3"))
+        for t in ("sqlite3", "git"):
+            os.symlink(shutil.which(t), os.path.join(b, t))
+        with open(os.path.join(b, "fakecli"), "w") as f:
+            f.write('#!/bin/bash\necho "{\\"type\\":\\"say\\",\\"text\\":\\"hello from $1 in $2\\"}"\necho "{\\"type\\":\\"done\\",\\"tokens\\":777}"\n')
+        os.chmod(os.path.join(b, "fakecli"), 0o755)
+        return "%s:/usr/bin:/bin" % b
+
+    def test_a_dropped_in_pack_runs_end_to_end(self):
+        path = self._fake_pack()
+        self._set_role("qa", "provider: fakeprov\n")
+        out = self._show_config("qa")
+        self.assertIn("model=fake-1", out)                # the pack's default model
+        r = self._run_agent("qa", env={"PATH": path})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        row = q(self.root, "SELECT status, provider, model, input_tokens FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row), ("succeeded", "fakeprov", "fake-1", 777))
+        log = open(q(self.root, "SELECT log_path FROM runs ORDER BY id DESC LIMIT 1")[0]).read()
+        self.assertIn("hello from fake-1", log)
+
+    def test_pack_caps_patterns_score_a_capped_run(self):
+        path = self._fake_pack()
+        # a fakecli that reports its quota message
+        b = path.split(":")[0]
+        with open(os.path.join(b, "fakecli"), "w") as f:
+            f.write('#!/bin/bash\necho "{\\"type\\":\\"say\\",\\"text\\":\\"fake quota exhausted, try later\\"}"\n')
+        self._set_role("qa", "provider: fakeprov\n")
+        r = self._run_agent("qa", env={"PATH": path})
+        self.assertEqual(q(self.root, "SELECT status FROM runs ORDER BY id DESC LIMIT 1")[0], "capped")
+
+    def test_pack_without_its_cli_fails_at_preflight(self):
+        self._fake_pack()
+        self._set_role("qa", "provider: fakeprov\n")
+        r = self._run_agent("qa", env={"PATH": self._tmpbin()})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("fakecli", r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT COUNT(*) FROM runs")[0], 0)
 
     # --- provider CLI preflight + the codex adapter, exercised with a controlled PATH ---------
     # A bin dir holding ONLY what run-agent needs (the real python3, sqlite3, git) plus an

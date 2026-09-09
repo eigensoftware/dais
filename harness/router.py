@@ -12,8 +12,41 @@
 import sys, os, sqlite3, re, shutil
 
 VALID_ACCESS = {"edit", "review", "draft", "none"}
-# provider -> the CLI its adapter execs (run-agent.sh run_agent_<provider>); lint checks PATH
-PROVIDER_CLI = {"anthropic": "claude", "openai": "codex"}
+
+
+# --- provider packs (plan 5.1): harness/providers/<name>/{pack.json, run.sh, stream.py, caps.txt}.
+# A third provider is a directory, not a code change. pack.json: cli (the executable the
+# adapter execs; preflight + lint + doctor check PATH), key_var (auth: api), default_model
+# (or default_model_from: "codex-config"), supports (informational). ---
+PACKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "providers")
+
+
+def pack_dir(name):
+    return os.path.join(PACKS_DIR, name)
+
+
+def provider_packs():
+    """{name: pack.json dict} for every pack directory that carries a run.sh."""
+    import json
+    out = {}
+    if not os.path.isdir(PACKS_DIR):
+        return out
+    for n in sorted(os.listdir(PACKS_DIR)):
+        d = os.path.join(PACKS_DIR, n)
+        if not os.path.isfile(os.path.join(d, "run.sh")):
+            continue
+        meta = {}
+        try:
+            with open(os.path.join(d, "pack.json")) as fh:
+                meta = json.load(fh) or {}
+        except (OSError, ValueError):
+            meta = {}
+        out[n] = meta
+    return out
+
+
+# provider -> the CLI its pack execs; derived from the packs so lint/doctor/preflight agree
+PROVIDER_CLI = {n: m.get("cli", "") for n, m in provider_packs().items() if m.get("cli")}
 
 
 def parse_roles(path):
@@ -176,8 +209,10 @@ def agent_setup(root, project, role):
     # provider — they must not leak onto a role resolved to a different provider (e.g. a
     # per-role `provider: openai` override), or that CLI gets handed an anthropic model id.
     project_provider = _yaml_line(ytext, "provider") or "anthropic"
-    provider_default_model = "claude-opus-4-8" if provider == "anthropic" else (
-        codex_default_model() if provider == "openai" else "")
+    pack = provider_packs().get(provider, {})
+    provider_default_model = pack.get("default_model") or ""
+    if not provider_default_model and pack.get("default_model_from") == "codex-config":
+        provider_default_model = codex_default_model()
     model = fm.get("model") or (
         (_yaml_line(ytext, "model_" + role) or _yaml_line(ytext, "model")
          or provider_default_model) if provider == project_provider
@@ -656,6 +691,9 @@ def lint_project(root, project):
             warnings.append("role '%s': max_turns / max_budget_usd are claude flags — codex exec has no "
                             "equivalent, so this openai role is NOT capped by them; only max_minutes "
                             "(the harness watchdog) binds a codex run" % r["name"])
+        if s["provider"] not in provider_packs() and s["trigger"] != "none":
+            warnings.append("role '%s': provider '%s' has no pack under harness/providers/ (packs: %s) — "
+                            "its runs fail at preflight" % (r["name"], s["provider"], ", ".join(provider_packs()) or "none"))
         cli = PROVIDER_CLI.get(s["provider"])
         if cli and s["trigger"] != "none" and not shutil.which(cli):
             warnings.append("role '%s': provider %s needs `%s`, which is not on PATH — every "
@@ -743,6 +781,10 @@ if __name__ == "__main__":
         for k in AGENT_CONFIG_KEYS:
             print("%s=%s" % (k, s[k]))
         sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--pack-meta":
+        # run-agent's seam: `cli=…` and `key_var=…` for a provider pack ('' lines when unknown)
+        m = provider_packs().get(sys.argv[2], {})
+        print("cli=%s" % m.get("cli", "")); print("key_var=%s" % m.get("key_var", "")); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--daily-budget":
         # dispatch.sh's seam: "spent|limit|unit|over" for the workspace (or one project);
         # nothing printed = no budget applies

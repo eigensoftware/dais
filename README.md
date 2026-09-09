@@ -303,9 +303,15 @@ whose agents run a shared test stack (a scratch DB) will collide; isolate that f
 **Let Claude design a role:** `dais role new <project> --desc "what it does"` proposes a
 persona + config from your project's existing roles; you confirm.
 
-## Providers: anthropic + openai
+## Providers: anthropic + openai (and packs)
 
-Each agent runs against one of two provider CLIs, chosen per-role:
+Each agent runs against a **provider pack**, chosen per-role. A pack is a directory under
+`harness/providers/<name>/`: `run.sh` defines `provider_run` (the adapter: exec the CLI, pipe its
+JSONL through `fmt-stream.py --provider <name>`), `stream.py` maps the CLI's events onto the
+shared log markers and the ledger, `caps.txt` lists the usage-limit patterns, and `pack.json`
+names the CLI, the API key variable, and the default model. The preflight, lint, doctor, the
+cap detector, and the formatter all discover packs from the directory, so a third provider is
+a folder, not a code change. Two ship:
 
 ```
 ---

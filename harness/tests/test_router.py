@@ -843,3 +843,26 @@ class TestDispatchNext(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProviderPacks(unittest.TestCase):
+    """Provider packs (plan 5.1): harness/providers/<name>/{pack.json, run.sh, stream.py, caps.txt}.
+    Everything provider-specific is discovered from the directory — no names in code."""
+
+    def test_stock_packs_are_discovered_with_their_meta(self):
+        packs = router.provider_packs()
+        self.assertEqual(sorted(packs), ["anthropic", "openai"])
+        self.assertEqual(packs["anthropic"]["cli"], "claude")
+        self.assertEqual(packs["openai"]["cli"], "codex")
+        self.assertEqual(packs["anthropic"]["key_var"], "ANTHROPIC_API_KEY")
+        self.assertEqual(packs["openai"]["key_var"], "OPENAI_API_KEY")
+        for name in packs:
+            d = router.pack_dir(name)
+            for f in ("pack.json", "run.sh", "stream.py", "caps.txt"):
+                self.assertTrue(os.path.exists(os.path.join(d, f)), (name, f))
+
+    def test_provider_cli_map_derives_from_the_packs(self):
+        self.assertEqual(router.PROVIDER_CLI, {n: p["cli"] for n, p in router.provider_packs().items()})
+
+    def test_default_model_comes_from_the_pack(self):
+        self.assertEqual(router.provider_packs()["anthropic"].get("default_model"), "claude-opus-4-8")
