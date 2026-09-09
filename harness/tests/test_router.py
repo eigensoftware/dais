@@ -867,3 +867,187 @@ class TestProviderPacks(unittest.TestCase):
 
     def test_default_model_comes_from_the_pack(self):
         self.assertEqual(router.provider_packs()["anthropic"].get("default_model"), "claude-opus-4-8")
+
+
+class TestAccounts(unittest.TestCase):
+    """Accounts (plan 5.4, spec docs/superpowers/specs/2026-09-09-accounts-design.md): an account is
+    {provider, kind, credential}; roles reference accounts or pools; cap state lives on the account.
+    The file is user-level (~/.dais/accounts.yaml; DAIS_ACCOUNTS_FILE in tests), the markers beside it
+    (~/.dais/accounts/<name>.cooldown; DAIS_ACCOUNTS_DIR in tests)."""
+
+    YAML = ("# founder's accounts\n"
+            "accounts:\n"
+            "  max-a: {provider: anthropic, kind: subscription, config_dir: ~/.dais/accounts/max-a}\n"
+            "  max-b:\n"
+            "    provider: anthropic\n"
+            "    kind: subscription\n"
+            "    config_dir: /tmp/max-b   # block form\n"
+            "    window: 3h\n"
+            "  api-1: {provider: anthropic, kind: api, key_env: ANTHROPIC_API_KEY_1}\n"
+            "  chatgpt: {provider: openai, kind: subscription, config_dir: /tmp/chatgpt}\n"
+            "pools:\n"
+            "  max: {members: [max-a, max-b], policy: least-recently-capped}\n"
+            "  rr:\n"
+            "    members:\n"
+            "      - max-a\n"
+            "      - max-b\n"
+            "    policy: round-robin\n"
+            "  ff: {members: [max-b, max-a], policy: first-free}\n")
+
+    def setUp(self):
+        import accounts
+        self.A = accounts
+        self.root = tempfile.mkdtemp(prefix="dais-acct-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.yfile = os.path.join(self.root, "accounts.yaml")
+        with open(self.yfile, "w") as f:
+            f.write(self.YAML)
+        self.mdir = os.path.join(self.root, "markers")
+        self._env = {k: os.environ.get(k) for k in ("DAIS_ACCOUNTS_FILE", "DAIS_ACCOUNTS_DIR")}
+        os.environ["DAIS_ACCOUNTS_FILE"] = self.yfile
+        os.environ["DAIS_ACCOUNTS_DIR"] = self.mdir
+        # a workspace with one project and a machine (for agent_setup)
+        self.pdir = os.path.join(self.root, "projects", "demo")
+        os.makedirs(os.path.join(self.pdir, "agents"))
+        with open(os.path.join(self.pdir, "project.yaml"), "w") as f:
+            f.write("project: demo\nrepo: demo\nmodel: claude-opus-4-8\n")
+        with open(os.path.join(self.pdir, "machine.json"), "w") as f:
+            f.write('{"name":"t","entry":"ready","roles":{"engineer":{"access":"edit"},"qa":{"access":"review"}},'
+                    '"states":{"ready":{"initial":true},"done":{"terminal":true}},'
+                    '"edges":[{"from":"ready","to":"done","by":"engineer","verb":"finish"}]}')
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _agent(self, role, fm=""):
+        with open(os.path.join(self.pdir, "agents", role + ".md"), "w") as f:
+            f.write((("---\n%s---\n" % fm) if fm else "") + "You are %s.\n" % role)
+
+    # --- the file ---
+    def test_file_parses_inline_and_block_forms_and_pools(self):
+        reg = self.A.load()
+        self.assertEqual(reg["accounts"]["max-a"]["provider"], "anthropic")
+        self.assertEqual(reg["accounts"]["max-a"]["config_dir"], os.path.expanduser("~/.dais/accounts/max-a"))
+        self.assertEqual(reg["accounts"]["max-b"]["config_dir"], "/tmp/max-b")
+        self.assertEqual(reg["accounts"]["max-b"]["window"], "3h")
+        self.assertEqual(reg["accounts"]["api-1"]["kind"], "api")
+        self.assertEqual(reg["accounts"]["api-1"]["key_env"], "ANTHROPIC_API_KEY_1")
+        self.assertEqual(reg["pools"]["max"], {"members": ["max-a", "max-b"], "policy": "least-recently-capped"})
+        self.assertEqual(reg["pools"]["rr"]["members"], ["max-a", "max-b"])
+        self.assertEqual(reg["pools"]["rr"]["policy"], "round-robin")
+
+    def test_implicit_accounts_exist_for_every_pack_even_without_a_file(self):
+        os.environ["DAIS_ACCOUNTS_FILE"] = os.path.join(self.root, "nope.yaml")
+        reg = self.A.load()
+        for p in router.provider_packs():
+            self.assertEqual(reg["accounts"][p], {"provider": p, "kind": "subscription", "config_dir": "", "key_env": "", "window": ""})
+        self.assertEqual(reg["pools"], {})
+
+    def test_resolve_names_an_account_or_a_pools_members(self):
+        self.assertEqual(self.A.resolve("max-b")["provider"], "anthropic")
+        self.assertEqual([a["name"] for a in self.A.members("pool:max")], ["max-a", "max-b"])
+        self.assertEqual([a["name"] for a in self.A.members("api-1")], ["api-1"])
+        self.assertEqual(self.A.members("pool:nope"), [])
+        self.assertIsNone(self.A.resolve("nope"))
+
+    # --- cap markers ---
+    def test_markers_mark_clear_and_expire_by_the_accounts_window(self):
+        now = 1_800_000_000
+        self.A.mark_capped("max-a", "claude-fable-5", now=now)
+        self.A.mark_capped("max-b", "claude-fable-5", now=now)
+        self.assertEqual(self.A.capped_since("max-a", now=now + 100), now)
+        self.assertEqual(self.A.capped_model("max-a"), "claude-fable-5")
+        self.assertEqual(self.A.capped_since("max-b", now=now + 3 * 3600 + 1), None)   # window: 3h
+        self.assertEqual(self.A.capped_since("max-a", now=now + 3 * 3600 + 1), now)    # default ~5h
+        self.assertEqual(self.A.capped_since("max-a", now=now + 5 * 3600 + 1), None)
+        self.A.clear_capped("max-a")
+        self.assertIsNone(self.A.capped_since("max-a", now=now + 1))
+        self.assertIsNone(self.A.capped_since("never", now=now))
+
+    # --- selection ---
+    def test_least_recently_capped_prefers_free_then_oldest_cap(self):
+        now = 1_800_000_000
+        self.assertEqual(self.A.order("pool:max", now=now), ["max-a", "max-b"])          # nothing capped: declared order
+        self.A.mark_capped("max-a", "m", now=now - 10)
+        self.assertEqual(self.A.order("pool:max", now=now), ["max-b", "max-a"])         # free first; a capped member is a later probe
+        self.A.mark_capped("max-b", "m", now=now - 5)
+        self.assertEqual(self.A.order("pool:max", now=now), ["max-a", "max-b"])         # all capped: oldest cap first
+        self.assertEqual(self.A.order("pool:max", now=now + 3 * 3600 + 1), ["max-b", "max-a"])   # max-b's 3h window ended
+
+    def test_round_robin_alternates_by_runs_today_and_first_free_keeps_order(self):
+        now = 1_800_000_000
+        self.assertEqual(self.A.order("pool:rr", now=now, runs_today={"max-a": 3, "max-b": 1}), ["max-b", "max-a"])
+        self.assertEqual(self.A.order("pool:rr", now=now, runs_today={"max-a": 1, "max-b": 1}), ["max-a", "max-b"])
+        self.assertEqual(self.A.order("pool:ff", now=now, runs_today={"max-a": 0, "max-b": 9}), ["max-b", "max-a"])
+        self.A.mark_capped("max-b", "m", now=now)
+        self.assertEqual(self.A.order("pool:ff", now=now), ["max-a", "max-b"])
+        self.assertEqual(self.A.order("max-b", now=now), ["max-b"])                     # a single account is always tried
+
+    # --- resolution through agent_setup ---
+    def test_role_on_an_account_derives_provider_and_auth(self):
+        self._agent("qa", "account: chatgpt\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["account"], s["provider"], s["auth"]), ("chatgpt", "openai", "subscription"))
+        self._agent("qa", "account: api-1\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["account"], s["provider"], s["auth"]), ("api-1", "anthropic", "api"))
+        self.assertEqual(s["model"], "claude-opus-4-8")            # project.yaml's model still applies (same provider)
+
+    def test_role_without_an_account_gets_the_providers_implicit_account(self):
+        self._agent("qa", "provider: openai\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["account"], s["fallback_account"]), ("openai", "openai"))
+        self._agent("qa", "fallback_model: claude-sonnet-5\nfallback_provider: openai\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["account"], s["fallback_account"]), ("anthropic", "openai"))
+
+    def test_fallback_account_subsumes_fallback_provider(self):
+        self._agent("qa", "account: pool:max\nfallback_account: chatgpt\nfallback_model: gpt-5.4\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["account"], s["fallback_account"], s["fallback_provider"]), ("pool:max", "chatgpt", "openai"))
+        self.assertEqual(s["fallback_model"], "gpt-5.4")
+
+    def test_project_yaml_account_keys_apply_like_model_keys(self):
+        with open(os.path.join(self.pdir, "project.yaml"), "a") as f:
+            f.write("account: max-a\naccount_qa: chatgpt\n")
+        self._agent("qa"); self._agent("engineer")
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["account"], "chatgpt")
+        self.assertEqual(router.agent_setup(self.root, "demo", "engineer")["account"], "max-a")
+
+    def test_attempt_plan_orders_same_provider_members_then_the_fallback_tier(self):
+        """--account-attempts <root> <p> <role>: one line per attempt tier member, primary first:
+        tier|account|provider|kind|config_dir|key_env"""
+        import subprocess
+        self._agent("qa", "account: pool:max\nfallback_account: chatgpt\nfallback_model: gpt-5.4\n")
+        self.A.mark_capped("max-a", "m", now=int(__import__("time").time()))
+        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(router.__file__), "router.py"),
+                              "--account-attempts", self.root, "demo", "qa"],
+                             capture_output=True, text=True, env=dict(os.environ)).stdout.splitlines()
+        self.assertEqual(out, ["primary|max-b|anthropic|subscription|/tmp/max-b|",              # free first
+                               "primary|max-a|anthropic|subscription|%s|" % os.path.expanduser("~/.dais/accounts/max-a"),  # the capped member, as a probe
+                               "fallback|chatgpt|openai|subscription|/tmp/chatgpt|"])           # then the fallback tier
+
+    # --- lint ---
+    def test_lint_rejects_unknown_accounts_provider_mismatch_and_bad_pools(self):
+        import io, contextlib
+        with open(self.yfile, "a") as f:
+            f.write("  broken: {members: [max-a, ghost]}\n")
+        self._agent("qa", "account: ghost\n")
+        self._agent("engineer", "account: chatgpt\nprovider: anthropic\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = router.lint(self.root, "demo")
+        text = buf.getvalue()
+        self.assertEqual(rc, 1)
+        self.assertIn("role 'qa': account 'ghost' is not in", text)
+        self.assertIn("role 'engineer': account 'chatgpt' is on provider openai but the role says provider: anthropic", text)
+        self.assertIn("pool 'broken' names an unknown account 'ghost'", text)
+
+    def test_implicit_account_keeps_auth_api_as_written(self):
+        self._agent("qa", "auth: api\n")
+        s = router.agent_setup(self.root, "demo", "qa")
+        self.assertEqual((s["account"], s["auth"]), ("anthropic", "api"))

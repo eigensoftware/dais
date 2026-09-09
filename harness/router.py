@@ -100,7 +100,8 @@ AGENT_CONFIG_KEYS = ("model", "fallback_model", "effort", "provider", "auth", "a
                      "trigger", "prec", "playbook", "playbook_file", "concurrency",
                      "context", "mcp", "plugins", "max_turns", "max_budget_usd", "max_minutes",
                      "resume", "model_by_priority", "effort_by_priority",
-                     "model_provider", "base_url", "env_key", "local", "fallback_provider")
+                     "model_provider", "base_url", "env_key", "local", "fallback_provider",
+                     "account", "fallback_account")
 
 
 def _cap(v, integer=False):
@@ -189,6 +190,21 @@ def _yaml_line(text, key):
     return m.group(1).split(" #", 1)[0].strip() if m else ""
 
 
+def runs_today_by_account(root):
+    """{account: runs started today} from runs.account (migration 0015) — the round-robin tie-break.
+    A db without the column (or no db) -> {}."""
+    db = os.path.join(root, "dais.db")
+    if not os.path.exists(db):
+        return {}
+    try:
+        conn = sqlite3.connect(db, timeout=10)
+        rows = conn.execute("SELECT COALESCE(account, provider, 'anthropic'), COUNT(*) FROM runs "
+                            "WHERE started_at >= date('now') GROUP BY 1").fetchall()
+        return {r[0]: r[1] for r in rows}
+    except sqlite3.Error:
+        return {}
+
+
 def agent_setup(root, project, role):
     """THE resolution authority for how one role runs (spec 2026-07-04): frontmatter ->
     legacy roles file -> project.yaml (suffix key, then project-wide) -> defaults.
@@ -205,7 +221,17 @@ def agent_setup(root, project, role):
         with open(projyaml) as fh:
             ytext = fh.read()
 
-    provider = fm.get("provider") or _yaml_line(ytext, "provider") or "anthropic"
+    # 5.4: an ACCOUNT (accounts.py) names the credential; it decides the provider and the auth
+    # kind. frontmatter account: -> project.yaml account_<role> / account -> the provider's
+    # implicit account (so provider:/auth: keep working as the shortcut they always were).
+    import accounts as AC
+    reg = AC.load()
+    account = (fm.get("account") or _yaml_line(ytext, "account_" + role) or _yaml_line(ytext, "account") or "").strip()
+    acct = (AC.members(account, reg) or [None])[0] if account else None    # None = implicit
+    provider = ((acct["provider"] if acct else "") or fm.get("provider") or _yaml_line(ytext, "provider")
+                or "anthropic")
+    if not account:
+        account = provider                      # the implicit account (kept out of `acct` on purpose)
     # project.yaml's model_<role>/model keys are written against the project's DEFAULT
     # provider — they must not leak onto a role resolved to a different provider (e.g. a
     # per-role `provider: openai` override), or that CLI gets handed an anthropic model id.
@@ -228,7 +254,9 @@ def agent_setup(root, project, role):
         if provider == project_provider else "")
     effort = (fm.get("effort") or _yaml_line(ytext, "effort_" + role)
               or _yaml_line(ytext, "effort"))
-    auth = fm.get("auth") or _yaml_line(ytext, "auth") or "subscription"
+    # an explicit account decides auth by its kind; the implicit account keeps auth: as written
+    auth = (("api" if acct["kind"] == "api" else "subscription") if acct
+            else (fm.get("auth") or _yaml_line(ytext, "auth") or "subscription"))
 
     access = ""
     try:
@@ -281,8 +309,18 @@ def agent_setup(root, project, role):
     # fallback may live on ANOTHER provider (fallback_provider; default = the role's own).
     ext = {k: (fm.get(k) or _yaml_line(ytext, k)).strip() for k in ("model_provider", "base_url", "env_key", "local")}
     fallback_provider = (fm.get("fallback_provider") or _yaml_line(ytext, "fallback_provider") or "").strip()
+    # 5.4: fallback_account subsumes fallback_provider — the fallback tier's credential. Unset:
+    # the fallback provider's implicit account, else the role's own account (a model swap only).
+    fallback_account = (fm.get("fallback_account") or _yaml_line(ytext, "fallback_account_" + role)
+                        or _yaml_line(ytext, "fallback_account") or "").strip()
+    fb_acct = (AC.members(fallback_account, reg) or [None])[0] if fallback_account else None
+    if fb_acct:
+        fallback_provider = fb_acct["provider"]
+    elif not fallback_account:
+        fallback_account = fallback_provider or account
     return {"model": model, "fallback_model": fallback_model, "resume": resume,
             "fallback_provider": fallback_provider, **ext,
+            "account": account, "fallback_account": fallback_account,
             "model_by_priority": mbp, "effort_by_priority": ebp,
             "effort": effort, "provider": provider, "auth": auth,
             "access": access, "trigger": trigger, "prec": str(prec),
@@ -668,6 +706,19 @@ def lint_project(root, project):
         known_roles = set(m.get("roles", {})) | {"founder"}
     except Exception:
         m = None
+    import accounts as AC
+    reg = AC.load()
+    for pname, pool in reg["pools"].items():        # the accounts file itself (once per project lint)
+        for mname in pool["members"]:
+            if mname not in reg["accounts"]:
+                errors.append("%s: pool '%s' names an unknown account '%s'" % (AC.accounts_file(), pname, mname))
+        if pool["policy"] not in AC.POLICIES:
+            errors.append("%s: pool '%s' has an unknown policy '%s' (expected %s)"
+                          % (AC.accounts_file(), pname, pool["policy"], "|".join(AC.POLICIES)))
+    for aname, a in reg["accounts"].items():
+        if a["provider"] not in provider_packs():
+            errors.append("%s: account '%s' names provider '%s', which has no pack" % (AC.accounts_file(), aname, a["provider"]))
+    fm_of = lambda role: frontmatter(os.path.join(root, "projects", project, "agents", role + ".md"))
     for r in cast(root, project):
         s = agent_setup(root, project, r["name"])
         persona = os.path.join(root, "projects", project, "agents", r["name"] + ".md")
@@ -698,6 +749,19 @@ def lint_project(root, project):
             warnings.append("role '%s': max_turns / max_budget_usd are claude flags — codex exec has no "
                             "equivalent, so this openai role is NOT capped by them; only max_minutes "
                             "(the harness watchdog) binds a codex run" % r["name"])
+        # 5.4: the account must exist (or the pool), and must not contradict an explicit provider:
+        fm_acct = (fm_of(r["name"]).get("account") or "").strip()
+        fm_prov = (fm_of(r["name"]).get("provider") or "").strip()
+        if fm_acct and not AC.members(fm_acct, reg):
+            errors.append("role '%s': account '%s' is not in %s (accounts: %s; pools: %s)"
+                          % (r["name"], fm_acct, AC.accounts_file(), ", ".join(sorted(reg["accounts"])) or "none",
+                             ", ".join(sorted(reg["pools"])) or "none"))
+        elif fm_acct and fm_prov and s["provider"] != fm_prov:
+            errors.append("role '%s': account '%s' is on provider %s but the role says provider: %s"
+                          % (r["name"], fm_acct, s["provider"], fm_prov))
+        fb_acct = (fm_of(r["name"]).get("fallback_account") or "").strip()
+        if fb_acct and not AC.members(fb_acct, reg):
+            errors.append("role '%s': fallback_account '%s' is not in %s" % (r["name"], fb_acct, AC.accounts_file()))
         if s["provider"] not in provider_packs() and s["trigger"] != "none":
             warnings.append("role '%s': provider '%s' has no pack under harness/providers/ (packs: %s) — "
                             "its runs fail at preflight" % (r["name"], s["provider"], ", ".join(provider_packs()) or "none"))
@@ -787,6 +851,14 @@ if __name__ == "__main__":
         s = agent_setup(sys.argv[2], sys.argv[3], sys.argv[4])
         for k in AGENT_CONFIG_KEYS:
             print("%s=%s" % (k, s[k]))
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--account-attempts":
+        # run-agent's seam (5.4): the accounts to try, in order — same-provider pool members
+        # first, then the fallback tier's. tier|account|provider|kind|config_dir|key_env
+        import accounts as AC
+        s = agent_setup(sys.argv[2], sys.argv[3], sys.argv[4])
+        for tier, a in AC.attempts(s, runs_today=runs_today_by_account(sys.argv[2])):
+            print("|".join([tier, a["name"], a["provider"], a["kind"], a["config_dir"], a["key_env"]]))
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--pack-meta":
         # run-agent's seam: `cli=…` and `key_var=…` for a provider pack ('' lines when unknown)

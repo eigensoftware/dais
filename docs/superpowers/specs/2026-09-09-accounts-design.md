@@ -1,6 +1,6 @@
 # Accounts: pooling, rotation, and per-account cap state
 
-Status: draft for founder review · 2026-09-09 · dev plan 5.4 (spec first; no code in this commit)
+Status: approved (decisions below) · 2026-09-09 · dev plan 5.4 (spec first; no code in this commit)
 
 ## Why
 
@@ -127,10 +127,10 @@ CLIs asserting `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / the key var); cap marker per
 the dispatcher's per-account COOLING via dry-run ticks; `runs.account` on the row; doctor's
 account lines; migration on an old db.
 
-## Open questions for the founder
+## Decisions (founder, 2026-09-09)
 
-1. Is `~/.dais/accounts.yaml` the right home, or should accounts live beside `~/.dais/env`
-   as one file? (Credentials are directories and env names either way, never secrets.)
-2. Default pool policy: least-recently-capped (proposed) or strict round-robin?
-3. Should a cross-account fallback prefer a same-provider account before crossing providers
-   (max-a → max-b → chatgpt), or is tier order purely as authored?
+1. Accounts live in `~/.dais/accounts.yaml`, a separate user-level file. `~/.dais/env` keeps keys only.
+2. The default pool policy is `least-recently-capped`.
+3. A cap falls back to another account on the same provider first, then crosses providers:
+   the pool's other members, then `fallback_account`. A role's `fallback_*` tiers stay as
+   authored after the same-provider members are exhausted.
