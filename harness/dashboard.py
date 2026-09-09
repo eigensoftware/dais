@@ -22,6 +22,25 @@ import unicodedata
 from actions import priority_cycle, Action  # noqa: F401
 import router  # parse_roles — so the running-task guess can be agent-aware (which statuses a role owns)
 import machine as MC  # machine-driven projects: derive the action bar from edges (not the actions.py catalog)
+from cost import _k as fmt_tokens  # compact token counts (2.30M) for the spend-limit surfaces
+
+
+def fmt_budget(b):
+    """'150k/100k tokens' or '$1.50/$1.00' for a Snapshot.budget dict."""
+    if b["unit"] == "usd":
+        return "$%.2f/$%.2f" % (b["spent"], b["limit"])
+    return "%s/%s tokens" % (fmt_tokens(b["spent"]), fmt_tokens(b["limit"]))
+
+
+def over_budget_tasks_in(snap):
+    """[(project, Task)] for every open task the spend ceiling is holding (plan 1.6)."""
+    out = []
+    for p in (snap.projects if snap else []):
+        for st, ts in p.tasks_by_status.items():
+            for t in ts:
+                if getattr(t, "over_budget", None):
+                    out.append((p.name, t))
+    return out
 # the data layer — re-exported so `import dashboard as d` / `d.load_snapshot` keeps
 # working for panel.py and the tests (dashboard remains the one import surface).
 from board import (  # noqa: F401
@@ -140,6 +159,15 @@ def render_plain(snap, color=None):
         if snap.cap_state:
             P(f"  {c['CY']}⏸ cooling down — {', '.join(snap.cooling) or 'recent'} capped "
               f"(that provider's roles wait for its window; others still run){c['C0']}")
+        if snap.budget and snap.budget["over"]:
+            P(f"  {c['CR']}⛔ daily budget spent — {fmt_budget(snap.budget)}; the loop idles until "
+              f"tomorrow (dais watch --budget, or dais.yaml daily_budget){c['C0']}")
+        for _pn, t in over_budget_tasks_in(snap):
+            if _pn != p.name:
+                continue
+            ob = t.over_budget
+            P(f"  {c['CR']}⛔ over budget: {t.id} ({ob['runs']} runs · {fmt_tokens(ob['tokens'])}) — "
+              f"withheld from dispatch; lift: dais task set {t.id} --budget-lift{c['C0']}")
         # auto-fallback: a role whose primary model (e.g. Fable) hit the usage limit runs on its
         # backup until the window resets — surface it so it's clear you're off the primary model.
         pdir = os.path.join(HOME, "projects", p.name)

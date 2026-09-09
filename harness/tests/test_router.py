@@ -254,6 +254,73 @@ class TestCadence(unittest.TestCase):
         self.assertIsNone(router.decide(_ws([("a", "proposed", "b"), ("b", "approved")]), "p"))
 
 
+class TestSpendCeiling(unittest.TestCase):
+    """Task spend ceiling (plan 1.6): project.yaml task_max_runs / task_max_tokens. A task's
+    spend = the DISTINCT runs that touched it (run_tasks) and their prompt tokens; over either
+    ceiling the dispatcher skips the task like a dep-blocked one, until the founder lifts it
+    (tasks.budget_lifted_at: only runs after the stamp count)."""
+
+    def setUp(self):
+        self.root = _ws([("r-1", "ready"), ("r-2", "ready", None, "low")])
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.executescript("ALTER TABLE runs ADD COLUMN input_tokens INTEGER;"
+                           "ALTER TABLE tasks ADD COLUMN budget_lifted_at TEXT;"
+                           "CREATE TABLE run_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER,"
+                           " task_id TEXT, verb TEXT, at TEXT);")
+        for i in range(1, 5):                       # four runs on r-1, 100k each
+            conn.execute("INSERT INTO runs(id,project,agent,status,started_at,input_tokens) "
+                         "VALUES(?,'p','engineer','succeeded',datetime('now','-%d hours'),100000)" % (10 - i), (i,))
+            conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(?,'r-1','claim')", (i,))
+            conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(?,'r-1','touch')", (i,))  # same run, twice
+        conn.commit(); conn.close()
+
+    def _yaml(self, text):
+        with open(os.path.join(self.root, "projects", "p", "project.yaml"), "w") as f:
+            f.write("project: p\nrepo: p\nstage_goal: x\n" + text)
+
+    def test_no_ceiling_means_nothing_is_over_budget(self):
+        self._yaml("")
+        self.assertEqual(router.over_budget_tasks(self.root, "p"), {})
+
+    def test_run_ceiling_counts_distinct_runs(self):
+        self._yaml("task_max_runs: 4\n")           # 4 runs = at the ceiling -> over
+        over = router.over_budget_tasks(self.root, "p")
+        self.assertEqual(set(over), {"r-1"})
+        self.assertEqual(over["r-1"]["runs"], 4)
+        self._yaml("task_max_runs: 5\n")
+        self.assertEqual(router.over_budget_tasks(self.root, "p"), {})
+
+    def test_token_ceiling_sums_prompt_tokens(self):
+        self._yaml("task_max_tokens: 350k\n")
+        over = router.over_budget_tasks(self.root, "p")
+        self.assertEqual(over["r-1"]["tokens"], 400000)
+        self._yaml("task_max_tokens: 1M\n")
+        self.assertEqual(router.over_budget_tasks(self.root, "p"), {})
+
+    def test_a_lift_counts_only_runs_after_the_stamp(self):
+        self._yaml("task_max_runs: 3\n")
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("UPDATE tasks SET budget_lifted_at=datetime('now','-7 hours') WHERE id='r-1'")
+        conn.commit(); conn.close()                 # runs 1,2 (9h, 8h ago) are before the stamp
+        self.assertEqual(router.over_budget_tasks(self.root, "p"), {})
+
+    def test_dispatch_skips_an_over_budget_task_and_takes_the_next(self):
+        self._yaml("task_max_runs: 2\n")
+        self.assertEqual(router.dispatch_next(self.root, "p"), ("engineer", "r-2"))
+        self._yaml("task_max_runs: 20\n")
+        self.assertEqual(router.dispatch_next(self.root, "p"), ("engineer", "r-1"))
+
+    def test_budget_strings(self):
+        self.assertEqual(router.parse_budget("2M"), ("tokens", 2000000))
+        self.assertEqual(router.parse_budget("350k"), ("tokens", 350000))
+        self.assertEqual(router.parse_budget("1500"), ("tokens", 1500))
+        self.assertEqual(router.parse_budget("$20"), ("usd", 20.0))
+        self.assertEqual(router.parse_budget("$2.50"), ("usd", 2.5))
+        self.assertIsNone(router.parse_budget("lots"))
+        self.assertIsNone(router.parse_budget(""))
+
+
 class TestFrontmatter(unittest.TestCase):
     """Flat `key: value` lines between leading --- markers of a persona file.
     Line-based on purpose (no YAML library) — nested values are not supported."""

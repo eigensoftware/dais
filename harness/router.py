@@ -263,6 +263,100 @@ def _machine_for(root, project):
     return MC.project_machine_path(root, project, ref)
 
 
+# --- spend limits (plan 1.6), read from the run ledger (migration 0008). ----------------------
+def parse_budget(text):
+    """'2M' / '350k' / '1500' -> ('tokens', n); '$20' / '$2.50' -> ('usd', x); else None."""
+    t = str(text or "").strip().replace(",", "")
+    if not t:
+        return None
+    if t.startswith("$"):
+        try:
+            return ("usd", float(t[1:]))
+        except ValueError:
+            return None
+    mult = 1
+    if t[-1:].lower() == "k":
+        mult, t = 1000, t[:-1]
+    elif t[-1:].lower() == "m":
+        mult, t = 1000000, t[:-1]
+    try:
+        return ("tokens", int(float(t) * mult))
+    except ValueError:
+        return None
+
+
+def daily_budget_state(root, project=None, now=None, conn=None):
+    """The day's spend against a budget, or None when no budget applies.
+    Workspace budget: $DAIS_DAILY_BUDGET (`dais watch --budget`) else dais.yaml `daily_budget:`.
+    Project budget (project given): that project's project.yaml `daily_budget:`.
+    Spend = today's runs (UTC date of started_at) — prompt tokens, or claude-reported dollars
+    for a `$` budget (codex runs then count nothing: the README says tokens are the honest unit).
+    Returns {'limit', 'unit', 'spent', 'over'}."""
+    if project:
+        p = os.path.join(root, "projects", project, "project.yaml")
+        text = open(p).read() if os.path.exists(p) else ""
+        budget = parse_budget(_yaml_line(text, "daily_budget"))
+    else:
+        budget = parse_budget(os.environ.get("DAIS_DAILY_BUDGET", ""))
+        if budget is None:
+            p = os.path.join(root, "dais.yaml")
+            text = open(p).read() if os.path.exists(p) else ""
+            budget = parse_budget(_yaml_line(text, "daily_budget"))
+    if budget is None or budget[1] <= 0:
+        return None
+    unit, limit = budget
+    import machine as MC
+    try:
+        db = conn or MC.open_db(os.path.join(root, "dais.db"))
+        col = "cost_usd" if unit == "usd" else "input_tokens"
+        q = "SELECT COALESCE(SUM(%s),0) FROM runs WHERE date(started_at)=date(?)" % col
+        args = [now or "now"]
+        if project:
+            q += " AND project=?"; args.append(project)
+        spent = db.execute(q, args).fetchone()[0] or 0
+    except sqlite3.OperationalError:
+        return None                                  # pre-ledger db: nothing to measure
+    return {"limit": limit, "unit": unit, "spent": spent, "over": spent >= limit}
+
+
+def over_budget_tasks(root, project, conn=None):
+    """{task_id: {'runs': n, 'tokens': t}} for tasks past the project's task_max_runs /
+    task_max_tokens ceiling (project.yaml; unset = no ceiling). Spend = the DISTINCT runs that
+    touched the task (run_tasks) and their prompt tokens, counting only runs after the task's
+    budget_lifted_at stamp (the founder's `task set --budget-lift`). A db without the ledger
+    or the stamp column degrades to 'nothing is over budget' — a ceiling can't be enforced
+    on data that doesn't exist, and the report says `dais migrate`."""
+    ytext = ""
+    projyaml = os.path.join(root, "projects", project, "project.yaml")
+    if os.path.exists(projyaml):
+        with open(projyaml) as fh:
+            ytext = fh.read()
+    max_runs = _yaml_line(ytext, "task_max_runs")
+    max_runs = int(max_runs) if max_runs.isdigit() and int(max_runs) > 0 else None
+    mt = parse_budget(_yaml_line(ytext, "task_max_tokens"))
+    max_tokens = mt[1] if mt and mt[0] == "tokens" and mt[1] > 0 else None
+    if max_runs is None and max_tokens is None:
+        return {}
+    import machine as MC
+    try:
+        db = conn or MC.open_db(os.path.join(root, "dais.db"))
+        rows = db.execute(
+            "SELECT x.task_id tid, COUNT(*) runs, COALESCE(SUM(r.input_tokens),0) tokens "
+            "FROM (SELECT DISTINCT rt.run_id, rt.task_id FROM run_tasks rt) x "
+            "JOIN runs r ON r.id=x.run_id JOIN tasks t ON t.id=x.task_id "
+            "WHERE t.project=? AND t.status NOT IN ('done','cancelled') "
+            "AND (t.budget_lifted_at IS NULL OR r.started_at > t.budget_lifted_at) "
+            "GROUP BY x.task_id", (project,)).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out = {}
+    for r in rows:
+        if (max_runs is not None and r["runs"] >= max_runs) or \
+           (max_tokens is not None and r["tokens"] >= max_tokens):
+            out[r["tid"]] = {"runs": r["runs"], "tokens": r["tokens"]}
+    return out
+
+
 # --- the harness-side idle check (plan 1.5). A cadence role (every:Nh) used to run on its clock
 # regardless, and in the workspace 75–87% of lead runs ended as no-ops: the "cheap idle check"
 # lived INSIDE the model, so each no-op still paid the full startup. Now the role records the
@@ -319,6 +413,8 @@ def decide(root, project, excluded=None, live=None):
     # decide-mode reports as idle (the project sat out the tick for no reason).
     db = MC.open_db(os.path.join(root, "dais.db"))
     dormant = {r["name"] for r in roles if r["trigger"] == "none"}
+    # spend ceiling (plan 1.6): tasks withheld until the founder lifts their budget
+    over_budget = frozenset(over_budget_tasks(root, project))
 
     if live:
         if len(live) != 1:
@@ -333,7 +429,7 @@ def decide(root, project, excluded=None, live=None):
         if n >= conc:
             return None            # the role is at its declared capacity
         m = MC.load(_machine_for(root, project))
-        if MC.pending_for(db, m, project, role) <= n:
+        if MC.pending_for(db, m, project, role, excluded_tasks=over_budget) <= n:
             return None            # no EXTRA dispatchable task beyond what live runs cover
         return role
 
@@ -343,7 +439,7 @@ def decide(root, project, excluded=None, live=None):
     #    trigger=none is DORMANCY and outranks the machine: a shelved role (e.g. a parked project's
     #    lead) is never scheduled even when an edge would dispatch it — none means never scheduled.
     role = MC.next_role(db, MC.load(_machine_for(root, project)), project,
-                        excluded=excluded | dormant)
+                        excluded=excluded | dormant, excluded_tasks=over_budget)
     if role:
         return role
 
@@ -390,7 +486,7 @@ def dispatch_next(root, project):
     db = MC.open_db(os.path.join(root, "dais.db"))
     dormant = {r["name"] for r in roles if r["trigger"] == "none"}
     return MC.next_dispatch(db, MC.load(_machine_for(root, project)), project, excluded=dormant,
-                            skip_live_pins=True)
+                            skip_live_pins=True, excluded_tasks=frozenset(over_budget_tasks(root, project)))
 
 
 def lint_project(root, project):
@@ -580,6 +676,13 @@ if __name__ == "__main__":
         s = agent_setup(sys.argv[2], sys.argv[3], sys.argv[4])
         for k in AGENT_CONFIG_KEYS:
             print("%s=%s" % (k, s[k]))
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--daily-budget":
+        # dispatch.sh's seam: "spent|limit|unit|over" for the workspace (or one project);
+        # nothing printed = no budget applies
+        st = daily_budget_state(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+        if st:
+            print("%s|%s|%s|%d" % (st["spent"], st["limit"], st["unit"], 1 if st["over"] else 0))
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--board-fingerprint":
         # run-agent's seam: the board as a cadence run leaves it -> projects/<p>/.cadence-<role>

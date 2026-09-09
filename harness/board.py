@@ -70,6 +70,9 @@ class Task:
     blocked_on: str = None   # predecessor task id this task waits on (dependency)
     blocked: bool = False     # computed: blocked_on is set AND that predecessor isn't done/cancelled
     blocked_status: str = None  # computed: the open predecessor's CURRENT state (shown on the row)
+    over_budget: dict = None  # computed (plan 1.6): {'runs', 'tokens'} when the task passed its
+                              # project's spend ceiling — the dispatcher withholds it until
+                              # `dais task set <id> --budget-lift`
 
 
 @dataclass
@@ -108,6 +111,8 @@ class Snapshot:
     workspace: str = None          # workspace identity (dais.yaml `workspace:`), or None
     cooling: list = field(default_factory=list)  # providers the dispatcher's cap gate is holding
                                                  # (['all'] on a db without runs.provider)
+    budget: dict = None            # the workspace daily budget (plan 1.6): {'limit','unit','spent',
+                                   # 'over'}, or None when none is set — mirrors the dispatcher
     links: list = field(default_factory=list)   # composition graph: (parent_id, child_id, rel)
                                                 # rows from task_links; [] pre-migration
     archived: list = field(default_factory=list)  # projects hidden from the board (`archived: true`
@@ -361,12 +366,17 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
     # (predecessor missing) is treated as unblocked so a deleted prerequisite never strands work.
     status_by_id = {t.id: t.status for p in projects
                     for ts in p.tasks_by_status.values() for t in ts}
+    import router
     for p in projects:
+        # spend ceiling (plan 1.6): the same set the dispatcher withholds, on the same conn
+        over = router.over_budget_tasks(root, p.name, conn=conn)
         for ts in p.tasks_by_status.values():
             for t in ts:
                 t.blocked = bool(t.blocked_on) and \
                     status_by_id.get(t.blocked_on) not in (None, "done", "cancelled")
                 t.blocked_status = status_by_id.get(t.blocked_on) if t.blocked else None
+                t.over_budget = over.get(t.id)
+    budget = router.daily_budget_state(root, now=now, conn=conn)
     grows = conn.execute(
         "SELECT id,started_at,ended_at,project,agent,status,summary,log_path,task_id" + mcol + " FROM runs "
         "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()
@@ -403,7 +413,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6):
     except sqlite3.Error:
         links = []
     return Snapshot(projects=projects, recent_runs=recent_runs,
-                    cap_state=bool(cooling), cooling=cooling, ts=now,
+                    cap_state=bool(cooling), cooling=cooling, budget=budget, ts=now,
                     workspace=workspace_name(root), links=links, archived=archived)
 
 

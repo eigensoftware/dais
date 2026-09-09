@@ -208,6 +208,9 @@ def render_work(scr, rect, app, focused):
         elif r["kind"] != "running" and r["id"] in blk:       # ⛓ parked parent (QA fail): name the open fix
             bid, bst = blk[r["id"]]
             title = f"⛓ [{bid}·{bst.replace('_', ' ')}] {title}"
+        ob = getattr(r["task"], "over_budget", None) if r["kind"] != "running" else None
+        if ob:                                                # ⛔ the spend ceiling holds it (plan 1.6)
+            title = f"⛔ [{ob['runs']} runs·{d.fmt_tokens(ob['tokens'])}] {title}"
         if r["kind"] != "running":
             p = next((pp for pp in (app.snap.projects if app.snap else [])
                       if pp.name == r["project"]), None)
@@ -391,6 +394,10 @@ def _panel_detail_lines(app, sel_row):
         bst = f" ({bt.status})" if bt else ""
         ttl = f' "{d.truncate_words(bt.title, 34)}"' if bt else ""
         out.append(f"⛓ blocked on {task.blocked_on}{bst}{ttl} — won't run until it's done")
+    ob = getattr(task, "over_budget", None)
+    if ob:                                              # the spend ceiling holds it (plan 1.6)
+        out.append(f"⛔ over budget — {ob['runs']} runs · {d.fmt_tokens(ob['tokens'])} on this task; "
+                   f"withheld from dispatch. Lift: dais task set {task.id} --budget-lift")
     vst = _aggregate_map(p.machine).get(task.status)    # parked in a swept state (e.g. approved):
     if vst is not None:                                 # name the release vehicle that ships it
         vehicles = p.tasks_by_status.get(vst, [])
@@ -644,6 +651,12 @@ def render_vitals(scr, rect, app):
     nproj = len(snap.projects) if snap else 0
     ng = d.gate_count(snap, running_ids) if snap else 0
     cool = (" · COOLING " + ",".join(snap.cooling)) if (snap and snap.cap_state) else ""
+    # spend limits (plan 1.6): a held task is NOT a machine gate, so it gets its own token;
+    # a spent daily budget means the loop launches nothing until tomorrow
+    _nob = len(d.over_budget_tasks_in(snap)) if snap else 0
+    cool += f" · ⛔ {_nob} OVER BUDGET" if _nob else ""
+    if snap and snap.budget and snap.budget["over"]:
+        cool += " · ⛔ BUDGET SPENT " + d.fmt_budget(snap.budget)
     # yolo (design/yolo-mode.md): governance suspended somewhere -> say so on the always-visible
     # strip, naming the projects. One-off marker read; folds into the snapshot signal unification.
     _yp = [p.name for p in (snap.projects if snap else [])

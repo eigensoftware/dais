@@ -367,6 +367,58 @@ class TestChromePanes(unittest.TestCase):
         self.assertNotIn("LIVE", text)        # no hardcoded LIVE contradicting the watch badge
         self.assertNotIn("5h", text)          # NO fake budget bar
 
+    # --- spend limits (plan 1.6) in the cockpit ---------------------------------------------
+    def _over_budget_app(self):
+        import tempfile
+        app = self._app([("cou-1", "acme", "big one", "ready", "high", None)])
+        os.makedirs(os.path.join(app.root, "projects", "acme"), exist_ok=True)
+        with open(os.path.join(app.root, "projects", "acme", "project.yaml"), "w") as fh:
+            fh.write("project: acme\nrepo: x\nstage_goal: g\ntask_max_runs: 1\n")
+        for stmt in ("ALTER TABLE runs ADD COLUMN input_tokens INTEGER",
+                     "ALTER TABLE tasks ADD COLUMN budget_lifted_at TEXT",
+                     "CREATE TABLE IF NOT EXISTS run_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER,"
+                     " task_id TEXT, verb TEXT, at TEXT)"):
+            try:
+                app.conn.execute(stmt)
+            except Exception:
+                pass
+        app.conn.execute("INSERT INTO runs(id,project,agent,status,started_at,input_tokens) "
+                         "VALUES(7,'acme','engineer','succeeded',datetime('now'),2300000)")
+        app.conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(7,'cou-1','claim')")
+        app.conn.commit()
+        app.snap = d.load_snapshot(app.conn, root=app.root)
+        return app
+
+    def test_work_row_and_inspector_name_an_over_budget_task(self):
+        app = self._over_budget_app()
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 200), app, focused=True)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("⛔", text)
+        self.assertIn("2.30M", text)
+        app.sel_id = "cou-1"
+        body = "\n".join(pn._panel_detail_lines(app, app._selected(app.left_rows())[1]))
+        self.assertIn("over budget", body)
+        self.assertIn("--budget-lift", body)
+
+    def test_vitals_counts_over_budget_tasks_apart_from_gates(self):
+        app = self._over_budget_app()
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("1 OVER BUDGET", text)
+        self.assertIn("0 need you", text)                  # a spend hold is not a machine gate
+
+    def test_vitals_shows_a_spent_daily_budget(self):
+        app = self._over_budget_app()
+        with open(os.path.join(app.root, "dais.yaml"), "w") as fh:
+            fh.write("workspace: w\ndaily_budget: 1M\n")
+        app.snap = d.load_snapshot(app.conn, root=app.root)
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("BUDGET SPENT", text)
+
     def test_vitals_cooling_badge_names_the_provider(self):
         app = self._app([("cou-1", "acme", "x", "proposed", "high", None)])
         try:

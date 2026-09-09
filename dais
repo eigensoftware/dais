@@ -21,9 +21,9 @@ dais — your agent company control panel
   dais tasks <project> [--assignee A] [--status S]
   dais task add <project> "title" [--id X] [--priority P] [--status S] [--assignee A] [--notes "..."] [--touches-migrations true|false]
   dais task show <id>                 the full record: fields + links + the notes log
-  dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."(appends)] [--replace-notes "..."] [--touches-migrations true|false]
+  dais task set <id> [--status S] [--assignee A] [--pr URL] [--priority P] [--title T] [--notes "..."(appends)] [--replace-notes "..."] [--touches-migrations true|false] [--budget-lift]
   dais tick [project] [--dry-run]     check the list once: run the most valuable pending task
-  dais watch [seconds]                keep checking on an interval (default 900s); Ctrl-C to stop
+  dais watch [seconds] [N] [--budget 2M|$20]   keep checking on an interval (default 900s), N agents wide, under today's budget; Ctrl-C to stop
   dais schedule install|uninstall|status   run the interval in the background (cross-platform)
   dais pause | resume                 park/un-park the loop (honored by watch + schedule)
   dais yolo <project> [on|off] [--for 48h] [--veto 30m]  auto-approve the machine's yolo-tagged founder gates (confirm-only; never attest/typed)
@@ -174,6 +174,7 @@ MD
         cols="id, project, title, status, priority, assignee, pr_url, created_at, updated_at"
         has_blocked_on && cols="$cols, blocked_on"
         [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='touches_migrations';" 2>/dev/null)" ] && cols="$cols, touches_migrations"
+        [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='budget_lifted_at';" 2>/dev/null)" ] && cols="$cols, budget_lifted_at"
         db -line "SELECT $cols FROM tasks WHERE id='$(sqlesc "$id")';"
         links="$(db "SELECT rel || ' -> ' || child_id FROM task_links WHERE parent_id='$(sqlesc "$id")'
                      UNION ALL SELECT rel || ' <- ' || parent_id FROM task_links WHERE child_id='$(sqlesc "$id")';" 2>/dev/null)"
@@ -237,6 +238,10 @@ MD
                           false|0|no)  sets="$sets, touches_migrations=0";;
                           *) echo "task set: --touches-migrations needs true|false"; exit 1;;
                         esac; shift 2;;
+          --budget-lift)  # plan 1.6: the task passed its spend ceiling; count only runs from now on
+                        [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='budget_lifted_at';" 2>/dev/null)" ] \
+                          || { echo "task set: --budget-lift needs a schema upgrade — run 'dais migrate' first"; exit 1; }
+                        sets="$sets, budget_lifted_at=datetime('now')"; shift;;
           --depends-on) dep="$2"; depset=1                       # '' clears the dependency
                         sets="$sets, blocked_on=$([ -n "$2" ] && echo "'$(sqlesc "$2")'" || echo NULL)"; shift 2;;
           *) echo "task set: unknown arg: $1 (a typo'd flag would silently change nothing)"; exit 1;; esac; done
@@ -515,6 +520,13 @@ effort: <optional low|medium|high, or blank>
     exec "$DAIS_ROOT/harness/dispatch.sh" "$@" ;;
 
   watch)
+    # --budget <2M|500k|$20> anywhere in the args: today's loop budget (plan 1.6), overriding
+    # dais.yaml `daily_budget:` for this loop only; the dispatcher reads DAIS_DAILY_BUDGET.
+    _wargs=(); while [ $# -gt 0 ]; do case "$1" in
+      --budget) [ -n "${2:-}" ] || { echo "usage: dais watch [interval] [parallel] [--budget 2M|500k|\$20]"; exit 1; }
+                export DAIS_DAILY_BUDGET="$2"; shift 2;;
+      *) _wargs+=("$1"); shift;; esac; done
+    set -- ${_wargs[@]+"${_wargs[@]}"}
     interval="${1:-900}"
     par="${2:-1}"   # parallel width: how many agents may run at once (1 = serial, the default)
     [[ "$interval" =~ ^[0-9]+$ ]] || { echo "usage: dais watch [interval-seconds] [parallel-1to5]"; exit 1; }

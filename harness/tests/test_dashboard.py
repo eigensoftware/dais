@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -15,10 +16,12 @@ HARNESS = os.path.join(os.path.dirname(__file__), "..")
 
 SCHEMA = """
 CREATE TABLE tasks(id TEXT, project TEXT, title TEXT, status TEXT, assignee TEXT,
-  priority TEXT, pr_url TEXT, notes TEXT, updated_at TEXT);
+  priority TEXT, pr_url TEXT, notes TEXT, updated_at TEXT, budget_lifted_at TEXT);
 CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,
   task_id TEXT, status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT,
-  provider TEXT);
+  provider TEXT, input_tokens INTEGER, cost_usd REAL);
+CREATE TABLE run_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, task_id TEXT,
+  verb TEXT, at TEXT);
 """
 
 
@@ -437,6 +440,42 @@ class TestDataLayer(unittest.TestCase):
         snap3 = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 23:59:00")
         self.assertFalse(snap3.cap_state)
         self.assertEqual(snap3.cooling, [])
+
+    # --- spend limits (plan 1.6) on the board ---------------------------------------------
+    def _budget_root(self, project_yaml="", dais_yaml=""):
+        root = tempfile.mkdtemp(prefix="dais-bud-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        os.makedirs(os.path.join(root, "projects", "acme"))
+        with open(os.path.join(root, "projects", "acme", "project.yaml"), "w") as f:
+            f.write("project: acme\nrepo: x\nstage_goal: g\n" + project_yaml)
+        if dais_yaml:
+            with open(os.path.join(root, "dais.yaml"), "w") as f:
+                f.write(dais_yaml)
+        return root
+
+    def test_snapshot_flags_a_task_over_its_spend_ceiling(self):
+        root = self._budget_root("task_max_runs: 1\n")
+        conn = _seed()
+        conn.execute("UPDATE runs SET input_tokens=120000 WHERE id=1")
+        conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(1,'cou-7','claim')")
+        snap = d.load_snapshot(conn, root=root, now="2026-06-26 20:45:00")
+        t = {x.id: x for x in snap.projects[0].tasks_by_status["ready"]}["cou-7"]
+        self.assertEqual(t.over_budget, {"runs": 1, "tokens": 120000})
+        out = d.render_plain(snap, color=False)
+        self.assertIn("over budget", out)
+        self.assertIn("cou-7", out)
+        self.assertIn("--budget-lift", out)
+
+    def test_snapshot_daily_budget_state(self):
+        root = self._budget_root(dais_yaml="workspace: w\ndaily_budget: 100k\n")
+        conn = _seed()
+        conn.execute("UPDATE runs SET input_tokens=150000 WHERE id=1")     # started 2026-06-26
+        snap = d.load_snapshot(conn, root=root, now="2026-06-26 20:45:00")
+        self.assertEqual((snap.budget["limit"], snap.budget["unit"], snap.budget["spent"], snap.budget["over"]),
+                         (100000, "tokens", 150000, True))
+        snap2 = d.load_snapshot(conn, root=root, now="2026-06-27 10:00:00")   # a new day
+        self.assertFalse(snap2.budget["over"])
+        self.assertIsNone(d.load_snapshot(_seed(), root="/nonexistent", now="2026-06-26 20:45:00").budget)
 
     def test_snapshot_cooling_names_only_the_capped_provider(self):
         # a codex cap after a Claude success cools openai alone — mirrors dispatch.sh's

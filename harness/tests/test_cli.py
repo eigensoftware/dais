@@ -398,6 +398,68 @@ class TestProviderScopedGates(CliTest):
         self.assertEqual(r.returncode, 20, r.stdout + r.stderr)
 
 
+class TestSpendLimits(CliTest):
+    """Plan 1.6 through the CLI: the founder's --budget-lift, and the daily loop budget the
+    dispatcher honors (workspace dais.yaml `daily_budget:` / DAIS_DAILY_BUDGET / per-project)."""
+
+    def _spend_today(self, project, tokens, agent="qa"):
+        # qa, not engineer: a succeeded engineer run with no verbs would trip the no-op
+        # throttle and mask what these tests assert about the budget gate
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status,provider,input_tokens,cost_usd) "
+                     "VALUES(?,?,datetime('now'),datetime('now'),'succeeded','anthropic',?,?)",
+                     (project, agent, tokens, tokens / 100000.0))
+        conn.commit(); conn.close()
+
+    def test_budget_lift_stamps_the_task(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--status", "ready")
+        self.assertIsNone(q(self.root, "SELECT budget_lifted_at FROM tasks WHERE id='d-1'")[0])
+        r = dais(self.root, "task", "set", "d-1", "--budget-lift")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNotNone(q(self.root, "SELECT budget_lifted_at FROM tasks WHERE id='d-1'")[0])
+        self.assertIn("budget_lifted_at", dais(self.root, "task", "show", "d-1").stdout)
+
+    def test_workspace_daily_budget_parks_the_loop(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--status", "ready")
+        self._spend_today("demo", 150000)
+        with open(os.path.join(self.root, "dais.yaml"), "a") as f:
+            f.write("daily_budget: 100k\n")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run", r.stdout)
+        self.assertIn("budget", r.stdout.lower())
+        r = dais(self.root, "tick", "demo")
+        self.assertEqual(r.returncode, 20, r.stdout + r.stderr)
+        self.assertIn("budget", open(os.path.join(self.root, "projects", ".watch.log")).read())
+
+    def test_env_override_and_dollar_budgets(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--status", "ready")
+        self._spend_today("demo", 150000)                    # = $1.50 by the seed's pricing
+        with open(os.path.join(self.root, "dais.yaml"), "a") as f:
+            f.write("daily_budget: 100k\n")
+        r = dais(self.root, "tick", "demo", "--dry-run", env={"DAIS_DAILY_BUDGET": "1M"})
+        self.assertIn("WOULD run engineer", r.stdout)         # `dais watch --budget` wins over dais.yaml
+        r = dais(self.root, "tick", "demo", "--dry-run", env={"DAIS_DAILY_BUDGET": "$1"})
+        self.assertNotIn("WOULD run", r.stdout)
+        r = dais(self.root, "tick", "demo", "--dry-run", env={"DAIS_DAILY_BUDGET": "$2"})
+        self.assertIn("WOULD run engineer", r.stdout)
+
+    def test_per_project_daily_budget_skips_only_that_project(self):
+        dais(self.root, "scaffold", "demo"); dais(self.root, "scaffold", "other")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--status", "ready")
+        dais(self.root, "task", "add", "other", "y", "--id", "o-1", "--status", "ready")
+        self._spend_today("demo", 150000)
+        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as f:
+            f.write("daily_budget: 100k\n")
+        r = dais(self.root, "tick", "--dry-run")
+        self.assertIn("tick[other]: WOULD run engineer", r.stdout)
+        self.assertNotIn("tick[demo]: WOULD run", r.stdout)
+        self.assertIn("budget", r.stdout.lower())
+
+
 class TestIdleCheckTick(CliTest):
     """End to end through `dais tick --dry-run`: a cadence lead whose interval elapsed is skipped
     while the board is exactly as it left it, and runs once anything on the board moves."""

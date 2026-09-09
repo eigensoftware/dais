@@ -53,6 +53,21 @@ if [ "$DRY" = 0 ] && [ -f "$DAIS_HOME/projects/.paused" ]; then
   echo "${CY}tick: paused (projects/.paused) — run 'dais resume' to continue${C0}"; exit 10
 fi
 
+# --- daily loop budget (plan 1.6): dais.yaml `daily_budget:` or `dais watch --budget`
+#     (DAIS_DAILY_BUDGET). Over it, the loop launches nothing until tomorrow (UTC) — in every
+#     dispatcher, like pause. Per-project budgets are checked in the eligible loop below. ---
+fmt_budget(){ # <spent|limit|unit|over> -> "150000/100000 tokens"
+  local s l u; IFS='|' read -r s l u _ <<<"$1"
+  if [ "$u" = usd ]; then printf '$%.2f/$%.2f' "$s" "$l"; else printf '%s/%s tokens' "$s" "$l"; fi
+}
+bstate="$(python3 "$SELF/router.py" --daily-budget "$DAIS_HOME" 2>>"$TLOG")"
+if [ -n "$bstate" ] && [ "${bstate##*|}" = 1 ]; then
+  tlog "daily budget spent: $(fmt_budget "$bstate") — nothing launches until tomorrow"
+  echo "${CY}tick: daily budget spent ($(fmt_budget "$bstate")) — the loop idles until tomorrow (raise: dais watch --budget, or dais.yaml daily_budget)${C0}"
+  [ "$DRY" = 1 ] && exit 0
+  exit 20
+fi
+
 # --- machine maintenance: fire each project's system `unblocked` edges whose blockers are all
 #     done (machine.py advance) — e.g. blocked → qa_review once the spawned fix lands — so freed
 #     work is dispatchable THIS tick instead of stranding in a waiting state. Then the YOLO sweep
@@ -180,6 +195,14 @@ done
 eligible=()
 for proj in "${projects[@]}"; do
   [ "$free" -le 0 ] && break   # pool full — no slot to fill, so don't bother polling the router
+  # per-project daily budget (project.yaml `daily_budget:`): this project sits out today
+  pb="$(python3 "$SELF/router.py" --daily-budget "$DAIS_HOME" "$proj" 2>>"$TLOG")"
+  if [ -n "$pb" ] && [ "${pb##*|}" = 1 ]; then
+    withheld=$((withheld+1))
+    tlog "daily budget spent for $proj: $(fmt_budget "$pb") — skipping"
+    echo "${CY}tick[$proj]: daily budget spent ($(fmt_budget "$pb")) — skipping until tomorrow${C0}"
+    continue
+  fi
   livespec="$(live_role_counts "$proj" | paste -sd, -)"   # '' = idle; 'qa=1' = stacking question
 
   # who runs next is decided by the project's roles config (see harness/router.py) — no role

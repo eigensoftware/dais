@@ -334,7 +334,8 @@ def _live_pins(conn, project):
     return frozenset(r[0] for r in rows)
 
 
-def next_dispatch(conn, m, project, excluded=frozenset(), skip_live_pins=False):
+def next_dispatch(conn, m, project, excluded=frozenset(), skip_live_pins=False,
+                  excluded_tasks=frozenset()):
     """Reactive dispatch as (role, task_id): the role to launch next for this project AND the
     specific highest-priority pending task whose state named that role. ('', '') when nothing is
     dispatchable (the caller then considers cadence roles). Blocked/parked/gate states have no
@@ -352,7 +353,11 @@ def next_dispatch(conn, m, project, excluded=frozenset(), skip_live_pins=False):
     switch (router.dispatch_next), not the scan's default. next_role/decide() only reach this scan
     for a project holding no live locks, where every 'running' row is an orphan of a crashed run —
     honoring those pins would strand the task instead of re-dispatching it, the opposite of what
-    dispatch.sh's interrupt reconciliation is for."""
+    dispatch.sh's interrupt reconciliation is for.
+
+    `excluded_tasks`: ids the caller withholds — the router's spend ceiling (plan 1.6: a task
+    past its project's task_max_runs / task_max_tokens waits for the founder's --budget-lift),
+    skipped exactly like a dep-blocked task: the scan moves on to the next dispatchable one."""
     live_pins = _live_pins(conn, project) if skip_live_pins else frozenset()
     rows = conn.execute("SELECT id, status, COALESCE(priority,'medium') FROM tasks "
                         "WHERE project=? AND status NOT IN ('done','cancelled')", (project,)).fetchall()
@@ -361,7 +366,8 @@ def next_dispatch(conn, m, project, excluded=frozenset(), skip_live_pins=False):
         rid = r["id"] if hasattr(r, "keys") else r[0]
         status = r["status"] if hasattr(r, "keys") else r[1]
         role = dispatch_role(m, status)
-        if not role or role in excluded or rid in live_pins or _dep_open(conn, rid):
+        if not role or role in excluded or rid in live_pins or rid in excluded_tasks \
+                or _dep_open(conn, rid):
             continue
         prio = (r["COALESCE(priority,'medium')"] if hasattr(r, "keys") else r[2])
         key = (_PRIORITY_RANK.get(prio, 2), rid)
@@ -370,24 +376,24 @@ def next_dispatch(conn, m, project, excluded=frozenset(), skip_live_pins=False):
     return (best[1], best[2]) if best else ("", "")
 
 
-def next_role(conn, m, project, excluded=frozenset()):
+def next_role(conn, m, project, excluded=frozenset(), excluded_tasks=frozenset()):
     """The role next_dispatch would launch, without the task. '' when nothing is dispatchable.
     See next_dispatch for the full scan semantics."""
-    return next_dispatch(conn, m, project, excluded)[0]
+    return next_dispatch(conn, m, project, excluded, excluded_tasks=excluded_tasks)[0]
 
 
-def pending_for(conn, m, project, role):
+def pending_for(conn, m, project, role, excluded_tasks=frozenset()):
     """How many tasks are dispatchable to `role` right now — next_role's scan as a count
-    (same skips: no dispatch role, open dependency). The role-concurrency gate reads this:
-    a second run of a live role only launches when pending > live, so stacking never
-    duplicates a lone task."""
+    (same skips: no dispatch role, open dependency, withheld ids). The role-concurrency gate
+    reads this: a second run of a live role only launches when pending > live, so stacking
+    never duplicates a lone task."""
     rows = conn.execute("SELECT id, status FROM tasks "
                         "WHERE project=? AND status NOT IN ('done','cancelled')", (project,)).fetchall()
     n = 0
     for r in rows:
         rid = r["id"] if hasattr(r, "keys") else r[0]
         status = r["status"] if hasattr(r, "keys") else r[1]
-        if dispatch_role(m, status) == role and not _dep_open(conn, rid):
+        if dispatch_role(m, status) == role and rid not in excluded_tasks and not _dep_open(conn, rid):
             n += 1
     return n
 

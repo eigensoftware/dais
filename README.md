@@ -349,6 +349,24 @@ from a role that hits its cap every tick; the task stays where it was. Codex has
 dollar flag, so only `max_minutes` binds a codex run; `dais lint` says so if you set the others
 on an openai role. Read `dais cost --by role` before choosing numbers.
 
+## Spend limits: a ceiling per task, a budget per day
+
+Both read the run ledger (below), both unset by default.
+
+**Task spend ceiling** (`project.yaml`): `task_max_runs: 6` and/or `task_max_tokens: 2M`. A
+task's spend is the distinct runs that touched it and their prompt tokens. Past either ceiling
+the dispatcher withholds the task, exactly like a dependency-blocked one, and the board says so:
+the row reads `⛔ [7 runs·2.30M] title`, the inspector and `dais status` name the task, and the
+vitals strip counts `⛔ N OVER BUDGET` apart from the gate count (a spend hold is not a machine
+gate). You decide: `dais task set <id> --budget-lift` resets the meter (only runs after the
+stamp count), or cancel it. The 14-run probe loop of 2026-07-18 would have stopped at run 3.
+
+**Daily loop budget**: `daily_budget: 2M` in `dais.yaml` (the workspace), overridable for one
+loop with `dais watch --budget 500k`, or per project in `project.yaml`. Over it, the loop
+launches nothing until tomorrow (UTC): the tick journals why, `dais status` and the vitals
+strip show `BUDGET SPENT 2.1M/2M tokens`. A `$20` budget counts claude-reported dollars only, so
+codex runs count nothing against it; tokens are the honest unit for a mixed workspace.
+
 ## The run ledger: what each run cost
 
 Every run records what it consumed (migration 0008: `dais migrate` with the loop paused): the
