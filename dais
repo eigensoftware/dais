@@ -34,6 +34,7 @@ dais — your agent company control panel
   dais run <project> <agent>          run a specific agent now (headless claude)
   dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify; --notes and --verdict '{json}' ride along)
   dais edges <task-id>                the fireable edges from a task's current state
+  dais brief <task-id>                the decision packet for a gate: what it encompasses (PRs, verdicts, checks), migrations, spend, notes, what you can fire
   dais check <task-id> [<check>] [--branch B]   run the machine's declared check in a worktree of the task's PR branch; record it (verify: honors it)
   dais logs <project> [N]             recent runs (+ tokens · cost once the ledger is on)
   dais cost [project] [--since 7d] [--by project|role|task]   the run ledger: tokens (and dollars where reported) per project, role, or task
@@ -592,6 +593,13 @@ effort: <optional low|medium|high, or blank>
     if [ "$ok" = 1 ]; then echo "  ${CG}✓ $name passed on $branch — recorded on $id (verify:$name is satisfied for this PR for 24h)${C0}"
     else echo "  ${CR}✗ $name FAILED on $branch (exit $rc) — recorded on $id; verify:$name will refuse until it passes${C0}"; fi
     exit $rc ;;
+
+  brief)
+    # the decision packet for a gate (plan 4.1): the task, what it encompasses (PRs, verdicts,
+    # checks, last notes), the migrations flag, spend, duplicates, the notes log, and exactly
+    # what can be fired from here with its guards and effects. See harness/brief.py.
+    id="${1:?usage: dais brief <task-id>}"
+    exec python3 "$DAIS_ROOT/harness/brief.py" "$DB" "$DAIS_HOME" "$id" ;;
 
   edges)
     # discovery: the fireable edges from a task's current state (for agents + the founder)

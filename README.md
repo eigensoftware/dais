@@ -458,6 +458,7 @@ not keep it.
 | `dais task add/set …` | manage the board (new tasks enter at the machine's entry state) |
 | `dais fire <id> <verb>` | advance a task by firing a machine edge (guards: `--confirm` / `--typed` / `--attest` / `--verify`) |
 | `dais edges <id>` | the fireable edges from a task's current state |
+| `dais brief <id>` | the decision packet for a gate on one screen: how long it has waited, what a release encompasses (each PR with size and mergeability via `gh`, the QA verdict, recorded checks, last note), the migrations flag the greenlight demands, spend so far, a suspected duplicate, an escalated task's bounce history, and exactly what you can fire with its guards and effects |
 | `dais check <id> [<check>] [--branch B]` | run the machine's declared check in a throwaway worktree of the task's PR branch and record the result; `verify:<check>` honors it for 24h (zero tokens, real attestation) |
 | `dais start <id>` | run the role the machine dispatches for this task's state, now (bypasses pause) |
 | `dais watch [secs] [N]` | run the loop (N = parallel agents) |
