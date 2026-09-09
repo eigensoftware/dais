@@ -339,6 +339,13 @@ roles resolved to that project's *default* provider; it never leaks a `claude-op
 onto a role you've overridden to `provider: openai` (or vice versa). Give a per-role override
 its own `model:` in that role's frontmatter instead.
 
+**A third pack ships: `provider: opencode`.** [opencode](https://opencode.ai) is one adapter
+for 75+ providers including local models; name the model as `provider/model`
+(`model: anthropic/claude-sonnet-5`, `openrouter/…`, `ollama/…`). opencode holds the provider
+keys itself (`opencode auth`), review and draft roles run its read-only `plan` agent, edit roles
+its default build agent, and headless runs always skip permission prompts (a prompt would hang
+the run). `effort:` maps to `--variant`. Its tokens and session id land in the ledger.
+
 **Any OpenAI-compatible endpoint, through the openai pack.** Codex talks to whatever
 `model_providers` entry you name; dais writes it from the role's frontmatter (or project-wide):
 

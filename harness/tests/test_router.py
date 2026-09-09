@@ -851,7 +851,8 @@ class TestProviderPacks(unittest.TestCase):
 
     def test_stock_packs_are_discovered_with_their_meta(self):
         packs = router.provider_packs()
-        self.assertEqual(sorted(packs), ["anthropic", "openai"])
+        self.assertEqual(sorted(packs), ["anthropic", "openai", "opencode"])
+        self.assertEqual(packs["opencode"]["cli"], "opencode")
         self.assertEqual(packs["anthropic"]["cli"], "claude")
         self.assertEqual(packs["openai"]["cli"], "codex")
         self.assertEqual(packs["anthropic"]["key_var"], "ANTHROPIC_API_KEY")

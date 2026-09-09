@@ -2,6 +2,8 @@
 # Formats agent JSONL streams into readable, real-time lines. The provider-specific event
 # mapping lives in the provider PACK (harness/providers/<name>/stream.py, plan 5.1):
 #   handle(e, emit, acc) -> True when the run must be scored FAILED
+#   finish(emit, acc, failed) [optional] -> called once at end of stream (opencode exits without a
+#   closing event, so its pack prints ✓ here)
 # Both stock packs map onto the SAME markers (💬 🔧 ↳ ✓ ✗ ⚠) so log files and TUI coloring
 # stay provider-agnostic. Writes PLAIN text to LOGFILE (so the saved log stays clean) and
 # COLOR to the terminal (when stdout is a tty). Bulletproof: any parse problem prints the raw
@@ -59,11 +61,11 @@ def _load_pack(name):
         spec = importlib.util.spec_from_file_location("dais_stream_" + name, path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return getattr(mod, "handle", None)
+        return getattr(mod, "handle", None), getattr(mod, "finish", None)
     except Exception:
         return None
 
-HANDLE = _load_pack(PROVIDER)
+HANDLE, FINISH = _load_pack(PROVIDER) or (None, None)
 if HANDLE is None:
     emit("  (fmt-stream: no stream mapping for provider '%s' — printing raw lines)" % PROVIDER, "red")
 
@@ -84,6 +86,12 @@ for raw in iter(sys.stdin.readline, ""):
             FAILED = True
     except Exception:
         emit("  " + raw)
+
+if FINISH is not None:
+    try:
+        FINISH(emit, acc, FAILED)
+    except Exception:
+        pass
 
 if USAGE is not None and len(sys.argv) > 1:
     try:

@@ -1,0 +1,3 @@
+{"cli": "opencode", "key_var": "", "default_model": "",
+ "supports": ["effort"],
+ "note": "opencode (`opencode run --format json`): one adapter for 75+ providers incl. local. Model as provider/model (e.g. anthropic/claude-sonnet-5, openrouter/…); opencode holds the provider keys itself (`opencode auth`), so auth: api is meaningless here. Review/draft roles run its read-only `plan` agent; edit roles the default build agent. Headless runs always skip permission prompts (a prompt would hang the run)."}

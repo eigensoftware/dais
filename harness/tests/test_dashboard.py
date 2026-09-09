@@ -1290,3 +1290,35 @@ class TestRenderProjectCast(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOpencodeStream(unittest.TestCase):
+    """The opencode pack's stream mapping (plan 5.5), from a captured `opencode run --format json`
+    transcript (fixtures/opencode-run.jsonl)."""
+
+    def _run(self, text):
+        with tempfile.NamedTemporaryFile("r", suffix=".log", delete=False) as lf:
+            logpath = lf.name
+        self.addCleanup(os.unlink, logpath)
+        self.addCleanup(lambda: os.path.exists(logpath + ".usage.json") and os.unlink(logpath + ".usage.json"))
+        r = subprocess.run([sys.executable, os.path.join(HARNESS, "fmt-stream.py"), logpath, "--provider", "opencode"],
+                           input=text, capture_output=True, text=True)
+        usage = json.load(open(logpath + ".usage.json")) if os.path.exists(logpath + ".usage.json") else None
+        return r.returncode, open(logpath).read(), usage
+
+    def test_fixture_maps_tools_text_and_usage(self):
+        rc, log, u = self._run(open(os.path.join(os.path.dirname(__file__), "fixtures", "opencode-run.jsonl")).read())
+        self.assertEqual(rc, 0)
+        self.assertIn("🔧 bash echo hi", log)
+        self.assertIn("↳ hi", log)
+        self.assertIn("💬", log)
+        self.assertIn("✓", log)
+        self.assertEqual(u["input_tokens"], 27678 + u["cache_read_tokens"] + u["cache_write_tokens"])
+        self.assertGreaterEqual(u["output_tokens"], 28)
+        self.assertGreaterEqual(u["turns"], 1)
+        self.assertTrue(u["session_id"].startswith("ses_"))
+
+    def test_error_event_fails_the_run(self):
+        rc, log, _ = self._run(json.dumps({"type": "error", "error": {"name": "ProviderAuthError", "data": {"message": "no key"}}}) + "\n")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("✗", log); self.assertIn("no key", log)

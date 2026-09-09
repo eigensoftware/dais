@@ -1662,6 +1662,43 @@ class TestPerRoleModelOverride(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", ".cadence-lead")))
 
+    # --- 5.5: the opencode pack ------------------------------------------------------------------
+    def _opencode_argv(self, fm, role="qa"):
+        argv = os.path.join(self.root, "opencode-argv")
+        if os.path.exists(argv):
+            os.unlink(argv)
+        fake = ('printf "%s\\n" "$@" > "' + argv + '"\n'
+                'echo \'{"type":"text","part":{"type":"text","text":"ok","sessionID":"ses_1"}}\'\n'
+                'echo \'{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":100,"output":5,"cache":{"read":0,"write":0}},"cost":0,"sessionID":"ses_1"}}\'\n')
+        b = tempfile.mkdtemp(prefix="dais-bin-"); self.addCleanup(shutil.rmtree, b, ignore_errors=True)
+        os.symlink(sys.executable, os.path.join(b, "python3"))
+        for t in ("sqlite3", "git"):
+            os.symlink(shutil.which(t), os.path.join(b, t))
+        with open(os.path.join(b, "opencode"), "w") as f:
+            f.write("#!/bin/bash\n" + fake)
+        os.chmod(os.path.join(b, "opencode"), 0o755)
+        self._set_role(role, "provider: opencode\n" + fm)
+        r = self._run_agent(role, env={"PATH": "%s:/usr/bin:/bin" % b})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return open(argv).read().split("\n")
+
+    def test_opencode_review_role_runs_the_plan_agent_with_permissions_skipped(self):
+        args = self._opencode_argv("model: anthropic/claude-sonnet-5\neffort: high\n")
+        self.assertEqual(args[0], "run")
+        self.assertIn("--format", args); self.assertEqual(args[args.index("--format") + 1], "json")
+        self.assertEqual(args[args.index("-m") + 1], "anthropic/claude-sonnet-5")
+        self.assertEqual(args[args.index("--variant") + 1], "high")
+        self.assertEqual(args[args.index("--agent") + 1], "plan")           # review: the read-only agent
+        self.assertIn("--dangerously-skip-permissions", args)               # headless: never a prompt to hang on
+        self.assertIn("--dir", args)
+        row = q(self.root, "SELECT status, provider, input_tokens FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row), ("succeeded", "opencode", 100))
+
+    def test_opencode_edit_role_uses_the_default_build_agent(self):
+        args = self._opencode_argv("", role="engineer")
+        self.assertNotIn("--agent", args)
+        self.assertIn("--dangerously-skip-permissions", args)
+
     # --- 5.2: codex against any OpenAI-compatible endpoint; a proxy base URL for claude -----------
     def _codex_argv(self, fm):
         argv = os.path.join(self.root, "codex-argv")
