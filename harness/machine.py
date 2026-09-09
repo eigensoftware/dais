@@ -596,14 +596,14 @@ def task_row(conn, tid):
     like attest_fact/prompts_for see the same columns enforcement sees).
     touches_migrations (0005) and parked_from (0004) arrive by migration — degrade gracefully on an
     unmigrated db by peeling the newest columns off the SELECT until one succeeds."""
-    for cols in ("id,project,status,title,assignee,parked_from,touches_migrations",
-                 "id,project,status,title,assignee,parked_from",
-                 "id,project,status,title,assignee"):
-        try:
-            return conn.execute(f"SELECT {cols} FROM tasks WHERE id=?", (tid,)).fetchone()
-        except sqlite3.OperationalError:
-            continue
-    return None
+    wanted = ("id", "project", "status", "title", "assignee", "parked_from", "touches_migrations",
+              "pr_url", "check_results")
+    try:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+    except sqlite3.OperationalError:
+        return None
+    cols = [c for c in wanted if c in have]          # whatever this db's migrations provide
+    return conn.execute(f"SELECT {','.join(cols)} FROM tasks WHERE id=?", (tid,)).fetchone()
 
 
 def _prefix_candidates(name):
@@ -720,6 +720,62 @@ def _run_check(m, check, task):
         return False
 
 
+# --- recorded check results (plan 2.7; migration 0012). `dais check` runs the machine's
+# declared checks.<name> in a worktree of the task's PR branch and records the outcome here;
+# a verify:<name> guard honors a FRESH record for the SAME PR before re-running anything. ---
+CHECK_FRESH_HOURS = 24
+
+
+def record_check(conn, tid, name, ok, pr_url=None):
+    import json
+    row = conn.execute("SELECT check_results FROM tasks WHERE id=?", (tid,)).fetchone()
+    try:
+        rec = json.loads(row[0]) if row and row[0] else {}
+    except (ValueError, TypeError):
+        rec = {}
+    rec[name] = {"ok": 1 if ok else 0, "at": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+                 "pr": pr_url or None, "by": "dais check"}
+    conn.execute("UPDATE tasks SET check_results=? WHERE id=?", (json.dumps(rec), tid))
+    conn.commit()
+    return rec[name]
+
+
+def check_result(task, name, now=None):
+    """The recorded result for `name` on this task row if it is FRESH (< CHECK_FRESH_HOURS) and
+    for the task's CURRENT pr_url; else None. A record for another PR, or a stale one, is not
+    evidence about the branch as it is now."""
+    import json
+    if task is None or "check_results" not in task.keys() or not task["check_results"]:
+        return None
+    try:
+        rec = (json.loads(task["check_results"]) or {}).get(name)
+    except (ValueError, TypeError):
+        return None
+    if not rec:
+        return None
+    pr_now = task["pr_url"] if "pr_url" in task.keys() else None
+    if (rec.get("pr") or None) != (pr_now or None):
+        return None
+    try:
+        at = time.mktime(time.strptime(rec.get("at", ""), "%Y-%m-%d %H:%M:%S"))
+        now_t = now if now is not None else time.mktime(time.gmtime())
+    except (ValueError, TypeError):
+        return None
+    if now_t - at > CHECK_FRESH_HOURS * 3600:
+        return None
+    return rec
+
+
+def default_check_for(m, state):
+    """The check a task in `state` would be verified against: the first verify:<check> guard on
+    that state's outgoing edges ('' if none) — what `dais check <task>` runs by default."""
+    for e in edges_from(m, state):
+        for g in e.get("guards", []):
+            if g.startswith("verify:"):
+                return g[len("verify:"):]
+    return ""
+
+
 def attest_fact(guard, task):
     """The ONE reading of an `attest:<fact>[ when task:<flag>]` guard, shared by the engine
     (which enforces it) and the panel (which decides whether to PROMPT for it) — a second
@@ -796,10 +852,15 @@ def _check_guards(conn, m, edge, task, ctx):
             # machine's declared checker command runs; a check with neither fails closed.
             check = g[len("verify:"):]
             v = (ctx.get("verifiers") or {}).get(check)
+            if v is None:                            # a fresh `dais check` record for this PR (2.7)
+                rec = check_result(task, check)
+                if rec is not None:
+                    v = bool(rec.get("ok"))
             if v is None:
                 v = _run_check(m, check, task)
             if not v:
-                raise GuardFailure(f"guard `verify:{check}` unmet (checker returned false/absent)")
+                raise GuardFailure(f"guard `verify:{check}` unmet (no fresh `dais check` record, "
+                                   f"checker returned false/absent, no --verify)")
         elif g.startswith("role:"):
             if task["assignee"] != g[len("role:"):]:
                 raise GuardFailure(f"guard `role:` unmet")
@@ -1204,6 +1265,18 @@ def _main(argv):
         for tid, verb in yolo_sweep(conn, load(argv[2]), argv[3], veto):
             print(f"{tid}:{verb}")
         return 0
+    if cmd == "check-name":            # check-name <machine> <state> -> the state's default check
+        print(default_check_for(load(argv[1]), argv[2])); return 0
+    if cmd == "check-cmd":             # check-cmd <machine> <name> -> the declared command ('' = none)
+        print((load(argv[1]).get("checks") or {}).get(argv[2], "")); return 0
+    if cmd == "record-check":          # record-check <db> <task> <name> <0|1> [<pr>]
+        conn = open_db(argv[1])
+        try:
+            r = record_check(conn, argv[2], argv[3], argv[4] == "1", argv[5] if len(argv) > 5 else None)
+        except sqlite3.OperationalError:
+            print("record-check: this db has no check_results column — run `dais migrate`", file=sys.stderr)
+            return 1
+        print("%s %s at %s" % (argv[3], "passed" if r["ok"] else "FAILED", r["at"])); return 0
     if cmd == "lint":
         errors, warns = lint(load(argv[1]))
         for w in warns:

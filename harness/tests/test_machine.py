@@ -301,6 +301,49 @@ class TestAssigneeStamp(unittest.TestCase):
     def _row(self, tid):
         return self.conn.execute("SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()
 
+    def _verify_machine(self, cmd=None):
+        m = {"name": "v", "entry": "qa_review",
+             "roles": {"founder": {"human": True}, "qa": {"access": "review"}},
+             "states": {"qa_review": {"initial": True}, "approved": {"terminal": True}},
+             "edges": [{"from": "qa_review", "to": "approved", "by": "qa", "verb": "pass",
+                        "guards": ["verify:tests_pass"]}]}
+        if cmd is not None:
+            m["checks"] = {"tests_pass": cmd}
+        c = _db()
+        c.executescript("ALTER TABLE tasks ADD COLUMN pr_url TEXT; ALTER TABLE tasks ADD COLUMN check_results TEXT;")
+        t = M.create_task(c, m, "proj", "x", "qa_review")
+        c.execute("UPDATE tasks SET pr_url='https://x/pull/7' WHERE id=?", (t,)); c.commit()
+        return m, c, t
+
+    def test_recorded_check_result_satisfies_verify(self):
+        # plan 2.7: `dais check` ran the suite for this PR and recorded it — the guard honors
+        # that without a --verify self-assertion and without re-running anything
+        m, c, t = self._verify_machine()                     # no checks command declared
+        M.record_check(c, t, "tests_pass", True, "https://x/pull/7")
+        self.assertEqual(M.check_result(M.task_row(c, t), "tests_pass")["ok"], 1)
+        self.assertEqual(M.fire(c, m, t, "pass", "qa")["to"], "approved")
+
+    def test_recorded_failure_or_other_pr_does_not_satisfy_verify(self):
+        m, c, t = self._verify_machine()
+        M.record_check(c, t, "tests_pass", False, "https://x/pull/7")
+        with self.assertRaises(M.GuardFailure):
+            M.fire(c, m, t, "pass", "qa")
+        M.record_check(c, t, "tests_pass", True, "https://x/pull/6")   # a different PR
+        with self.assertRaises(M.GuardFailure):
+            M.fire(c, m, t, "pass", "qa")
+        c.execute("UPDATE tasks SET check_results=? WHERE id=?",          # stale (2 days old)
+                  ('{"tests_pass": {"ok": 1, "at": "2026-01-01 00:00:00", "pr": "https://x/pull/7"}}', t))
+        c.commit()
+        with self.assertRaises(M.GuardFailure):
+            M.fire(c, m, t, "pass", "qa")
+        self.assertEqual(M.fire(c, m, t, "pass", "qa", {"verifiers": {"tests_pass": True}})["to"],
+                         "approved")                             # the self-assertion still works
+
+    def test_recorded_result_wins_over_rerunning_the_command(self):
+        m, c, t = self._verify_machine("false")              # the command would fail
+        M.record_check(c, t, "tests_pass", True, "https://x/pull/7")
+        self.assertEqual(M.fire(c, m, t, "pass", "qa")["to"], "approved")
+
     def _gated(self, cmd):
         # a two-state machine whose qa_review dispatch waits on checks.ci (plan 2.6)
         m = {"name": "g", "entry": "qa_review",

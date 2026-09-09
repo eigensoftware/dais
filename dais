@@ -34,6 +34,7 @@ dais — your agent company control panel
   dais run <project> <agent>          run a specific agent now (headless claude)
   dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify; --notes rides along)
   dais edges <task-id>                the fireable edges from a task's current state
+  dais check <task-id> [<check>] [--branch B]   run the machine's declared check in a worktree of the task's PR branch; record it (verify: honors it)
   dais logs <project> [N]             recent runs (+ tokens · cost once the ledger is on)
   dais cost [project] [--since 7d] [--by project|role|task]   the run ledger: tokens (and dollars where reported) per project, role, or task
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md
@@ -175,6 +176,7 @@ MD
         has_blocked_on && cols="$cols, blocked_on"
         [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='touches_migrations';" 2>/dev/null)" ] && cols="$cols, touches_migrations"
         [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='budget_lifted_at';" 2>/dev/null)" ] && cols="$cols, budget_lifted_at"
+        [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='check_results';" 2>/dev/null)" ] && cols="$cols, check_results"
         db -line "SELECT $cols FROM tasks WHERE id='$(sqlesc "$id")';"
         links="$(db "SELECT rel || ' -> ' || child_id FROM task_links WHERE parent_id='$(sqlesc "$id")'
                      UNION ALL SELECT rel || ' <- ' || parent_id FROM task_links WHERE child_id='$(sqlesc "$id")';" 2>/dev/null)"
@@ -504,6 +506,48 @@ effort: <optional low|medium|high, or blank>
     actor="${DAIS_ACTOR:-founder}"
     args=(); while [ $# -gt 0 ]; do case "$1" in --by) actor="$2"; shift 2;; *) args+=("$1"); shift;; esac; done
     exec python3 "$DAIS_ROOT/harness/machine.py" fire "$DB" "$MP" "$id" "$verb" "$actor" "${args[@]+"${args[@]}"}" ;;
+
+  check)
+    # dais check <task> [<check>] [--branch B] — run the machine's declared checks.<check> command
+    # in a THROWAWAY worktree of the task's PR branch and record the result on the task (plan
+    # 2.7). A verify:<check> guard then honors the fresh record: a deterministic test run costs
+    # zero tokens and makes QA's attestation real. Default check = the first verify: guard on
+    # the task's state. Branch: --branch, else the PR's head via `gh pr view`.
+    id="${1:?usage: dais check <task-id> [<check>] [--branch <branch>]}"; shift
+    name=""; branch=""
+    while [ $# -gt 0 ]; do case "$1" in
+      --branch) branch="$2"; shift 2;;
+      --*) echo "check: unknown flag: $1"; exit 1;;
+      *) name="$1"; shift;; esac; done
+    row="$(db -separator '|' "SELECT project, status, COALESCE(pr_url,'') FROM tasks WHERE id='$(sqlesc "$id")';")"
+    [ -n "$row" ] || { echo "no task: $id"; exit 1; }
+    proj="${row%%|*}"; rest="${row#*|}"; st="${rest%%|*}"; pr="${rest#*|}"
+    MP="$(machine_path "$proj")"; [ -n "$MP" ] || { echo "check: project '$proj' has no machine"; exit 1; }
+    [ -n "$name" ] || name="$(python3 "$DAIS_ROOT/harness/machine.py" check-name "$MP" "$st")"
+    [ -n "$name" ] || { echo "check: no verify: guard leaves state '$st' — name the check: dais check $id <check>"; exit 1; }
+    cmd="$(python3 "$DAIS_ROOT/harness/machine.py" check-cmd "$MP" "$name")"
+    [ -n "$cmd" ] || { echo "check: the machine declares no checks.$name command (add one to $MP)"; exit 1; }
+    repo="$(repo_path "$proj")"; [ -d "$repo" ] || { echo "check: repo not found: $repo"; exit 1; }
+    if [ -z "$branch" ]; then
+      [ -n "$pr" ] || { echo "check: $id has no PR and no --branch given"; exit 1; }
+      need gh "install GitHub's gh CLI, or pass --branch <branch>"
+      branch="$(gh pr view "$pr" --json headRefName -q .headRefName 2>/dev/null)"
+      [ -n "$branch" ] || { echo "check: could not resolve the head branch of $pr (gh pr view) — pass --branch"; exit 1; }
+    fi
+    git -C "$repo" fetch -q origin 2>/dev/null || true
+    ref="origin/$branch"; git -C "$repo" rev-parse --verify --quiet "$ref" >/dev/null 2>&1 || ref="$branch"
+    wt="$repo/.worktrees/check-$id"
+    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    git -C "$repo" worktree add --detach --force "$wt" "$ref" >/dev/null 2>&1 \
+      || { echo "check: could not check out '$branch' ($ref) into a worktree"; exit 1; }
+    echo "▶ $name on $id ($branch @ $(git -C "$wt" rev-parse --short HEAD)): $cmd"
+    ( cd "$wt" && DAIS_TASK="$id" DAIS_PROJECT="$proj" DAIS_PR="$pr" bash -c "$cmd" ); rc=$?
+    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1; git -C "$repo" worktree prune >/dev/null 2>&1
+    ok=0; [ "$rc" -eq 0 ] && ok=1
+    python3 "$DAIS_ROOT/harness/machine.py" record-check "$DB" "$id" "$name" "$ok" "$pr" >/dev/null || exit 1
+    if [ "$ok" = 1 ]; then echo "  ${CG}✓ $name passed on $branch — recorded on $id (verify:$name is satisfied for this PR for 24h)${C0}"
+    else echo "  ${CR}✗ $name FAILED on $branch (exit $rc) — recorded on $id; verify:$name will refuse until it passes${C0}"; fi
+    exit $rc ;;
 
   edges)
     # discovery: the fireable edges from a task's current state (for agents + the founder)

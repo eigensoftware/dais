@@ -86,7 +86,7 @@ machine's `roles` declaration order (declaration order = precedence).
 | `confirm` | a click | weak; an auto-approver can satisfy it |
 | `typed_confirm` | a human typing a phrase | **strong human** |
 | `attest:<fact>` | a human asserting an unverifiable fact | **strong human**; optional conditional `attest:<fact> when task:<flag>` — required unless the task's `<flag>` column is explicitly false (NULL/unknown still requires it) |
-| `verify:<check>` | an automatic check (tests, CI, no-conflict, brand_voice) | the machine's `checks.<check>` command runs on fire; absent that, only an explicit `--verify` self-assertion by the firing role passes it (fails closed) |
+| `verify:<check>` | an automatic check (tests, CI, no-conflict, brand_voice) | a fresh (< 24h) `dais check` record for the task's CURRENT pr_url is honored first (`tasks.check_results`, 0012); else the machine's `checks.<check>` command runs on fire; absent that, only an explicit `--verify` self-assertion by the firing role passes it (fails closed) |
 | `role:<r>` | actor authorization | |
 | `note` | `--notes "..."` on the fire | the edge CARRIES information (an answer, a change request): the note is appended to the task's log atomically with the transition, before effects — so a spawn's notes-inheritance carries it. `--notes` also rides any unguarded edge optionally |
 

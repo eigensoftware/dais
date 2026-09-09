@@ -150,7 +150,7 @@ why. A repo with no CI still dispatches. Any state can carry a `dispatch_when`
 | `confirm` | a click (`--confirm`), weak |
 | `typed_confirm` | a human typing the task id, **strong human** |
 | `attest:<fact>` | a human asserting an unverifiable fact, **strong human**. Conditional form `attest:<fact> when task:<flag>` is required unless the task's flag is explicitly false (fail-safe: unknown still gates) |
-| `verify:<check>` | the machine's declared `checks.<check>` command passing (or the firing role's explicit `--verify` self-assertion); fails closed |
+| `verify:<check>` | a fresh `dais check` record for the task's PR, else the machine's declared `checks.<check>` command passing, else the firing role's explicit `--verify` self-assertion; fails closed |
 
 **Yolo mode** is the gates' dial turned to zero, deliberately: `dais yolo <project> on
 [--for 48h] [--veto 30m]` makes the dispatcher auto-fire the founder gates the machine
@@ -413,6 +413,7 @@ not keep it.
 | `dais task add/set …` | manage the board (new tasks enter at the machine's entry state) |
 | `dais fire <id> <verb>` | advance a task by firing a machine edge (guards: `--confirm` / `--typed` / `--attest` / `--verify`) |
 | `dais edges <id>` | the fireable edges from a task's current state |
+| `dais check <id> [<check>] [--branch B]` | run the machine's declared check in a throwaway worktree of the task's PR branch and record the result; `verify:<check>` honors it for 24h (zero tokens, real attestation) |
 | `dais start <id>` | run the role the machine dispatches for this task's state, now (bypasses pause) |
 | `dais watch [secs] [N]` | run the loop (N = parallel agents) |
 | `dais pause` / `dais resume` | park / un-park the loop |

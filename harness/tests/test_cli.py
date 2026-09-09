@@ -460,6 +460,64 @@ class TestSpendLimits(CliTest):
         self.assertIn("budget", r.stdout.lower())
 
 
+class TestDaisCheck(CliTest):
+    """`dais check <task> [<check>] [--branch B]` (plan 2.7): runs the machine's declared check in
+    a throwaway worktree of the PR branch, records the result on the task, cleans up."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        self.repo_base = tempfile.mkdtemp(prefix="dais-repos-")
+        self.addCleanup(shutil.rmtree, self.repo_base, ignore_errors=True)
+        repo = os.path.join(self.repo_base, "demo")
+        os.makedirs(repo)
+        g = lambda *a: subprocess.run(["git", "-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                                      capture_output=True, text=True, check=True)
+        g("init", "-q", "-b", "main")
+        open(os.path.join(repo, "README.md"), "w").write("main\n"); g("add", "."); g("commit", "-qm", "init")
+        g("checkout", "-qb", "feature")
+        open(os.path.join(repo, "README.md"), "w").write("hello from the feature branch\n")
+        g("commit", "-qam", "feature"); g("checkout", "-q", "main")
+        self.repo = repo
+        # declare the check in the project's own machine copy
+        mp = os.path.join(self.root, "projects", "demo", "machine.json")
+        m = json.load(open(mp)); m.setdefault("checks", {})["tests_pass"] = "grep -q hello README.md"
+        json.dump(m, open(mp, "w"))
+        dais(self.root, "task", "add", "demo", "review me", "--id", "d-1", "--status", "qa_review")
+        dais(self.root, "task", "set", "d-1", "--pr", "https://x/pull/7")
+        self.env = {"DAIS_AGENT_REPOS": self.repo_base}
+
+    def test_check_runs_in_a_worktree_of_the_branch_and_records_the_result(self):
+        r = dais(self.root, "check", "d-1", "tests_pass", "--branch", "feature", env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("✓", r.stdout)
+        rec = json.loads(q(self.root, "SELECT check_results FROM tasks WHERE id='d-1'")[0])
+        self.assertEqual((rec["tests_pass"]["ok"], rec["tests_pass"]["pr"]), (1, "https://x/pull/7"))
+        self.assertFalse(os.path.exists(os.path.join(self.repo, ".worktrees", "check-d-1")))   # cleaned up
+        # the guard now passes with no --verify self-assertion
+        r = dais(self.root, "fire", "d-1", "pass", "--by", "qa")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_failing_check_is_recorded_as_such_and_exits_nonzero(self):
+        r = dais(self.root, "check", "d-1", "tests_pass", "--branch", "main", env=self.env)   # main has no 'hello'
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("✗", r.stdout + r.stderr)
+        rec = json.loads(q(self.root, "SELECT check_results FROM tasks WHERE id='d-1'")[0])
+        self.assertEqual(rec["tests_pass"]["ok"], 0)
+        r = dais(self.root, "fire", "d-1", "pass", "--by", "qa")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_check_defaults_to_the_states_verify_guard(self):
+        r = dais(self.root, "check", "d-1", "--branch", "feature", env=self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("tests_pass", r.stdout)
+
+    def test_undeclared_check_is_an_error(self):
+        r = dais(self.root, "check", "d-1", "nope", "--branch", "feature", env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("nope", r.stdout + r.stderr)
+
+
 class TestStateEnteredAt(CliTest):
     """Plan 2.3: metadata edits must not reset a gate's age."""
 
