@@ -82,6 +82,7 @@ def lint(m):
     _lint_e5_duplicate_edges(edges, errors)
     _lint_e6_yolo_strong_guard(edges, errors)
     _lint_e7_then_needs_system_edge(edges, errors)
+    _lint_e8_bounce(states, edges, errors, warns)
     _lint_w1_reachability(states, edges, out, warns)
     _lint_w2_terminal_reach(states, edges, warns)
     _lint_w3_unguarded_outward(states, edges, warns)
@@ -174,8 +175,13 @@ def _lint_w1_reachability(states, edges, out, warns):
     stack = list(seen)
     while stack:
         for e in out.get(stack.pop(), []):
-            if e["to"] in states and e["to"] not in seen:
-                seen.add(e["to"]); stack.append(e["to"])
+            # an edge reaches its `to` — and, on its bounce limit, its bounce.to (plan 2.5)
+            targets = [e.get("to")]
+            if isinstance(e.get("bounce"), dict):
+                targets.append(e["bounce"].get("to"))
+            for t in targets:
+                if t in states and t not in seen:
+                    seen.add(t); stack.append(t)
     for s in states:
         if s not in seen:
             warns.append(f"W1 unreachable: {s!r} not reachable from an initial state or a spawn")
@@ -231,6 +237,28 @@ def _lint_e7_then_needs_system_edge(edges, errors):
             errors.append(f"E7 {e.get('from')}--{e.get('verb')}-->{e.get('to')}: then effect "
                           f"{frm}->{to} needs a system-owned edge {frm}--…-->{to} (the nested fire "
                           f"runs as 'system'; without it the whole fire rolls back)")
+
+
+def _lint_e8_bounce(states, edges, errors, warns):
+    """E8: a `bounce` attribute needs a positive `after` and a real `to` state; W5 warns when
+    that state parks nowhere a human acts (the point of a bounce is to reach the founder)."""
+    for e in edges:
+        b = e.get("bounce")
+        if b is None:
+            continue
+        tag = f"{e.get('from')}--{e.get('verb')}-->{e.get('to')}"
+        if not isinstance(b, dict) or b.get("to") not in states:
+            errors.append(f"E8 {tag}: bounce.to {(b or {}).get('to') if isinstance(b, dict) else b!r} is not a state")
+            continue
+        try:
+            ok = int(b.get("after")) > 0
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            errors.append(f"E8 {tag}: bounce.after must be a positive integer (got {b.get('after')!r})")
+        if not any(x.get("from") == b["to"] and x.get("by") == "founder" for x in edges):
+            warns.append(f"W5 {tag}: bounce.to {b['to']!r} has no founder edge — the escalation parks "
+                         f"where nobody acts")
 
 
 def _lint_w4_yolo_outward(edges, warns):
@@ -770,6 +798,16 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         if to == "@history":
             parked = task["parked_from"] if "parked_from" in task.keys() else None
             to = parked if parked in (m or {}).get("states", {}) else edge.get("default", "ready")
+        # bounce limit (plan 2.5): `"bounce": {"after": N, "to": <state>}` on an edge — the
+        # (N+1)th fire of this verb on ONE task lands in bounce.to instead, with no effects
+        # (no phantom fix spawned) and a system note. "A task bounced QA<->engineer twice goes
+        # to the founder" used to be a prompt rule; now the machine keeps it.
+        bounced = False
+        b = edge.get("bounce")
+        if isinstance(b, dict) and b.get("to") in (m or {}).get("states", {}):
+            prior = _fires_of(conn, tid, verb)
+            if prior >= int(b.get("after") or 0) > 0:
+                to, bounced = b["to"], True
         cas = conn.execute("UPDATE tasks SET status=?, updated_at=datetime('now') "
                            "WHERE id=? AND status=?", (to, tid, task["status"]))
         if cas.rowcount != 1:                       # someone else moved it between read and write
@@ -804,7 +842,12 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         if (ctx.get("notes") or "").strip():
             _append_note(conn, tid, actor, ctx["notes"].strip())
         result = {"task": tid, "from": task["status"], "to": to, "verb": verb, "spawned": [], "encompassed": []}
-        _apply_effect(conn, m, task, edge, result, ctx)
+        if bounced:
+            _append_note(conn, tid, "system",
+                         "bounce limit: '%s' fired %d times on this task — escalated to %s instead of %s "
+                         "(the edge's effects were skipped)" % (verb, prior + 1, to, edge["to"]))
+        else:
+            _apply_effect(conn, m, task, edge, result, ctx)
     except BaseException:
         if top:
             conn.execute("ROLLBACK TO SAVEPOINT dais_fire")
@@ -840,6 +883,16 @@ def _append_note(conn, tid, actor, text):
         # unlike spawn's inheritance (best-effort), a note given with a fire is founder input —
         # losing it silently is worse than blocking, so fail LOUD (rolls the whole fire back).
         raise GuardFailure("this db has no notes column — run `dais migrate`, then re-fire")
+
+
+def _fires_of(conn, tid, verb):
+    """How many times `verb` has already been fired on this task (run_tasks, the attributed
+    trail agents write under a run). A db without run_tasks counts 0 — no limit enforced."""
+    try:
+        return conn.execute("SELECT COUNT(*) FROM run_tasks WHERE task_id=? AND verb=?",
+                            (tid, verb)).fetchone()[0]
+    except sqlite3.Error:
+        return 0
 
 
 def _link_run(conn, tid, verb):

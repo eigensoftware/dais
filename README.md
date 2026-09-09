@@ -126,8 +126,10 @@ release_open ──assemble──▶ release_review ──greenlight ◆──�
 ```
 
 Plus founder parking (`defer` / `undefer` returns a task to where it was parked from), an
-engineer self-retire edge (`invalidate`), and a rollback lane (`release_error` spawns a fix,
-founder `retry`s or `give_up`s).
+engineer self-retire edge (`invalidate`), a rollback lane (`release_error` spawns a fix,
+founder `retry`s or `give_up`s), and a **bounce limit** on QA's `fail`: the third fail on one
+task lands in `escalated` (NEEDS YOU: `resume` with your direction in the note, or `cancel`)
+instead of spawning yet another fix. The machine enforces it, not a prompt.
 
 Why `promote` is safe where it is, and the rule if you author your own edges: it is
 **inward-only**. Everything the routine lane feeds still passes QA and still cannot ship

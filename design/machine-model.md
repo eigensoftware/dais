@@ -105,6 +105,14 @@ protection mechanism; danger is declared per-edge, not coded per-action.
   does the action per the repo's own docs, then fires the edge.
 - `then: "encompassed:<state>-><state>"` — fire an edge on related tasks.
 
+Edges may also carry `"bounce": {"after": N, "to": <state>}` — a **bounce limit**: the
+(N+1)th fire of that edge's verb on ONE task (counted from the attributed `run_tasks` trail)
+lands in `bounce.to` instead of `to`, skips the edge's effects (no phantom fix task), and
+appends a system note. The stock coding machine puts `after: 2` on QA's `fail`, landing in
+`escalated` (founder `resume` with a note, or `cancel`) — "a task bounced QA↔engineer twice
+goes to the founder" enforced by the machine, not by a prompt. Lint E8 checks the target and
+the count; W5 warns when the target has no founder edge.
+
 Edges may also carry `"yolo": true`: an authored opt-in marking this edge as the
 default action under yolo mode (`dais yolo <project> on`), where the dispatcher
 auto-fires it as the human actor. Only permission guards survive automation:
@@ -120,10 +128,13 @@ everything policy/safety-flavored is a warning you can wave off. (Implemented as
 
 **Errors (block):** E1 referential integrity · E2 no dead-end (every
 non-terminal has an out-edge) · E3 unambiguous dispatch · E4 has an initial and
-a terminal (and a valid `entry`) · E5 no duplicate (from, verb) edge.
+a terminal (and a valid `entry`) · E5 no duplicate (from, verb) edge · E6 no yolo
+tag on a strong-human/verify guard · E7 a `then` effect has a system-owned target
+edge · E8 a `bounce` has a positive `after` and a real `to`.
 
 **Warnings (advisory):** W1 unreachable-from-initial · W2 can't-reach-terminal ·
-W3 outward effect with no strong-human guard on it or its approach.
+W3 outward effect with no strong-human guard on it or its approach · W4 a yolo'd
+outward edge · W5 a bounce target with no founder edge.
 
 Green errors ⇒ build whatever shape you want.
 

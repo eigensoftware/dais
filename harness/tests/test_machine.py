@@ -301,6 +301,44 @@ class TestAssigneeStamp(unittest.TestCase):
     def _row(self, tid):
         return self.conn.execute("SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()
 
+    def test_bounce_limit_escalates_the_third_fail_without_a_spawn(self):
+        # plan 2.5: "a task bounced QA<->engineer twice goes to the founder" lived in a prompt.
+        # As an edge attribute the machine enforces it: the (after+1)th fire of this verb on
+        # one task lands in bounce.to, skips the edge's effects, and leaves a system note.
+        m = M.load(CODING)                                   # stock coding: fail has bounce after 2
+        c = _db()
+        c.executescript("ALTER TABLE tasks ADD COLUMN notes TEXT;"
+                        "CREATE TABLE run_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER,"
+                        " task_id TEXT, verb TEXT, at TEXT DEFAULT (datetime('now')));")
+        old = os.environ.get("DAIS_RUN_ID"); os.environ["DAIS_RUN_ID"] = "7"
+        self.addCleanup(lambda: os.environ.__setitem__("DAIS_RUN_ID", old) if old else os.environ.pop("DAIS_RUN_ID", None))
+        t = M.create_task(c, m, "proj", "flaky", "qa_review")
+        for n in (1, 2):
+            r = M.fire(c, m, t, "fail", "qa")
+            self.assertEqual((r["to"], len(r["spawned"])), ("blocked", 1))
+            fix = r["spawned"][0]["id"]
+            c.execute("UPDATE tasks SET status='done' WHERE id=?", (fix,)); c.commit()
+            M.advance_unblocked(c, m, "proj")                # blocked -> qa_review
+            self.assertEqual(_status(c, t), "qa_review")
+        r = M.fire(c, m, t, "fail", "qa")                    # the third: escalate, no fix spawned
+        self.assertEqual((r["to"], r["spawned"]), ("escalated", []))
+        self.assertEqual(_status(c, t), "escalated")
+        notes = c.execute("SELECT notes FROM tasks WHERE id=?", (t,)).fetchone()[0]
+        self.assertIn("bounce limit", notes)
+        self.assertEqual(M.band_of(m, "escalated"), "NEEDS YOU")
+        self.assertEqual(M.fire(c, m, t, "resume", "founder", {"notes": "try X"})["to"], "ready")
+
+    def test_bounce_lint(self):
+        m = M.load(CODING)
+        self.assertEqual(M.lint(m)[0], [])
+        fail = next(e for e in m["edges"] if e["verb"] == "fail")
+        fail["bounce"] = {"after": 2, "to": "nowhere"}
+        errs, _ = M.lint(m)
+        self.assertTrue(any("E8" in e and "nowhere" in e for e in errs), errs)
+        fail["bounce"] = {"after": 0, "to": "escalated"}
+        errs, _ = M.lint(m)
+        self.assertTrue(any("E8" in e for e in errs), errs)
+
     def test_then_effect_prefers_the_system_edge_and_lint_demands_one(self):
         # bug 9 (plan 2.4): `then: encompassed:approved->done` matched the FIRST edge with that
         # from/to regardless of owner; with a founder edge listed first the nested fire ran as
