@@ -236,9 +236,29 @@ STAGE_GOAL="$(pcfg "$PROJECT" stage_goal)"
 # Workspace context: company-wide rules + founder decisions that apply to EVERY project. Injected
 # (by reference, like the project line) ahead of the project context so agents honor it every run.
 # Empty when the workspace has no CONTEXT.md, so single-project / bare workspaces are unaffected.
+# Plan 3.1: the deterministic first turns are INLINED. Every run used to spend its first three
+# turns on `task show` + two Read calls for files the harness already had in hand — three round
+# trips, and the bodies landed as tool results instead of in the cached prompt prefix. Capped
+# at 24KB per file (the reader's own cap; a bloated CONTEXT silently lost its bottom half
+# anyway — lint and doctor warn).
+CTX_CAP=24000
+ctx_block(){   # $1 = path -> the file's body, capped, with a loud marker when cut
+  [ -f "$1" ] || return 0
+  local size; size="$(wc -c < "$1" | tr -d ' ')"
+  if [ "$size" -gt "$CTX_CAP" ]; then
+    head -c "$CTX_CAP" "$1"
+    printf '\n[…truncated: %s is %dKB; only the first 24KB are inlined — keep it under 24KB (dais lint / dais doctor warn)]\n' "$1" $((size / 1000))
+  else
+    cat "$1"
+  fi
+}
 WS_CONTEXT=""
-[ -f "$DAIS_HOME/CONTEXT.md" ] && WS_CONTEXT="Workspace context: FIRST read $DAIS_HOME/CONTEXT.md — company-wide rules and founder decisions that apply to EVERY project (honor them). THEN read the project's $PDIR/CONTEXT.md.
+[ -f "$DAIS_HOME/CONTEXT.md" ] && WS_CONTEXT="Workspace context: $DAIS_HOME/CONTEXT.md — company-wide rules and founder decisions that apply to EVERY project (honor them), inlined here so you need not read it:
+$(ctx_block "$DAIS_HOME/CONTEXT.md")
 
+"
+PROJ_CONTEXT="Project context + memory: $PDIR/CONTEXT.md — the goal, targets/metrics, founder decisions (honor them), and hard-won gotchas, inlined here so you need not read it:
+$(ctx_block "$PDIR/CONTEXT.md")
 "
 # Working conventions (playbook): the craft-specific "how work is done here", bound at the ROLE
 # level so one harness runs many domains. PB/PB_FILE are resolved above via router.agent_setup
@@ -278,7 +298,10 @@ Do the work your role owns for the task's current state, then fire the edge that
 # The dispatcher pinned a specific task to this run (see TASK_ID above) — name it in the prompt so
 # the agent starts there instead of re-scanning the queue. Empty when nothing was pinned.
 DISPATCH_NOTE=""
-[ -n "$TASK_ID" ] && DISPATCH_NOTE="You were dispatched for task **$TASK_ID** — start there: read it first with '$DAIS_ROOT/dais task show $TASK_ID'. Work a different task only if $TASK_ID turns out not to be yours to act on right now.
+[ -n "$TASK_ID" ] && DISPATCH_NOTE="You were dispatched for task **$TASK_ID** — start there. Its full record (fields, links, the notes log) as of launch, so you need not run 'dais task show $TASK_ID' first:
+$(NO_COLOR=1 "$DAIS_ROOT/dais" task show "$TASK_ID" 2>/dev/null)
+
+Work a different task only if $TASK_ID turns out not to be yours to act on right now.
 
 "
 
@@ -286,7 +309,7 @@ STANDING="You are running headless as the **$AGENT** for the '$PROJECT' project.
 
 Stage goal: $STAGE_GOAL
 
-${WS_CONTEXT}Project context + memory: FIRST read $PDIR/CONTEXT.md — the goal, targets/metrics, founder decisions (honor them), and hard-won gotchas. If you discover something durable this run (a decision, a gotcha, a recurring fix), record it with: $DAIS_ROOT/dais learn $PROJECT \"one concise line\" — it is queued for the founder's review before it reaches CONTEXT.md, so state it as a fact you verified, not an instruction.
+${WS_CONTEXT}${PROJ_CONTEXT}If you discover something durable this run (a decision, a gotcha, a recurring fix), record it with: $DAIS_ROOT/dais learn $PROJECT \"one concise line\" — it is queued for the founder's review before it reaches CONTEXT.md, so state it as a fact you verified, not an instruction.
 
 ${MACHINE_COORD}Coordination runs through the dais CLI (at $DAIS_ROOT/dais) backed by a shared SQLite db — that is the single source of truth for what to work on and how to hand off:
   - Your queue:        $DAIS_ROOT/dais tasks $PROJECT --assignee $AGENT

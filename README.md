@@ -316,6 +316,15 @@ runs the CLI as already logged in, nothing to configure.
   The sandbox plus the persona plus the machine's guards are the guard. If structurally
   read-only reviewers matter to you, keep those roles on `anthropic`.
 
+## The prompt carries the context; the agent starts on the work
+
+Every run used to open with the same three round trips: `dais task show` on its task, then a
+Read of the workspace CONTEXT.md, then a Read of the project's. The harness already had all
+three in hand, so it now inlines them into the prompt (the cached prefix): the pinned task's
+full record as of launch, and both CONTEXT files, each capped at 24KB with a loud truncation
+marker (`dais lint` and `dais doctor` warn on an oversized one). Agents still run
+`dais task show` for any OTHER task they touch.
+
 ## The agent profile: what a run inherits from your Claude Code
 
 A `claude -p` run inherits your WHOLE Claude Code install by default: every plugin's skills,

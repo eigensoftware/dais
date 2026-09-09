@@ -1596,6 +1596,46 @@ class TestWorkspaceContextInjection(CliTest):
         self.assertLess(r.stdout.index("Workspace context:"),
                         r.stdout.index("Project context"))
 
+    # --- plan 3.1: the deterministic first turns are INLINED into the cached prompt prefix ----
+    def test_context_bodies_are_inlined_not_pointed_at(self):
+        # every run spent its first turns on `task show` + two Read calls for files the harness
+        # already has in hand; inline them and the agent starts on the work
+        base = self._scaffold_with_repo()
+        with open(os.path.join(self.root, "CONTEXT.md"), "a") as f:
+            f.write("\nWS-RULE-MARKER: ship on Fridays only\n")
+        with open(os.path.join(self.root, "projects", "demo", "CONTEXT.md"), "a") as f:
+            f.write("\nPROJECT-GOTCHA-MARKER: the test db needs port 5433\n")
+        r = self._run_agent(base)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("WS-RULE-MARKER", r.stdout)
+        self.assertIn("PROJECT-GOTCHA-MARKER", r.stdout)
+        self.assertLess(r.stdout.index("WS-RULE-MARKER"), r.stdout.index("PROJECT-GOTCHA-MARKER"))
+        self.assertNotIn("FIRST read", r.stdout)          # no round trip asked for what is already here
+
+    def test_pinned_task_record_is_inlined(self):
+        base = self._scaffold_with_repo()
+        dais(self.root, "task", "add", "demo", "the work", "--id", "d-1", "--status", "ready",
+             "--notes", "SPEC-MARKER: acceptance = the button turns green")
+        e = dict(os.environ)
+        e.update({"NO_COLOR": "1", "DAIS_ROOT": self.root, "DAIS_HOME": self.root,
+                  "DAIS_AGENT_REPOS": base, "DAIS_SHOW_PROMPT": "1", "DAIS_TASK_ID": "d-1"})
+        r = subprocess.run([os.path.join(self.root, "harness", "run-agent.sh"), "demo", "engineer"],
+                           capture_output=True, text=True, env=e, cwd=self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("dispatched for task **d-1**", r.stdout)
+        self.assertIn("SPEC-MARKER", r.stdout)             # the notes log, inline
+        self.assertIn("status = ready", r.stdout)          # the record's fields, inline
+
+    def test_oversized_context_is_capped_with_a_marker(self):
+        base = self._scaffold_with_repo()
+        with open(os.path.join(self.root, "projects", "demo", "CONTEXT.md"), "w") as f:
+            f.write("HEAD-MARKER\n" + ("x" * 100 + "\n") * 400 + "TAIL-MARKER\n")   # ~40KB
+        r = self._run_agent(base)
+        self.assertIn("HEAD-MARKER", r.stdout)
+        self.assertNotIn("TAIL-MARKER", r.stdout)
+        self.assertIn("truncated", r.stdout)
+        self.assertIn("24KB", r.stdout)
+
     def test_no_workspace_line_when_file_absent(self):
         base = self._scaffold_with_repo()
         os.remove(os.path.join(self.root, "CONTEXT.md"))   # drop the workspace context
