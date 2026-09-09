@@ -317,6 +317,19 @@ under `~/.claude/skills` have no per-run loader); `dais lint` warns on every suc
 roles are unaffected (codex reads its own `~/.codex/config.toml`). Logs now name the skill on
 every `Skill` call, so a week of runs tells you which roles need which `plugins:`.
 
+## The idle check: a cadence role does not run on an unchanged board
+
+A cadence role (`trigger: every:Nh`) used to run on its clock no matter what, and most of
+those runs found nothing to do: measured across one workspace, 75–87% of lead runs were
+no-ops, each paying the full startup because the "is anything new?" check happened inside the
+model. Now the harness answers it. After a successful cadence run the role records a
+fingerprint of the board as it left it (every task's id, state, and priority: not notes, not
+timestamps, so a role cannot wake itself by writing notes). On the next interval the router
+skips the role while the board still matches, and journals why (`idle-check: skipping
+winterbraid/lead — board unchanged since its last run 5.2h ago`). A new task, a state change,
+or a priority change wakes it; a 24-hour heartbeat runs it regardless. Reactive dispatch is
+untouched: a `proposed` task still wakes the lead at once.
+
 ## Budget caps: no run is unbounded unless you say so
 
 Three per-role (or project-wide) caps, all unset by default, which is the historical

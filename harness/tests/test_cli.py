@@ -398,6 +398,37 @@ class TestProviderScopedGates(CliTest):
         self.assertEqual(r.returncode, 20, r.stdout + r.stderr)
 
 
+class TestIdleCheckTick(CliTest):
+    """End to end through `dais tick --dry-run`: a cadence lead whose interval elapsed is skipped
+    while the board is exactly as it left it, and runs once anything on the board moves."""
+
+    def setUp(self):
+        super().setUp()
+        import sqlite3
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "parked", "--id", "d-1", "--status", "approved")   # not reactive
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status) VALUES('demo','lead',"
+                     "datetime('now','-30 hours'),datetime('now','-30 hours'),'succeeded')")
+        conn.commit(); conn.close()
+        fp = subprocess.run([os.path.join(self.root, "harness", "router.py"), "--board-fingerprint",
+                             self.root, "demo"], capture_output=True, text=True).stdout.strip()
+        with open(os.path.join(self.root, "projects", "demo", ".cadence-lead"), "w") as f:
+            f.write(fp + "\n")
+
+    def test_unchanged_board_skips_the_lead_and_journals_why(self):
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run lead", r.stdout)
+        self.assertIn("nothing eligible", r.stdout)
+        r = dais(self.root, "tick", "demo")                       # a real tick journals the reason
+        self.assertIn("idle-check", open(os.path.join(self.root, "projects", ".watch.log")).read())
+
+    def test_a_priority_change_wakes_the_lead(self):
+        dais(self.root, "task", "set", "d-1", "--priority", "high")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("WOULD run lead", r.stdout)
+
+
 class TestNoopThrottle(CliTest):
     """A role whose LAST run succeeded recently but touched no tasks is NOT re-dispatched — the
     reactive no-progress throttle. Without it the machine hot-loops a role that keeps declining
@@ -974,6 +1005,30 @@ class TestPerRoleModelOverride(CliTest):
         args = self._claude_argv("context: full\n")
         for flag in ("--setting-sources", "--strict-mcp-config", "--mcp-config", "--plugin-dir"):
             self.assertNotIn(flag, args)
+
+    # --- the idle check's marker (plan 1.5): a cadence run records the board as it left it ------
+    def test_cadence_run_records_the_board_fingerprint(self):
+        # coding template: the lead is every:24h. `echo ok` (not `true`): an EMPTY log is scored
+        # failed, and only a succeeded cadence run records the board.
+        r = self._run_agent("lead", env={"DAIS_NOOP_RUN": "echo ok"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status FROM runs ORDER BY id DESC LIMIT 1")[0], "succeeded")
+        marker = os.path.join(self.root, "projects", "demo", ".cadence-lead")
+        self.assertTrue(os.path.exists(marker))
+        fp = subprocess.run([os.path.join(self.root, "harness", "router.py"), "--board-fingerprint",
+                             self.root, "demo"], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(open(marker).read().strip(), fp)
+        self.assertTrue(len(fp) >= 12)
+
+    def test_reactive_run_records_no_marker(self):
+        r = self._run_agent("engineer", env={"DAIS_NOOP_RUN": "echo ok"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", ".cadence-engineer")))
+
+    def test_failed_cadence_run_records_no_marker(self):
+        r = self._run_agent("lead", env={"DAIS_NOOP_RUN": "false"})    # the run fails
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "projects", "demo", ".cadence-lead")))
 
     # --- budget caps (plan 1.4) ---------------------------------------------------------------
     def test_caps_become_claude_flags_only_when_set(self):

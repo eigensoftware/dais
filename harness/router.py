@@ -263,6 +263,42 @@ def _machine_for(root, project):
     return MC.project_machine_path(root, project, ref)
 
 
+# --- the harness-side idle check (plan 1.5). A cadence role (every:Nh) used to run on its clock
+# regardless, and in the workspace 75–87% of lead runs ended as no-ops: the "cheap idle check"
+# lived INSIDE the model, so each no-op still paid the full startup. Now the role records the
+# board as it left it (run-agent writes .cadence-<role> after a SUCCEEDED cadence run) and the
+# router skips the role while the board is exactly that, until a heartbeat. Notes and timestamps
+# are deliberately outside the fingerprint: a role can't wake itself by writing notes, and a QA
+# note alone doesn't wake a lead — a new task, a state change, or a priority change does. ---
+IDLE_HEARTBEAT_HOURS = 24
+
+
+def board_fingerprint(conn, project):
+    """A hash over every task's (id, status, priority) for the project — membership, state and
+    rank; not notes, not timestamps."""
+    import hashlib
+    rows = conn.execute("SELECT id, status, COALESCE(priority,'medium') FROM tasks WHERE project=? "
+                        "ORDER BY id", (project,)).fetchall()
+    text = "\n".join("%s|%s|%s" % (r[0], r[1], r[2]) for r in rows)
+    return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+
+def cadence_idle_reason(root, project, role, fp):
+    """Why the idle check would skip this cadence role now ('' = it runs): the marker exists,
+    matches the current fingerprint, and is younger than the heartbeat."""
+    import time
+    p = os.path.join(root, "projects", project, ".cadence-" + role)
+    try:
+        with open(p) as fh:
+            stored = fh.read().strip()
+        age_h = (time.time() - os.path.getmtime(p)) / 3600.0
+    except OSError:
+        return ""
+    if stored != fp or age_h >= IDLE_HEARTBEAT_HOURS:
+        return ""
+    return "board unchanged since its last run %.1fh ago (heartbeat %dh)" % (age_h, IDLE_HEARTBEAT_HOURS)
+
+
 def decide(root, project, excluded=None, live=None):
     """Which role should run next for this project (or None = idle). `excluded` roles (the
     dispatcher's no-progress throttle) are skipped in BOTH reactive dispatch and cadence, but
@@ -325,6 +361,12 @@ def decide(root, project, excluded=None, live=None):
             return r["name"]
         cutoff = db.execute("SELECT datetime('now', ?)", ["-%d hours" % hrs]).fetchone()[0]
         if last < cutoff:
+            why = cadence_idle_reason(root, project, r["name"], board_fingerprint(db, project))
+            if why:
+                # stderr = the tick journal (dispatch.sh routes it there): "why didn't the lead
+                # run?" stays answerable
+                print("idle-check: skipping %s/%s — %s" % (project, r["name"], why), file=sys.stderr)
+                continue
             return r["name"]
     return None  # idle
 
@@ -538,6 +580,11 @@ if __name__ == "__main__":
         s = agent_setup(sys.argv[2], sys.argv[3], sys.argv[4])
         for k in AGENT_CONFIG_KEYS:
             print("%s=%s" % (k, s[k]))
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "--board-fingerprint":
+        # run-agent's seam: the board as a cadence run leaves it -> projects/<p>/.cadence-<role>
+        import machine as MC
+        print(board_fingerprint(MC.open_db(os.path.join(sys.argv[2], "dais.db")), sys.argv[3]))
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--lean-flags":
         # The lean profile's extra `claude -p` argv for one role, one token per line (bash 3.2

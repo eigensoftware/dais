@@ -468,6 +468,15 @@ PY
   rm -f "$LOG.usage.json"
 fi
 
+# The idle check's marker (router.py's note): after a SUCCEEDED cadence run — this role runs on a
+# clock (trigger every:Nh) and no reactive task was pinned — record the board as the role leaves
+# it. The router skips the role while the board still matches (until its heartbeat). A failed or
+# capped run records nothing, so it retries on its next interval as before.
+if [ "$STATUS" = succeeded ] && [ -z "$TASK_ID" ] && [[ "$TRIG" == every:* ]]; then
+  python3 "$SELF/router.py" --board-fingerprint "$DAIS_HOME" "$PROJECT" > "$PDIR/.cadence-$AGENT" 2>/dev/null \
+    || rm -f "$PDIR/.cadence-$AGENT"
+fi
+
 # Summarize what the run actually changed: tasks it touched during the run, with their new status.
 TOUCHED="$(db "SELECT group_concat(id||'→'||status,', ') FROM tasks WHERE project='$(sqlesc "$PROJECT")' AND updated_at >= '$START_TS';")"
 [ -z "$TOUCHED" ] && TOUCHED="no task changes"

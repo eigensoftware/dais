@@ -191,6 +191,63 @@ class TestCadence(unittest.TestCase):
         # no dispatchable reactive work → the lead still runs on its cadence (first run, never-run).
         self.assertEqual(router.decide(_ws([("a", "approved")], roles=ROLES_WITH_LEAD), "p"), "lead")
 
+    # --- the harness-side idle check (plan 1.5): a cadence role whose interval elapsed is still
+    # skipped when the board is exactly as it left it, until a 24h heartbeat ---------------
+    def _lead_ws(self, tasks=(("a", "approved"),), ran_hours_ago=6):
+        root = _ws(list(tasks), roles=ROLES_WITH_LEAD)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        conn = sqlite3.connect(os.path.join(root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,status,started_at) VALUES('p','lead','succeeded',"
+                     "datetime('now','-%d hours'))" % ran_hours_ago)
+        conn.commit(); conn.close()
+        return root
+
+    def _mark(self, root, fp, hours_old=0):
+        import time
+        p = os.path.join(root, "projects", "p", ".cadence-lead")
+        with open(p, "w") as f:
+            f.write(fp + "\n")
+        if hours_old:
+            t = time.time() - hours_old * 3600
+            os.utime(p, (t, t))
+        return p
+
+    def test_board_fingerprint_tracks_status_priority_and_membership_not_notes(self):
+        root = self._lead_ws()
+        conn = sqlite3.connect(os.path.join(root, "dais.db"))
+        conn.execute("ALTER TABLE tasks ADD COLUMN notes TEXT")
+        f0 = router.board_fingerprint(conn, "p")
+        conn.execute("UPDATE tasks SET notes='a QA note' WHERE id='a'")
+        self.assertEqual(router.board_fingerprint(conn, "p"), f0)          # notes don't count
+        conn.execute("UPDATE tasks SET priority='high' WHERE id='a'")
+        f1 = router.board_fingerprint(conn, "p"); self.assertNotEqual(f1, f0)
+        conn.execute("UPDATE tasks SET status='done' WHERE id='a'")
+        f2 = router.board_fingerprint(conn, "p"); self.assertNotEqual(f2, f1)
+        conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('b','p','b','proposed')")
+        self.assertNotEqual(router.board_fingerprint(conn, "p"), f2)
+
+    def test_cadence_skipped_while_the_board_is_as_the_role_left_it(self):
+        root = self._lead_ws()
+        conn = sqlite3.connect(os.path.join(root, "dais.db"))
+        self._mark(root, router.board_fingerprint(conn, "p"))
+        self.assertIsNone(router.decide(root, "p"))
+
+    def test_cadence_runs_again_when_the_board_changed(self):
+        root = self._lead_ws()
+        conn = sqlite3.connect(os.path.join(root, "dais.db"))
+        self._mark(root, router.board_fingerprint(conn, "p"))
+        conn.execute("UPDATE tasks SET priority='high' WHERE id='a'"); conn.commit()
+        self.assertEqual(router.decide(root, "p"), "lead")
+
+    def test_cadence_heartbeat_runs_a_stale_marker(self):
+        root = self._lead_ws(ran_hours_ago=30)
+        conn = sqlite3.connect(os.path.join(root, "dais.db"))
+        self._mark(root, router.board_fingerprint(conn, "p"), hours_old=30)
+        self.assertEqual(router.decide(root, "p"), "lead")
+
+    def test_cadence_without_a_marker_runs_as_before(self):
+        self.assertEqual(router.decide(self._lead_ws(), "p"), "lead")
+
     def test_blocked_work_falls_through_to_cadence_not_reactive(self):
         # a proposed task blocked on an open predecessor is NOT reactive; with no cadence lead it idles
         # (proving the blocked task itself didn't trigger a dispatch).
