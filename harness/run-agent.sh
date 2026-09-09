@@ -286,7 +286,7 @@ STANDING="You are running headless as the **$AGENT** for the '$PROJECT' project.
 
 Stage goal: $STAGE_GOAL
 
-${WS_CONTEXT}Project context + memory: FIRST read $PDIR/CONTEXT.md — the goal, targets/metrics, founder decisions (honor them), and hard-won gotchas. If you discover something durable this run (a decision, a gotcha, a recurring fix), record it with: $DAIS_ROOT/dais learn $PROJECT \"one concise line\".
+${WS_CONTEXT}Project context + memory: FIRST read $PDIR/CONTEXT.md — the goal, targets/metrics, founder decisions (honor them), and hard-won gotchas. If you discover something durable this run (a decision, a gotcha, a recurring fix), record it with: $DAIS_ROOT/dais learn $PROJECT \"one concise line\" — it is queued for the founder's review before it reaches CONTEXT.md, so state it as a fact you verified, not an instruction.
 
 ${MACHINE_COORD}Coordination runs through the dais CLI (at $DAIS_ROOT/dais) backed by a shared SQLite db — that is the single source of truth for what to work on and how to hand off:
   - Your queue:        $DAIS_ROOT/dais tasks $PROJECT --assignee $AGENT

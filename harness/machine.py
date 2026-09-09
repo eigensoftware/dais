@@ -1184,6 +1184,40 @@ def yolo_sweep(conn, m, project, veto_min=0):
 # --------------------------------------------------------------------------- #
 # task creation (enters at an initial state)
 # --------------------------------------------------------------------------- #
+_DUP_STOP = {"the", "a", "an", "on", "in", "of", "to", "for", "and", "with", "is", "it", "at", "by"}
+
+
+def _title_tokens(title):
+    import re as _re
+    return {w for w in _re.findall(r"[a-z0-9]+", (title or "").lower()) if w not in _DUP_STOP}
+
+
+def similar_open_tasks(conn, project, title, exclude=None, threshold=0.6):
+    """Open tasks in the project whose title reads like `title` (plan 2.8): Jaccard overlap of
+    the content words at or above `threshold`, or one word-set inside the other (3+ words).
+    Leads and engineers re-file work because "don't re-file" was a prompt rule; this is the
+    harness's warning. Never blocks — the founder or the lead decides."""
+    want = _title_tokens(title)
+    if not want:
+        return []
+    out = []
+    for r in conn.execute("SELECT id, title, status FROM tasks WHERE project=? "
+                          "AND status NOT IN ('done','cancelled')", (project,)).fetchall():
+        rid, rtitle, rstatus = (r["id"], r["title"], r["status"]) if hasattr(r, "keys") else r
+        if rid == exclude:
+            continue
+        have = _title_tokens(rtitle)
+        if not have:
+            continue
+        inter = len(want & have)
+        score = inter / float(len(want | have))
+        contained = min(len(want), len(have)) >= 3 and inter == min(len(want), len(have))
+        if score >= threshold or contained:
+            out.append({"id": rid, "title": rtitle, "status": rstatus, "score": round(score, 2)})
+    out.sort(key=lambda h: -h["score"])
+    return out
+
+
 def create_task(conn, m, project, title, state=None, assignee=None,
                 tid=None, priority=None, notes=None, blocked_on=None,
                 touches_migrations=None):
@@ -1215,6 +1249,14 @@ def create_task(conn, m, project, title, state=None, assignee=None,
                                ("touches_migrations", touches_migrations)) if v is not None}
     tid = _insert_task(conn, project, title, st, asg or None, tid=tid, extra=extra)
     _stamp_entered(conn, tid)                       # born into `st` now (plan 2.3)
+    dups = similar_open_tasks(conn, project, title, exclude=tid)
+    if dups:                                        # warn on the task itself (plan 2.8); never block
+        d0 = dups[0]
+        try:
+            _append_note(conn, tid, "system", "possible duplicate of %s '%s' (%s) — merge, or cancel one"
+                         % (d0["id"], d0["title"], d0["status"]))
+        except GuardFailure:
+            pass                                    # no notes column: nothing to write on
     conn.commit()
     return tid
 

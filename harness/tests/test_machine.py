@@ -301,6 +301,26 @@ class TestAssigneeStamp(unittest.TestCase):
     def _row(self, tid):
         return self.conn.execute("SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()
 
+    def test_similar_open_tasks_flags_near_duplicate_titles(self):
+        # plan 2.8: leads and engineers re-file work because "don't re-file" is a prompt rule
+        c = _db(); c.execute("ALTER TABLE tasks ADD COLUMN notes TEXT")
+        a = M.create_task(c, self.m, "proj", "Fix the login redirect loop on Safari", "ready")
+        M.create_task(c, self.m, "proj", "Add dark mode to settings", "ready")
+        d = M.create_task(c, self.m, "proj", "closed thing", "done")
+        c.execute("UPDATE tasks SET title='Fix login redirect loop (Safari)' WHERE id=?", (d,)); c.commit()
+        hits = M.similar_open_tasks(c, "proj", "fix login redirect loop safari")
+        self.assertEqual([h["id"] for h in hits], [a])       # the done twin is not a duplicate
+        self.assertEqual(M.similar_open_tasks(c, "proj", "Write the release notes"), [])
+        self.assertEqual(M.similar_open_tasks(c, "proj", "Fix the login redirect loop on Safari",
+                                              exclude=a), [])
+
+    def test_create_task_notes_a_suspected_duplicate(self):
+        c = _db(); c.execute("ALTER TABLE tasks ADD COLUMN notes TEXT")
+        a = M.create_task(c, self.m, "proj", "Fix the login redirect loop on Safari", "ready")
+        b = M.create_task(c, self.m, "proj", "fix login redirect loop safari", "ready")
+        notes = c.execute("SELECT notes FROM tasks WHERE id=?", (b,)).fetchone()[0]
+        self.assertIn("possible duplicate", notes); self.assertIn(a, notes)
+
     def _verify_machine(self, cmd=None):
         m = {"name": "v", "entry": "qa_review",
              "roles": {"founder": {"human": True}, "qa": {"access": "review"}},

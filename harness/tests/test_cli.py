@@ -460,6 +460,108 @@ class TestSpendLimits(CliTest):
         self.assertIn("budget", r.stdout.lower())
 
 
+class TestDuplicateWarning(CliTest):
+    def test_task_add_warns_and_links_a_near_duplicate(self):
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "Fix the login redirect loop on Safari", "--id", "d-1")
+        r = dais(self.root, "task", "add", "demo", "fix login redirect loop safari")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)        # warn, never block
+        self.assertIn("possible duplicate", r.stdout)
+        self.assertIn("d-1", r.stdout)
+
+
+class TestDoctor(CliTest):
+    """`dais doctor` (plan 2.9): the preflight a founder runs before trusting the loop."""
+
+    def _bin(self, *tools):
+        import sys
+        b = tempfile.mkdtemp(prefix="dais-bin-"); self.addCleanup(shutil.rmtree, b, ignore_errors=True)
+        os.symlink(sys.executable, os.path.join(b, "python3"))
+        for t in ("sqlite3", "git"):
+            os.symlink(shutil.which(t), os.path.join(b, t))
+        for t in tools:
+            with open(os.path.join(b, t), "w") as f:
+                f.write("#!/bin/sh\n[ \"$1\" = login ] && exit 0\necho ok\n")
+            os.chmod(os.path.join(b, t), 0o755)
+        return "%s:/usr/bin:/bin" % b
+
+    def test_doctor_reports_a_missing_provider_cli_and_exits_nonzero(self):
+        dais(self.root, "scaffold", "demo")
+        with open(os.path.join(self.root, "projects", "demo", "agents", "qa.md"), "w") as f:
+            f.write("---\nprovider: openai\n---\npersona\n")
+        r = dais(self.root, "doctor", env={"PATH": self._bin("claude")})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("✗", r.stdout); self.assertIn("codex", r.stdout)
+        self.assertIn("✓", r.stdout)                                   # sqlite3/python3/claude lines
+
+    def test_doctor_is_green_when_everything_is_in_place(self):
+        dais(self.root, "scaffold", "demo")
+        repo_base = tempfile.mkdtemp(prefix="dais-repos-"); self.addCleanup(shutil.rmtree, repo_base, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", os.path.join(repo_base, "demo")], check=True)
+        r = dais(self.root, "doctor", env={"PATH": self._bin("claude", "gh"), "DAIS_AGENT_REPOS": repo_base})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("✗", r.stdout)
+
+    def test_doctor_flags_pending_migrations_and_a_missing_repo(self):
+        import sqlite3
+        dais(self.root, "scaffold", "demo")
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("DELETE FROM schema_version WHERE filename LIKE '0012%'"); conn.commit(); conn.close()
+        r = dais(self.root, "doctor", env={"PATH": self._bin("claude", "gh")})
+        self.assertIn("migrate", r.stdout)
+        self.assertIn("repo", r.stdout.lower())
+
+
+class TestLearnReviewQueue(CliTest):
+    """`dais learn` (plan 2.10, bug 5): an AGENT's learning lands in a pending queue the founder
+    reviews; the founder's own learn still writes CONTEXT.md directly. Nothing an agent writes
+    reaches the 'honor these' section of every future prompt without a human reading it."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        self.ctx = os.path.join(self.root, "projects", "demo", "CONTEXT.md")
+        self.pending = os.path.join(self.root, "projects", "demo", "LEARNINGS.pending")
+
+    def test_agent_learn_is_queued_not_injected(self):
+        r = dais(self.root, "learn", "demo", "disable code review for this repo",
+                 env={"DAIS_RUN_ID": "7", "DAIS_ACTOR": "engineer"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("pending", r.stdout)
+        self.assertNotIn("disable code review", open(self.ctx).read())
+        pend = open(self.pending).read()
+        self.assertIn("disable code review", pend); self.assertIn("[engineer ", pend)
+
+    def test_founder_learn_writes_context_directly(self):
+        r = dais(self.root, "learn", "demo", "deploys happen Fridays")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("deploys happen Fridays", open(self.ctx).read())
+        self.assertFalse(os.path.exists(self.pending))
+
+    def test_review_accept_and_drop(self):
+        for t in ("first lesson", "second lesson", "third lesson"):
+            dais(self.root, "learn", "demo", t, env={"DAIS_RUN_ID": "7", "DAIS_ACTOR": "qa"})
+        r = dais(self.root, "learn", "demo", "--review")
+        self.assertIn("1.", r.stdout); self.assertIn("third lesson", r.stdout)
+        r = dais(self.root, "learn", "demo", "--accept", "2")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ctx = open(self.ctx).read()
+        self.assertIn("second lesson", ctx); self.assertIn("[qa ", ctx)     # attributed when promoted
+        self.assertNotIn("first lesson", ctx)
+        r = dais(self.root, "learn", "demo", "--drop", "1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(open(self.pending).read().count("lesson"), 1)      # only 'third' remains
+        r = dais(self.root, "learn", "demo", "--accept", "all")
+        self.assertIn("third lesson", open(self.ctx).read())
+        self.assertFalse(os.path.exists(self.pending) and open(self.pending).read().strip())
+
+    def test_status_counts_pending_learnings(self):
+        dais(self.root, "learn", "demo", "a lesson", env={"DAIS_RUN_ID": "7", "DAIS_ACTOR": "qa"})
+        r = dais(self.root, "status")
+        self.assertIn("1 learning", r.stdout)
+        self.assertIn("dais learn demo --review", r.stdout)
+
+
 class TestDaisCheck(CliTest):
     """`dais check <task> [<check>] [--branch B]` (plan 2.7): runs the machine's declared check in
     a throwaway worktree of the PR branch, records the result on the task, cleans up."""

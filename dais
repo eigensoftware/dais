@@ -37,7 +37,9 @@ dais — your agent company control panel
   dais check <task-id> [<check>] [--branch B]   run the machine's declared check in a worktree of the task's PR branch; record it (verify: honors it)
   dais logs <project> [N]             recent runs (+ tokens · cost once the ledger is on)
   dais cost [project] [--since 7d] [--by project|role|task]   the run ledger: tokens (and dollars where reported) per project, role, or task
-  dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md
+  dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md (an agent's lands in a review queue)
+  dais learn <project> --review | --accept N|all | --drop N   review what agents learned before it reaches every prompt
+  dais doctor                         preflight: provider CLIs + logins, API keys, pending migrations, repos, markers
   dais lint [project]                 validate a project (roles + project.yaml + required files)
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
   dais migrate [--config <project>]     apply DB migrations | convert a project to frontmatter config
@@ -217,7 +219,10 @@ MD
         res="$(python3 "$DAIS_ROOT/harness/machine.py" "${args[@]}" 2>&1)" \
           || { echo "task add: $res"; exit 1; }
         id="${res%%|*}"; st="${res##*|}"
-        link_run_task "$id" create; echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]" ;;
+        link_run_task "$id" create; echo "added $id  [$st${asg:+ -> $asg}${dep:+ ⛓on $dep}]"
+        # plan 2.8: the engine noted a near-duplicate open task on the new one — say so here too
+        dup="$(db "SELECT notes FROM tasks WHERE id='$(sqlesc "$id")';" 2>/dev/null | grep -o 'possible duplicate of [^ ]* .*' | tail -1)"
+        if [ -n "$dup" ]; then echo "  ⚠ $dup"; fi ;;   # an if, not `&&`: no dup must not exit 1
       set)
         id="$1"; shift
         # fail loud on an unknown id: a blind UPDATE matches zero rows but still printed
@@ -472,13 +477,51 @@ effort: <optional low|medium|high, or blank>
       *) echo "usage: dais role new <project> [--desc \"...\"] [--yes]"; exit 1;;
     esac ;;
 
+  doctor)
+    # the preflight (plan 2.9): provider CLIs + logins, API keys, pending migrations, repos,
+    # CONTEXT sizes, dispatcher markers. Exit 1 on any ✗.
+    exec python3 "$DAIS_ROOT/harness/doctor.py" "$DAIS_HOME" "$DAIS_ROOT" ;;
+
   learn)
-    proj="${1:?usage: dais learn <project> \"durable note\"}"; shift
-    note="$*"
-    [ -n "$note" ] || { echo "usage: dais learn <project> \"durable note\""; exit 1; }
+    # Durable learnings (plan 2.10, bug 5). CONTEXT.md is injected into EVERY run as "founder
+    # decisions — honor them", so nothing an AGENT writes reaches it unread: an agent's learn
+    # (a run is active: DAIS_RUN_ID) lands in projects/<p>/LEARNINGS.pending, attributed, for
+    # the founder to --review / --accept / --drop. The founder's own learn (no run) writes
+    # CONTEXT.md directly, as before.
+    proj="${1:?usage: dais learn <project> \"durable note\" | --review | --accept N|all | --drop N}"; shift
     f="$DAIS_HOME/projects/$proj/CONTEXT.md"
     [ -f "$f" ] || { echo "no CONTEXT.md for project '$proj'"; exit 1; }
-    printf -- '- %s\n' "$note" >> "$f" && echo "noted in $proj/CONTEXT.md" ;;
+    pend="$DAIS_HOME/projects/$proj/LEARNINGS.pending"
+    case "${1:-}" in
+      --review)
+        [ -s "$pend" ] || { echo "no learnings pending review for $proj"; exit 0; }
+        echo "pending learnings for $proj (accept: dais learn $proj --accept N|all · drop: --drop N):"
+        nl -ba -w2 -s'. ' "$pend" ;;
+      --accept|--drop)
+        which="${2:?usage: dais learn <project> $1 N|all}"
+        [ -s "$pend" ] || { echo "nothing pending for $proj"; exit 1; }
+        n="$(wc -l < "$pend" | tr -d ' ')"
+        if [ "$which" = all ]; then sel="1,$n"; elif [[ "$which" =~ ^[0-9]+$ ]] && [ "$which" -ge 1 ] && [ "$which" -le "$n" ]; then sel="$which"; else echo "learn: pick 1..$n or all"; exit 1; fi
+        if [ "$1" = --accept ]; then
+          sed -n "${sel}p" "$pend" | sed 's/^/- /' >> "$f"
+          echo "accepted into $proj/CONTEXT.md:"; sed -n "${sel}p" "$pend" | sed 's/^/  /'
+        else
+          echo "dropped:"; sed -n "${sel}p" "$pend" | sed 's/^/  /'
+        fi
+        sed "${sel}d" "$pend" > "$pend.tmp" && mv "$pend.tmp" "$pend"
+        [ -s "$pend" ] || rm -f "$pend" ;;
+      --*) echo "learn: unknown flag $1"; exit 1 ;;
+      *)
+        note="$*"
+        [ -n "$note" ] || { echo "usage: dais learn <project> \"durable note\""; exit 1; }
+        note=${note//$'\n'/ }                         # one entry = one line
+        if [[ "${DAIS_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
+          printf '[%s %s] %s\n' "${DAIS_ACTOR:-agent}" "$(date -u '+%Y-%m-%d %H:%M')" "$note" >> "$pend"
+          echo "queued for founder review (pending #$(wc -l < "$pend" | tr -d ' ') for $proj): dais learn $proj --review"
+        else
+          printf -- '- %s\n' "$note" >> "$f" && echo "noted in $proj/CONTEXT.md"
+        fi ;;
+    esac ;;
 
   lint)
     # validate the roles config(s): one reactive role per status, valid fields, personas exist

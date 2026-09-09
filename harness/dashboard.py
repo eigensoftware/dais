@@ -162,6 +162,10 @@ def render_plain(snap, color=None):
         if snap.cap_state:
             P(f"  {c['CY']}⏸ cooling down — {', '.join(snap.cooling) or 'recent'} capped "
               f"(that provider's roles wait for its window; others still run){c['C0']}")
+        if getattr(p, "pending_learnings", 0):
+            n = p.pending_learnings
+            P(f"  {c['CY']}📝 {n} learning{'s' if n != 1 else ''} pending review — "
+              f"dais learn {p.name} --review{c['C0']}")
         if snap.budget and snap.budget["over"]:
             P(f"  {c['CR']}⛔ daily budget spent — {fmt_budget(snap.budget)}; the loop idles until "
               f"tomorrow (dais watch --budget, or dais.yaml daily_budget){c['C0']}")

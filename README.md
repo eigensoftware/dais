@@ -426,7 +426,8 @@ not keep it.
 | `dais migrate` | apply pending DB migrations (run with the loop paused) |
 | `dais migrate --config <project>` | convert a project's legacy roles file into `agents/<role>.md` frontmatter + machine-owned access |
 | `dais schedule install [secs]` | background ticks (launchd on macOS, cron on Linux) |
-| `dais learn <project> "…"` | append a durable decision/gotcha to the project's CONTEXT.md |
+| `dais learn <project> "…"` | a durable decision/gotcha for the project's CONTEXT.md — an agent's learn lands in a review queue (`--review`, `--accept N\|all`, `--drop N`); the founder's own writes CONTEXT.md directly |
+| `dais doctor` | preflight: provider CLIs + logins, API keys for `auth: api` roles, pending migrations, each project's repo, CONTEXT sizes, dispatcher markers; exit 1 on a blocker |
 | `dais logs <project> [N]` | recent runs + their saved log paths (+ tokens · cost per run) |
 | `dais cost [project] [--since 7d] [--by project\|role\|task]` | the run ledger: tokens per project, role, or task, dollars where the provider reported them, no-op share |
 | `dais version` | which build this machine runs |

@@ -109,6 +109,7 @@ class Project:
     recent_runs: list = field(default_factory=list)
     machine: dict = None              # the project's authored state machine (or None = legacy status routing)
     last_tick: dict = None            # why the last tick left this project idle (plan 1.7), or None
+    pending_learnings: int = 0        # agent learnings awaiting founder review (plan 2.10)
 
 
 # --- "why idle" (plan 1.7): the tick journal (projects/.watch.log) says why a tick launched
@@ -456,6 +457,11 @@ def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
     newest = None
     for p in projects:
         p.last_tick = journal["projects"].get(p.name)
+        try:                                            # plan 2.10: the learn review queue
+            with open(os.path.join(root, "projects", p.name, "LEARNINGS.pending")) as fh:
+                p.pending_learnings = sum(1 for l in fh if l.strip())
+        except OSError:
+            p.pending_learnings = 0
         if p.last_tick and (newest is None or p.last_tick["ts"] > newest["ts"]):
             newest = p.last_tick
     if journal["workspace"] and (newest is None or journal["workspace"]["ts"] > newest["ts"]):
