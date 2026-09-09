@@ -222,6 +222,17 @@ searches notes as well as titles; the vitals strip shows what the next tick woul
 the loop is idle, and warns `⚠ COLLISION <project>` when two live runs share one working
 tree without worktree isolation.
 
+**Be told when work waits on you.** Put a `notify:` command in `dais.yaml`; it receives one
+message on stdin. The loop sends once per arrival: a task newly parked in NEEDS YOU (a bounce
+that comes back is a new arrival), a task newly held over budget, a spent daily budget once a
+day. Try it with `dais notify test "hello"`.
+
+```yaml
+notify: curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" -d "chat_id=$TG_CHAT" --data-urlencode text@-
+# macOS:  notify: m="$(cat)"; osascript -e "display notification \"$m\" with title \"dais\""
+# a log:  notify: cat >> "$DAIS_HOME/notify.log"
+```
+
 **Manual vs. the loop.** `dais watch` is the continuous auto-dispatcher. `dais start <id>`,
 `R`, and `t` are on-demand runs that fire one agent now and bypass pause. `start` runs the
 role the machine dispatches for the task's state, honoring the dependency chain.

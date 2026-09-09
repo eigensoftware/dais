@@ -120,6 +120,12 @@ if [ "$DRY" = 0 ]; then
   done
 fi
 
+# --- notifications (plan 4.4): announce what newly waits on the founder — once per arrival.
+#     Every REAL tick, before the capacity gates, so a parked loop still tells you. ---
+if [ "$DRY" = 0 ]; then
+  python3 "$SELF/notify.py" sweep "$DAIS_HOME" 2>>"$TLOG" | while IFS= read -r n; do [ -n "$n" ] && tlog "$n"; done
+fi
+
 # --- capacity gates, scoped PER PROVIDER (runs.provider, migration 0007). Two sets, computed
 #     once per tick and applied per candidate role in the eligible loop below (a cooled
 #     provider's roles are SKIPPED like the no-op throttle skips a role — everything else

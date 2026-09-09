@@ -738,6 +738,54 @@ class TestParallelDefault(CliTest):
         self.assertIn("pool width 2", r.stdout)
 
 
+class TestNotify(CliTest):
+    """plan 4.4: dais.yaml `notify: <command>` gets a message on stdin once per task when it
+    newly parks in NEEDS YOU (or is held over budget), and once per day for a spent budget."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        with open(os.path.join(self.root, "projects", "demo", "agents", "lead.md"), "w") as f:
+            f.write("---\ntrigger: none\n---\npersona\n")
+        self.log = os.path.join(self.root, "notify.log")
+        with open(os.path.join(self.root, "dais.yaml"), "a") as f:
+            f.write("notify: cat >> %s\n" % self.log)
+
+    def _lines(self):
+        return open(self.log).read().splitlines() if os.path.exists(self.log) else []
+
+    def test_a_new_gate_notifies_once(self):
+        dais(self.root, "task", "add", "demo", "Approve me", "--id", "d-1", "--status", "proposal_review")
+        dais(self.root, "tick", "demo")
+        lines = self._lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("d-1", lines[0]); self.assertIn("Approve me", lines[0]); self.assertIn("proposal review", lines[0])
+        dais(self.root, "tick", "demo")                             # same gate, same state: silent
+        self.assertEqual(len(self._lines()), 1)
+        dais(self.root, "fire", "d-1", "request_changes")           # leaves the gate…
+        dais(self.root, "task", "set", "d-1", "--notes", "x")
+        dais(self.root, "fire", "d-1", "submit", "--by", "lead")    # …and comes back: a new arrival
+        dais(self.root, "tick", "demo")
+        self.assertEqual(len(self._lines()), 2)
+
+    def test_dry_run_and_no_notify_key_are_silent(self):
+        dais(self.root, "task", "add", "demo", "Approve me", "--id", "d-1", "--status", "proposal_review")
+        dais(self.root, "tick", "demo", "--dry-run")
+        self.assertEqual(self._lines(), [])
+        os.remove(os.path.join(self.root, "dais.yaml"))
+        dais(self.root, "tick", "demo")
+        self.assertEqual(self._lines(), [])
+
+    def test_notify_test_sends_a_message(self):
+        r = dais(self.root, "notify", "test", "hello from dais")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("hello from dais", self._lines()[0])
+        os.remove(os.path.join(self.root, "dais.yaml"))
+        r = dais(self.root, "notify", "test", "x")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("notify:", r.stdout + r.stderr)
+
+
 class TestDispatcherHygiene(CliTest):
     """Plan 2.1: a dry-run tick is read-only, and only one tick runs at a time."""
 

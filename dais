@@ -42,6 +42,7 @@ dais — your agent company control panel
   dais learn <project> "note"         record a durable decision/gotcha into the project's CONTEXT.md (an agent's lands in a review queue)
   dais learn <project> --review | --accept N|all | --drop N   review what agents learned before it reaches every prompt
   dais doctor                         preflight: provider CLIs + logins, API keys, pending migrations, repos, markers
+  dais notify test "message"          try the workspace's `notify:` command (dais.yaml); the loop uses it when work newly waits on you
   dais lint [project]                 validate a project (roles + project.yaml + required files)
   dais init [path]                    bootstrap a workspace (dais.yaml + CONTEXT.md + projects/ + board) at path or cwd
   dais migrate [--config <project>]     apply DB migrations | convert a project to frontmatter config
@@ -478,6 +479,14 @@ effort: <optional low|medium|high, or blank>
         echo "linting ${proj}…"
         "$DAIS_ROOT/dais" lint "$proj" ;;
       *) echo "usage: dais role new <project> [--desc \"...\"] [--yes]"; exit 1;;
+    esac ;;
+
+  notify)
+    # dais notify test "message" — try the workspace's `notify:` command (dais.yaml) by hand
+    sub="${1:-}"; shift 2>/dev/null || true
+    case "$sub" in
+      test) exec python3 "$DAIS_ROOT/harness/notify.py" send "$DAIS_HOME" "${*:-test message from dais}" ;;
+      *) echo "usage: dais notify test \"message\""; exit 1 ;;
     esac ;;
 
   doctor)
