@@ -2410,3 +2410,163 @@ class TestEmptyPhaseCollapse(unittest.TestCase):
         rows = papp.left_rows()
         ids = [r["id"] for r in rows if r["kind"] == "task"]
         self.assertLess(ids.index("b-1"), ids.index("a-1"))
+
+
+class TestBatchMarks(unittest.TestCase):
+    """Deferred 4.3: batch actions on NEEDS YOU — space marks task rows, u clears, and a keyed edge
+    action (or +/-) applies to every marked task; the WORK pane shows ✔ on marked rows."""
+
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-bm-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("p-1", "cedar", "one", "proposal_review", "high", None),
+                                     ("p-2", "cedar", "two", "proposal_review", "high", None),
+                                     ("r-1", "cedar", "three", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp._dais = lambda: "dais"
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def _row(self, papp, tid):
+        rows = papp.left_rows()
+        i = next(i for i, r in enumerate(rows) if r.get("id") == tid)
+        return rows, i, rows[i]
+
+    def test_space_marks_and_u_clears(self):
+        papp = self._papp()
+        rows, i, row = self._row(papp, "p-1")
+        papp.sel_id = "p-1"
+        papp.handle(ord(" "), rows, i, row)
+        self.assertEqual(papp.marked, {"p-1"})
+        papp.handle(ord(" "), rows, i, row)                    # toggles off
+        self.assertEqual(papp.marked, set())
+        papp.handle(ord(" "), rows, i, row)
+        papp.handle(ord("u"), rows, i, row)
+        self.assertEqual(papp.marked, set())
+
+    def test_marked_rows_render_a_check(self):
+        papp = self._papp()
+        papp.marked = {"p-2"}
+        papp._cp = lambda n: n * 1000
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 120), papp, True)
+        line = next(c[2] for c in scr.calls if "p-2" in c[2])
+        self.assertTrue(line.lstrip().startswith("✔"), line)
+        other = next(c[2] for c in scr.calls if "p-1" in c[2])
+        self.assertFalse(other.lstrip().startswith("✔"), other)
+
+    def test_keyed_action_applies_to_every_marked_task_with_that_edge(self):
+        papp = self._papp()
+        rows, i, row = self._row(papp, "p-1")
+        acts = papp._row_actions(row)
+        key = next(a.key for a in acts if a.key and a.slot != "menu")    # the first keyed edge verb
+        verb = next(a.id for a in acts if a.key == key)
+        papp.marked = {"p-1", "p-2", "r-1"}                    # r-1 (ready) has no such edge
+        fired = []
+        def fake_act(m, v, r, t):
+            fired.append((v, t["id"])); papp.flash = "✓ %s %s — now x" % (v, t["id"])
+        papp._act_machine = fake_act
+        papp.handle(ord(key), rows, i, row)
+        self.assertEqual(sorted(fired), sorted([(verb, "p-1"), (verb, "p-2")]))
+        self.assertIn("2 fired", papp.flash); self.assertIn("1 skipped", papp.flash)
+        self.assertEqual(papp.marked, set())                   # a batch consumes the marks
+
+    def test_bar_names_the_marks(self):
+        papp = self._papp()
+        papp.marked = {"p-1", "p-2"}
+        scr = FakeScr(40, 200)
+        pn.render_bar(scr, pn.Rect(39, 0, 1, 200), papp, "work")
+        self.assertIn("2 marked", scr.calls[0][2])
+        self.assertIn("space mark", "\n".join(pn._HELP_LINES))
+
+
+class TestMachineView(unittest.TestCase):
+    """Deferred 4.3: the machine board view (key m) — the project's states in machine order with
+    band, live count, the acting role, the edges out, and the task ids sitting there."""
+
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-mv-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("p-1", "cedar", "one", "proposal_review", "high", None),
+                                     ("r-1", "cedar", "two", "ready", "high", None),
+                                     ("r-2", "cedar", "three", "ready", "low", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        return papp
+
+    def test_machine_rows_list_states_with_counts_roles_edges_and_ids(self):
+        papp = self._papp()
+        lines = pn.machine_rows(papp.snap, "cedar")
+        ready = next(l for l in lines if "ready" in l.split())
+        self.assertIn("2", ready.split()); self.assertIn("r-1", ready); self.assertIn("r-2", ready)
+        self.assertIn("engineer", ready)                        # the dispatch role for ready
+        pr = next(l for l in lines if l.split()[2] == "proposal_review" or l.split()[1] == "proposal_review")   # the STATE column (edges name it too)
+        self.assertIn("NEEDS YOU", pr); self.assertIn("p-1", pr)
+        self.assertTrue(any("→" in l for l in lines))           # edges out are named
+        self.assertEqual(len([l for l in lines if l.strip()]), len(lines))   # no blank rows
+
+    def test_m_toggles_the_view_and_draw_shows_it(self):
+        papp = self._papp()
+        papp.handle(ord("m"), [], 0, None)
+        self.assertTrue(papp.show_machine)
+        papp.draw()
+        text = "\n".join(c[2] for c in papp.scr.calls)
+        self.assertIn("MACHINE", text); self.assertIn("cedar", text); self.assertIn("proposal_review", text)
+        self.assertNotIn("INSPECTOR", text)
+        papp.handle(27, [], 0, None)
+        self.assertFalse(papp.show_machine)
+        papp.show_machine = True
+        papp._confirm = lambda *a: True
+        self.assertFalse(papp.handle(ord("q"), [], 0, None))    # q still quits
+
+
+class TestLogWallFilters(unittest.TestCase):
+    """Deferred 4.3: log wall filters — `/` narrows the agents by project/role/task, `e` shows only
+    error lines; the title and bar say which filters are on."""
+
+    def _papp(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="dais-lwf-")
+        os.makedirs(os.path.join(root, "projects"), exist_ok=True)
+        conn = _conn(); _seed(conn, [("w-1", "cedar", "build", "ready", "high", None)])
+        papp = pn.PanelApp(FakeScr(40, 200), root=root, conn=conn)
+        papp.snap = d.load_snapshot(conn, root=root)
+        papp._cp = lambda n: n * 1000
+        return papp
+
+    def _threads(self):
+        import tempfile
+        logf = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False, prefix="dais-lwf-")
+        logf.write("starting build\nrunning tests\nTraceback (most recent call last)\nall good\n")
+        logf.close(); self.addCleanup(os.unlink, logf.name)
+        return [{"project": "cedar", "agent": "engineer", "since": "2026-06-29 00:00:00", "secs": 240, "task": "win-95", "log_path": logf.name},
+                {"project": "pine", "agent": "qa", "since": "2026-06-29 00:00:00", "secs": 30, "task": "pn-2", "log_path": logf.name}]
+
+    def test_slash_filter_narrows_the_agents(self):
+        papp = self._papp(); papp.show_logwall = True
+        for ch in (ord("/"), ord("c"), ord("e"), ord("d"), 10):
+            papp.handle(ch, [], 0, None)
+        self.assertEqual(papp.wall_filter, "ced")
+        with mock.patch.object(d, "running_threads", return_value=self._threads()):
+            scr = FakeScr(40, 200); pn.render_logwall(scr, pn.Rect(1, 0, 30, 120), papp)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("cedar/engineer", text); self.assertNotIn("pine/qa", text)
+        self.assertIn("/ced", text)                             # the title names the filter
+        papp.handle(ord("/"), [], 0, None); papp.handle(27, [], 0, None)   # esc clears
+        self.assertEqual(papp.wall_filter, "")
+
+    def test_e_shows_error_lines_only(self):
+        papp = self._papp(); papp.show_logwall = True
+        papp.handle(ord("e"), [], 0, None)
+        self.assertTrue(papp.wall_errors)
+        with mock.patch.object(d, "running_threads", return_value=self._threads()[:1]):
+            scr = FakeScr(40, 200); pn.render_logwall(scr, pn.Rect(1, 0, 30, 120), papp)
+        text = "\n".join(c[2] for c in scr.calls)
+        self.assertIn("Traceback", text); self.assertNotIn("running tests", text)
+        self.assertIn("errors only", text)
+        scr = FakeScr(40, 200); pn.render_bar(scr, pn.Rect(39, 0, 1, 200), papp, "work")
+        self.assertIn("e errors", scr.calls[0][2])
+        papp.handle(ord("e"), [], 0, None)
+        self.assertFalse(papp.wall_errors)

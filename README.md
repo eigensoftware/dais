@@ -199,7 +199,11 @@ machine's edges), each with its key; `?` opens the full map. Highlights: `tab` s
 `j`/`k` move/scroll · `/` filter · `↵` action menu · `n` new task · `e` edit title · `+`/`-`
 priority · `o` open PR · `w` start/stop watch · `p` pause/resume · `t` tick · `R` run a role
 now · `c` cancel the running agent · `C` cut a release · `P` project setup · `r` runs history ·
-`l` log pager · `L` live log wall · `q` quits (with confirm) · `esc` backs out one level.
+`l` log pager · `L` live log wall (`/` filters agents, `e` error lines only) · `m` the
+project's machine as a table (states, band, count, acting role, edges, task ids) · `space`
+marks a task and `u` clears the marks: a keyed edge action or `+`/`-` then applies to every
+marked task, each through the same guards, and the flash sums the batch up · `q` quits (with
+confirm) · `esc` backs out one level.
 
 **No wasted-run loops.** A role that keeps running without moving anything is throttled
 (45 minutes), then stalled until its world changes. "Moving anything" is a net status diff:

@@ -229,7 +229,8 @@ def render_work(scr, rect, app, focused):
                 age = d.fmt_age(d.entered_at(r["task"]), app._now())   # state age (plan 2.3)
                 if age:
                     title = f"{title} · {age}"
-        line = f"  {tag:<7} {tid:<8} {proj[:11]:<11} {title}"
+        mark = "✔ " if (r["kind"] == "task" and r["id"] in getattr(app, "marked", ())) else "  "
+        line = f"{mark}{tag:<7} {tid:<8} {proj[:11]:<11} {title}"
         # selection is ONE uniform bright bar (same as the focused pane title), not the row's hue;
         # a blocked task dims (it won't be picked up until its predecessor is done).
         attr = (curses.A_REVERSE | curses.A_BOLD) if selected else (curses.A_DIM if blocked else base_attr)
@@ -912,7 +913,12 @@ def render_logwall(scr, rect, app):
     """Full-body live log wall: one full-width band per running agent (green header + live tail).
     Reuses running_threads + tail_lines + _LOG_ERR_RE; tailed each draw so the text streams live."""
     threads = d.running_threads(app.snap, app._now(), app.root) if app.snap else []
-    inner = render_pane_title(scr, rect, f"LOG WALL · {len(threads)} agents", True)
+    flt = (getattr(app, "wall_filter", "") or "").lower()
+    if flt:                                  # narrow to agents whose project/role/task match
+        threads = [t for t in threads if flt in ("%s/%s %s" % (t.get("project", ""), t.get("agent", ""), t.get("task") or "")).lower()]
+    errs = getattr(app, "wall_errors", False)
+    title = f"LOG WALL · {len(threads)} agents" + (f" · /{flt}" if flt else "") + (" · errors only" if errs else "")
+    inner = render_pane_title(scr, rect, title, True)
     if not threads:
         _add(scr, inner.y, inner.x, clip_cols("  (no agents running)", inner.w),
              inner.x + inner.w, curses.A_DIM)
@@ -933,9 +939,13 @@ def render_logwall(scr, rect, app):
         k = bh - 1
         if k <= 0:
             continue
-        lines = d.tail_lines(t.get("log_path"), k)
+        if errs:                             # error lines only: read deeper, keep what smells like failure
+            lines = [ln for ln in d.tail_lines(t.get("log_path"), k * 20)
+                     if d._LOG_ERR_RE.search(ln) or "✗" in ln][-k:]
+        else:
+            lines = d.tail_lines(t.get("log_path"), k)
         if not lines:
-            _add(scr, by + 1, inner.x, clip_cols("  (waiting for output...)", inner.w),
+            _add(scr, by + 1, inner.x, clip_cols("  (no errors yet)" if errs else "  (waiting for output...)", inner.w),
                  inner.x + inner.w, curses.A_DIM)
             continue
         for i, ln in enumerate(lines):
@@ -946,6 +956,42 @@ def render_logwall(scr, rect, app):
         _add(scr, inner.y + inner.h - 1, inner.x,
              clip_cols(f"  +{note_n} more agent(s) - resize to see", inner.w),
              inner.x + inner.w, curses.A_DIM)
+
+
+def machine_rows(snap, project):
+    """The MACHINE view's lines for a project: one per state in machine order —
+    band · state · count · acting role · edges out (verb→to) · the task ids sitting there."""
+    p = next((pp for pp in (snap.projects if snap else []) if pp.name == project), None)
+    if p is None or not getattr(p, "machine", None):
+        return ["  (no machine for %s)" % (project or "this project")]
+    m = p.machine
+    out = []
+    for state in m.get("states", {}):
+        tasks = p.tasks_by_status.get(state, [])
+        role = MC.dispatch_role(m, state) or ("founder" if MC.band_of(m, state) == "NEEDS YOU" else "—")
+        edges = ", ".join("%s→%s" % (e.get("verb", "?"), e.get("to", "?")) for e in MC.edges_from(m, state))
+        ids = " ".join(t.id for t in tasks[:5]) + (" +%d" % (len(tasks) - 5) if len(tasks) > 5 else "")
+        out.append("  %-9s %-18s %3d  %-10s %-44s %s" % (MC.band_of(m, state), state, len(tasks), role, edges[:44], ids))
+    return out
+
+
+def render_machine(scr, rect, app):
+    """Full-body MACHINE view (deferred 4.3): the selected project's authored machine with live
+    counts — the same picture the web diagram draws, as a table you can read in a terminal."""
+    project = getattr(app, "_machine_project", None) or app.project_filter
+    if not project and app.snap and app.snap.projects:
+        project = app.snap.projects[0].name
+    p = next((pp for pp in (app.snap.projects if app.snap else []) if pp.name == project), None)
+    name = (p.machine or {}).get("name", "") if p and getattr(p, "machine", None) else ""
+    inner = render_pane_title(scr, rect, f"MACHINE · {project or '?'}" + (f" · {name}" if name else ""), True)
+    head = "  %-9s %-18s %3s  %-10s %-44s %s" % ("band", "state", "n", "acts", "edges out", "tasks")
+    _add(scr, inner.y, inner.x, pad_cols(head, inner.w), inner.x + inner.w, curses.A_BOLD)
+    lines = machine_rows(app.snap, project)
+    top = max(0, min(getattr(app, "machine_scroll", 0), max(0, len(lines) - (inner.h - 1))))
+    for i, ln in enumerate(lines[top:top + max(0, inner.h - 1)]):
+        band = ln.split()[0] if ln.strip() else ""
+        attr = curses.A_BOLD if band == "NEEDS" else (curses.A_DIM if band == "ARCHIVE" else 0)
+        _add(scr, inner.y + 1 + i, inner.x, pad_cols(clip_cols(ln, inner.w), inner.w), inner.x + inner.w, attr)
 
 
 def render_runs(scr, rect, app):
@@ -987,12 +1033,22 @@ def render_bar(scr, rect, app, focus):
              rect.x + rect.w, curses.A_REVERSE)
         return
     if getattr(app, "show_logwall", False):
-        _add(scr, rect.y, rect.x, pad_cols(" L/esc back · q quit", rect.w),
+        if getattr(app, "wall_filtering", False):
+            hint = f" /{app.wall_filter}_  ·  enter keep · esc clear"
+        else:
+            hint = (" / filter agents · e errors only%s · L/esc back · q quit"
+                    % (" [on]" if getattr(app, "wall_errors", False) else ""))
+        _add(scr, rect.y, rect.x, pad_cols(hint, rect.w), rect.x + rect.w, curses.A_REVERSE)
+        return
+    if getattr(app, "show_machine", False):
+        _add(scr, rect.y, rect.x, pad_cols(" j/k scroll · m/esc back · q quit", rect.w),
              rect.x + rect.w, curses.A_REVERSE)
         return
     rows = app.left_rows()
     _, sel_row = app._selected(rows)
     acts = app.action_bar(sel_row) if sel_row else ""
+    if getattr(app, "marked", None):
+        acts = f"[{len(app.marked)} marked → keyed action applies to all · u clear] " + acts
     keys = ("w watch · R run · t tick · tab · / filter · g expand · L logs · r runs · "
             "? help · q quit")
     if getattr(app, "filtering", False):
@@ -1018,7 +1074,9 @@ _HELP_LINES = [
     "  g expand          show every phase (incl. empty) + the full archive (else compact)",
     "  rail + j/k        pick a project (ALL clears the filter)",
     "  l                 open the log pager for the selection",
-    "  L logs            live log wall - all running agents (esc back)",
+    "  space mark        mark the selected task; a keyed action or +/- then hits every mark (u clears)",
+    "  m machine         the project's machine: states, band, count, acting role, edges, task ids",
+    "  L logs            live log wall - all running agents; / filters agents, e = error lines only",
     "  r runs            runs history - every completed run, incl. task-less; j/k move · l/↵ open its log",
     "",
     "  COLUMNS / BANDS  (who acts)",
@@ -1141,6 +1199,42 @@ class PanelApp(d.App):
         self._runs = []
         self.show_overlay = False        # an action's captured output, shown in-panel
         self._overlay = None
+        # deferred 4.3: marks (batch actions), the machine view, the log wall's filters
+        self.marked = set()              # task ids a keyed action applies to (space toggles, u clears)
+        self.show_machine = False        # full-body MACHINE view (the `m` key)
+        self.machine_scroll = 0
+        self.wall_filter = ""            # log wall: only agents whose project/role/task match
+        self.wall_filtering = False      # typing the wall filter
+        self.wall_errors = False         # log wall: error lines only
+
+    def _batch(self, key, rows):
+        """Apply the keyed action to every marked task row that offers it (edge verbs by key,
+        +/- as priority). Returns False when no marked row knows the key (the key falls through)."""
+        marked = [r for r in rows if r.get("kind") == "task" and r.get("id") in self.marked]
+        if key in ("+", "-", "="):
+            for r in marked:
+                self._bump_priority(r, +1 if key in ("+", "=") else -1)
+            self.flash = "priority %s on %d task(s)" % ("raised" if key != "-" else "lowered", len(marked))
+            self.marked = set()
+            return True
+        verb = next((a.id for r in marked for a in self._row_actions(r) if a.key == key and a.slot != "menu"), None)
+        if verb is None:
+            return False
+        fired = skipped = 0
+        for r in marked:
+            if not any(a.id == verb for a in self._row_actions(r)):
+                skipped += 1
+                continue
+            t = self._task_of(r)
+            self.flash = ""
+            self._act_machine(self._machine_of(r), verb, r, t)
+            if str(self.flash).startswith("✓"):
+                fired += 1
+            else:
+                skipped += 1
+        self.marked = set()
+        self.flash = "batch %s: %d fired, %d skipped%s" % (verb, fired, skipped, " (no such edge, or it did not fire)" if skipped else "")
+        return True
 
     def refresh(self):
         super().refresh()
@@ -1291,9 +1385,9 @@ class PanelApp(d.App):
         scr = self.scr
         scr.erase()
         h, w = scr.getmaxyx()
-        if self.show_runs or self.show_logwall:
+        if self.show_runs or self.show_logwall or self.show_machine:
             render_vitals(scr, Rect(0, 0, 1, w), self)
-            body = render_runs if self.show_runs else render_logwall
+            body = render_runs if self.show_runs else (render_logwall if self.show_logwall else render_machine)
             body(scr, Rect(1, 0, max(1, h - 2), w), self)
             render_bar(scr, Rect(h - 1, 0, 1, w), self, self.pane_focus)
             if self.show_help:
@@ -1346,15 +1440,55 @@ class PanelApp(d.App):
             elif ch in (ord("l"), 10, 13):      # l or enter → open the selected run's saved log
                 self._open_run_log()
             return True
-        if self.show_logwall:                   # the wall is a passive full-body view
+        if self.show_logwall:                   # the wall: a full-body view with two filters
+            if self.wall_filtering:             # typing the agent filter (enter keeps, esc clears)
+                if ch in (10, 13):
+                    self.wall_filtering = False
+                elif ch == 27:
+                    self.wall_filtering = False; self.wall_filter = ""
+                elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                    self.wall_filter = self.wall_filter[:-1]
+                elif 32 <= ch < 127:
+                    self.wall_filter += chr(ch)
+                return True
             if ch == ord("q"):
                 return not self._confirm("quit dais top?")
-            if ch in (ord("L"), 27):            # L or esc returns to the control panel
+            if ch == ord("/"):
+                self.wall_filtering = True; self.wall_filter = ""
+            elif ch == ord("e"):                # error lines only
+                self.wall_errors = not self.wall_errors
+            elif ch in (ord("L"), 27):          # L or esc returns to the control panel
                 self.show_logwall = False
+            return True
+        if self.show_machine:                   # the MACHINE view: scroll, back
+            if ch == ord("q"):
+                return not self._confirm("quit dais top?")
+            if ch in (ord("m"), 27):
+                self.show_machine = False
+            elif ch in (ord("j"), curses.KEY_DOWN):
+                self.machine_scroll += 1
+            elif ch in (ord("k"), curses.KEY_UP):
+                self.machine_scroll = max(0, self.machine_scroll - 1)
             return True
         if ch == ord("L"):                      # open the live log wall
             self.show_logwall = True
             return True
+        if ch == ord("m"):                      # open the machine view for the selected project
+            self.show_machine = True; self.machine_scroll = 0
+            self._machine_project = self.project_filter or (sel_row or {}).get("project")
+            return True
+        # marks (deferred 4.3): space toggles the selected task, u clears; a keyed edge action or
+        # +/- with marks applies to EVERY marked task that has that edge (each fires through the
+        # same _act_machine path — its guards prompt per task; the flash sums the batch up)
+        if ch == ord(" ") and sel_row and sel_row.get("kind") == "task":
+            self.marked ^= {sel_row["id"]}
+            return True
+        if ch == ord("u") and self.marked:
+            self.marked = set(); self.flash = "marks cleared"
+            return True
+        if self.marked and 32 <= ch < 127 and ch not in (ord("j"), ord("k"), ord("/"), ord("n"), ord("q"), 9):
+            if self._batch(chr(ch), rows):
+                return True
         if ch == ord("r"):                      # open the RUNS history (completed runs, incl task-less)
             self.show_runs = True
             self.runs_scroll = self.runs_sel = 0
