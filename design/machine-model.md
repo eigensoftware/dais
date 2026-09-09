@@ -51,7 +51,8 @@ README's [Playbooks](../README.md#playbooks-running-any-craft) and
 
 ```yaml
 states:
-  <name>: { initial: true?, terminal: true?, pool: true?, band: <BAND>? }   # tags only
+  <name>: { initial: true?, terminal: true?, pool: true?, band: <BAND>?,
+            dispatch_when: verify:<check>? }                                  # tags only
 edges:
   - from: <state>
     to:   <state>
@@ -105,6 +106,14 @@ protection mechanism; danger is declared per-edge, not coded per-action.
   does the action per the repo's own docs, then fires the edge.
 - `then: "encompassed:<state>-><state>"` — fire an edge on related tasks.
 
+A state may carry `dispatch_when: verify:<check>` — an **external-condition dispatch
+gate**: the scheduler runs the machine's `checks.<check>` command for each task in that
+state (with `DAIS_TASK`, `DAIS_PROJECT`, `DAIS_PR` in its environment) and withholds the
+task while it fails, journaling why. The stock coding machine gates `qa_review` on
+`ci_green` (withholds only on a failing or pending PR check, so a repo with no CI still
+dispatches QA): QA runs on a red PR were pure waste. Fails closed; lint E9 demands a
+declared check.
+
 Edges may also carry `"bounce": {"after": N, "to": <state>}` — a **bounce limit**: the
 (N+1)th fire of that edge's verb on ONE task (counted from the attributed `run_tasks` trail)
 lands in `bounce.to` instead of `to`, skips the edge's effects (no phantom fix task), and
@@ -130,7 +139,8 @@ everything policy/safety-flavored is a warning you can wave off. (Implemented as
 non-terminal has an out-edge) · E3 unambiguous dispatch · E4 has an initial and
 a terminal (and a valid `entry`) · E5 no duplicate (from, verb) edge · E6 no yolo
 tag on a strong-human/verify guard · E7 a `then` effect has a system-owned target
-edge · E8 a `bounce` has a positive `after` and a real `to`.
+edge · E8 a `bounce` has a positive `after` and a real `to` · E9 a `dispatch_when`
+names a declared check.
 
 **Warnings (advisory):** W1 unreachable-from-initial · W2 can't-reach-terminal ·
 W3 outward effect with no strong-human guard on it or its approach · W4 a yolo'd

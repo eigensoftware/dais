@@ -137,6 +137,12 @@ without the founder's release greenlight. Routine-*inward* work can self-serve; 
 *outward* (publish, deploy, send, spend) stays a founder gate no matter how routine it looks.
 Do not copy the promote pattern onto an outward edge.
 
+**QA only runs on a green PR.** The coding machine's `qa_review` state carries
+`dispatch_when: verify:ci_green`: each tick runs the machine's `checks.ci_green` command for
+the task (its PR in `$DAIS_PR`) and withholds it while a check fails or is pending, journaling
+why. A repo with no CI still dispatches. Any state can carry a `dispatch_when`
+([machine-model.md](design/machine-model.md)).
+
 **Guards** are the gate mechanism, declared per edge:
 
 | Guard | Satisfied by |

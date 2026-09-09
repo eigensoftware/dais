@@ -83,6 +83,7 @@ def lint(m):
     _lint_e6_yolo_strong_guard(edges, errors)
     _lint_e7_then_needs_system_edge(edges, errors)
     _lint_e8_bounce(states, edges, errors, warns)
+    _lint_e9_dispatch_when(m, states, errors)
     _lint_w1_reachability(states, edges, out, warns)
     _lint_w2_terminal_reach(states, edges, warns)
     _lint_w3_unguarded_outward(states, edges, warns)
@@ -261,6 +262,22 @@ def _lint_e8_bounce(states, edges, errors, warns):
                          f"where nobody acts")
 
 
+def _lint_e9_dispatch_when(m, states, errors):
+    """E9: a state's `dispatch_when` must be `verify:<check>` with `<check>` declared in the
+    machine's `checks` — the gate fails closed, so an undeclared check would withhold the
+    state's tasks forever with no diagnostics."""
+    checks = (m or {}).get("checks", {}) or {}
+    for s, meta in states.items():
+        tag = meta.get("dispatch_when")
+        if tag is None:
+            continue
+        if not str(tag).startswith("verify:") or not str(tag)[len("verify:"):]:
+            errors.append(f"E9 state {s!r}: dispatch_when {tag!r} must be verify:<check>")
+        elif str(tag)[len("verify:"):] not in checks:
+            errors.append(f"E9 state {s!r}: dispatch_when {tag!r} names no declared checks.{tag[len('verify:'):]} "
+                          f"command — the gate fails closed, so nothing in {s!r} would ever dispatch")
+
+
 def _lint_w4_yolo_outward(edges, warns):
     """W4: a yolo-tagged edge with an outward script effect publishes/deploys with no human in
     the loop while yolo is on. Legitimate (that is the point of the mode) but must be conscious."""
@@ -387,8 +404,35 @@ def _live_pins(conn, project):
     return frozenset(r[0] for r in rows)
 
 
+def _dispatch_gate(m, state):
+    """The check a state's `dispatch_when: verify:<check>` tag names ('' = no gate)."""
+    tag = (m or {}).get("states", {}).get(state, {}).get("dispatch_when") or ""
+    return tag[len("verify:"):] if tag.startswith("verify:") else ("?" if tag else "")
+
+
+def _gate_passes(conn, m, rid, project, check, cache):
+    """Run the state's dispatch check for this task once per scan (plan 2.6): the machine's
+    checks.<check> command with DAIS_TASK / DAIS_PROJECT / DAIS_PR in the environment. No
+    declared command, or a failing one, withholds the task — fail closed, like verify:."""
+    key = (rid, check)
+    if key not in cache:
+        try:
+            row = conn.execute("SELECT id, project, pr_url FROM tasks WHERE id=?", (rid,)).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        task = row if row is not None else {"id": rid, "project": project}
+        if not hasattr(task, "keys"):
+            task = _Row(task)
+        cache[key] = _run_check(m, check, task) is True
+    return cache[key]
+
+
+class _Row(dict):
+    """dict with sqlite3.Row's .keys() shape, for _run_check's env building."""
+
+
 def next_dispatch(conn, m, project, excluded=frozenset(), skip_live_pins=False,
-                  excluded_tasks=frozenset()):
+                  excluded_tasks=frozenset(), withheld=None):
     """Reactive dispatch as (role, task_id): the role to launch next for this project AND the
     specific highest-priority pending task whose state named that role. ('', '') when nothing is
     dispatchable (the caller then considers cadence roles). Blocked/parked/gate states have no
@@ -415,12 +459,20 @@ def next_dispatch(conn, m, project, excluded=frozenset(), skip_live_pins=False,
     rows = conn.execute("SELECT id, status, COALESCE(priority,'medium') FROM tasks "
                         "WHERE project=? AND status NOT IN ('done','cancelled')", (project,)).fetchall()
     best = None
+    gate_cache = {}
     for r in rows:
         rid = r["id"] if hasattr(r, "keys") else r[0]
         status = r["status"] if hasattr(r, "keys") else r[1]
         role = dispatch_role(m, status)
         if not role or role in excluded or rid in live_pins or rid in excluded_tasks \
                 or _dep_open(conn, rid):
+            continue
+        # external-condition dispatch gate (plan 2.6): `dispatch_when: verify:<check>` on the
+        # state — e.g. QA only on a green PR. Withheld tasks are reported to the caller.
+        check = _dispatch_gate(m, status)
+        if check and not _gate_passes(conn, m, rid, project, check, gate_cache):
+            if withheld is not None:
+                withheld.append((rid, check))
             continue
         prio = (r["COALESCE(priority,'medium')"] if hasattr(r, "keys") else r[2])
         key = (_PRIORITY_RANK.get(prio, 2), rid)
@@ -658,6 +710,8 @@ def _run_check(m, check, task):
         return None
     import subprocess
     env = dict(os.environ, DAIS_TASK=task["id"], DAIS_PROJECT=task["project"] or "")
+    if "pr_url" in task.keys() and task["pr_url"]:
+        env["DAIS_PR"] = task["pr_url"]
     try:
         return subprocess.run(cmd, shell=True, env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

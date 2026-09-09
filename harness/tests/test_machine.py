@@ -301,6 +301,48 @@ class TestAssigneeStamp(unittest.TestCase):
     def _row(self, tid):
         return self.conn.execute("SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()
 
+    def _gated(self, cmd):
+        # a two-state machine whose qa_review dispatch waits on checks.ci (plan 2.6)
+        m = {"name": "g", "entry": "qa_review",
+             "roles": {"founder": {"human": True}, "qa": {"access": "review"}},
+             "states": {"qa_review": {"initial": True, "dispatch_when": "verify:ci"},
+                        "done": {"terminal": True}},
+             "edges": [{"from": "qa_review", "to": "done", "by": "qa", "verb": "pass"}],
+             "checks": {"ci": cmd}}
+        c = _db(); c.execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT")
+        t = M.create_task(c, m, "proj", "review me", "qa_review")
+        c.execute("UPDATE tasks SET pr_url='https://x/pull/7' WHERE id=?", (t,)); c.commit()
+        return m, c, t
+
+    def test_dispatch_when_withholds_a_task_whose_check_fails(self):
+        m, c, t = self._gated("false")
+        withheld = []
+        self.assertEqual(M.next_dispatch(c, m, "proj", withheld=withheld), ("", ""))
+        self.assertEqual(withheld, [(t, "ci")])
+        m, c, t = self._gated("true")
+        self.assertEqual(M.next_dispatch(c, m, "proj"), ("qa", t))
+
+    def test_dispatch_when_check_sees_the_task_and_its_pr(self):
+        m, c, t = self._gated('[ "$DAIS_PR" = "https://x/pull/7" ] && [ "$DAIS_TASK" = "%s" ]')
+        m["checks"]["ci"] = m["checks"]["ci"] % t
+        self.assertEqual(M.next_dispatch(c, m, "proj"), ("qa", t))
+
+    def test_dispatch_when_without_a_declared_check_fails_closed_and_lints(self):
+        m, c, t = self._gated("true")
+        del m["checks"]["ci"]
+        self.assertEqual(M.next_dispatch(c, m, "proj"), ("", ""))
+        errs, _ = M.lint(m)
+        self.assertTrue(any("E9" in e and "ci" in e for e in errs), errs)
+        m["states"]["qa_review"]["dispatch_when"] = "confirm"      # only verify:<check> makes sense here
+        errs, _ = M.lint(m)
+        self.assertTrue(any("E9" in e for e in errs), errs)
+
+    def test_stock_coding_machine_gates_qa_on_ci(self):
+        m = M.load(CODING)
+        self.assertEqual(m["states"]["qa_review"].get("dispatch_when"), "verify:ci_green")
+        self.assertIn("ci_green", m.get("checks", {}))
+        self.assertEqual(M.lint(m)[0], [])
+
     def test_bounce_limit_escalates_the_third_fail_without_a_spawn(self):
         # plan 2.5: "a task bounced QA<->engineer twice goes to the founder" lived in a prompt.
         # As an edge attribute the machine enforces it: the (after+1)th fire of this verb on

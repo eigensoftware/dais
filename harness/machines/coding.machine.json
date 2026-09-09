@@ -15,7 +15,7 @@
     "ready":            {},
     "design":           {},
     "doing":            {},
-    "qa_review":        {},
+    "qa_review":        {"dispatch_when": "verify:ci_green"},
     "blocked":          {},
     "escalated":        {},
     "approved":         {"band": "WAITING"},
@@ -26,6 +26,9 @@
     "deferred":         {"band": "WAITING", "history": true},
     "done":             {"terminal": true},
     "cancelled":        {"terminal": true}
+  },
+  "checks": {
+    "ci_green": "[ -z \"${DAIS_PR:-}\" ] || ! command -v gh >/dev/null 2>&1 || ! gh pr checks \"$DAIS_PR\" 2>/dev/null | grep -qiE '\\b(fail|failure|pending|queued|in_progress)\\b'"
   },
   "edges": [
     {"from": "proposed",        "to": "proposal_review", "by": "lead",     "verb": "submit"},

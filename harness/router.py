@@ -451,8 +451,13 @@ def decide(root, project, excluded=None, live=None):
     #    dependencies). Cadence roles (2) still run on their clock for periodic discovery.
     #    trigger=none is DORMANCY and outranks the machine: a shelved role (e.g. a parked project's
     #    lead) is never scheduled even when an edge would dispatch it — none means never scheduled.
-    role = MC.next_role(db, MC.load(_machine_for(root, project)), project,
-                        excluded=excluded | dormant, excluded_tasks=over_budget)
+    withheld = []
+    role = MC.next_dispatch(db, MC.load(_machine_for(root, project)), project,
+                            excluded=excluded | dormant, excluded_tasks=over_budget,
+                            withheld=withheld)[0]
+    for tid, check in withheld:                      # -> the tick journal (dispatch.sh routes stderr)
+        print("dispatch-gate: %s/%s waits on verify:%s (the state's dispatch_when)"
+              % (project, tid, check), file=sys.stderr)
     if role:
         return role
 
