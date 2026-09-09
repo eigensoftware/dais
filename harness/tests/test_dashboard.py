@@ -478,6 +478,14 @@ class TestDataLayer(unittest.TestCase):
         self.assertFalse(snap2.budget["over"])
         self.assertIsNone(d.load_snapshot(_seed(), root="/nonexistent", now="2026-06-26 20:45:00").budget)
 
+    def test_parse_dry_run_finds_would_run_lines(self):
+        # plan 4.3: the vitals "next:" preview parses a real dry-run tick
+        text = ("tick: pool width 2\ntick[acme]: WOULD run engineer  (prio 1, last_run never)\n"
+                "tick[wb]: cooling — anthropic hit its usage cap within 90m — skipping lead\n"
+                "tick[wb]: WOULD run qa  (prio 100, last_run 2026-09-09 10:00:00)\n")
+        self.assertEqual(d.parse_dry_run(text), [("acme", "engineer"), ("wb", "qa")])
+        self.assertEqual(d.parse_dry_run("tick: nothing eligible to run\n"), [])
+
     def test_gate_age_reads_state_entered_at_not_updated_at(self):
         # plan 2.3: a note on a 3-day-old gate must not make it read as fresh
         conn = _seed()

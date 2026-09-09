@@ -214,6 +214,14 @@ project's last reason with its age and when it retries (`idle · throttle acme/l
 ago, retry ≈33m)`), the vitals strip shows the newest one in a few words when nothing runs,
 and `dais status` prints `⏱ last tick: …` under each idle project.
 
+**What the inspector adds** (first top batch of the plan): the reviewing role's verdict and
+the recorded checks on the selected task; the PR's size, state, and mergeability via `gh`
+(cached two minutes; it says so when `gh` is missing); a long notes log folds to its last six
+entries; each run in the history and in the FEED shows the tokens and dollars it cost; `/`
+searches notes as well as titles; the vitals strip shows what the next tick would launch when
+the loop is idle, and warns `⚠ COLLISION <project>` when two live runs share one working
+tree without worktree isolation.
+
 **Manual vs. the loop.** `dais watch` is the continuous auto-dispatcher. `dais start <id>`,
 `R`, and `t` are on-demand runs that fire one agent now and bypass pause. `start` runs the
 role the machine dispatches for the task's state, honoring the dependency chain.

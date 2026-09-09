@@ -32,6 +32,11 @@ def fmt_budget(b):
     return "%s/%s tokens" % (fmt_tokens(b["spent"]), fmt_tokens(b["limit"]))
 
 
+def parse_dry_run(text):
+    """[(project, role)] from a `dais tick --dry-run` transcript (plan 4.3: the vitals "next:")."""
+    return re.findall(r"tick\[(\S+)\]: WOULD run (\S+)", text or "")
+
+
 def over_budget_tasks_in(snap):
     """[(project, Task)] for every open task the spend ceiling is holding (plan 1.6)."""
     out = []

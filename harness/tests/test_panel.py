@@ -435,6 +435,90 @@ class TestChromePanes(unittest.TestCase):
         text = " ".join(s for (_y, _x, s, _a) in scr.calls)
         self.assertIn("· 3d", text)
 
+    # --- the top batch (plan 4.3) -----------------------------------------------------------
+    def _alter(self, conn, *stmts):
+        for st in stmts:
+            try:
+                conn.execute(st)
+            except Exception:
+                pass
+
+    def test_inspector_shows_verdict_checks_and_pr_facts_hint(self):
+        import json
+        app = self._app([("cou-1", "acme", "login", "approved", "high", "https://x/pull/7")])
+        self._alter(app.conn, "ALTER TABLE tasks ADD COLUMN verdict TEXT",
+                    "ALTER TABLE tasks ADD COLUMN check_results TEXT")
+        app.conn.execute("UPDATE tasks SET verdict=?, check_results=? WHERE id='cou-1'",
+                         (json.dumps({"verdict": "pass", "summary": "all green", "by": "qa"}),
+                          json.dumps({"tests_pass": {"ok": 1, "at": "2026-09-09 10:00:00", "pr": "https://x/pull/7"}})))
+        app.conn.commit()
+        old = os.environ.get("PATH"); os.environ["PATH"] = "/usr/bin:/bin"       # no gh
+        self.addCleanup(os.environ.__setitem__, "PATH", old)
+        app.snap = d.load_snapshot(app.conn, root=app.root)
+        app.sel_id = "cou-1"
+        body = "\n".join(pn._panel_detail_lines(app, app._selected(app.left_rows())[1]))
+        self.assertIn("verdict: pass — all green (qa)", body)
+        self.assertIn("checks: tests_pass ✓", body)
+        self.assertIn("gh", body)                                  # PR facts need gh: said, not silent
+
+    def test_search_text_covers_notes(self):
+        row = {"kind": "task", "tag": "READY", "id": "t-1", "project": "acme",
+               "task": d.Task("t-1", "a title", "ready", "high", notes="the secret word is PELICAN")}
+        self.assertIn("PELICAN", pn._row_search_text(row))
+
+    def test_inspector_collapses_old_note_entries(self):
+        notes = "\n\n".join("[lead 2026-09-0%d 10:00] entry %d" % (1 + i % 8, i) for i in range(1, 11))
+        app = self._app([("cou-1", "acme", "x", "ready", "high", None)])
+        app.conn.execute("UPDATE tasks SET notes=? WHERE id='cou-1'", (notes,)); app.conn.commit()
+        app.snap = d.load_snapshot(app.conn, root=app.root)
+        app.sel_id = "cou-1"
+        body = "\n".join(pn._panel_detail_lines(app, app._selected(app.left_rows())[1]))
+        self.assertIn("entry 10", body); self.assertIn("entry 5", body)
+        self.assertNotIn("entry 1\n", body + "\n"); self.assertNotIn("entry 4", body)
+        self.assertIn("10 entries", body); self.assertIn("older", body)
+
+    def test_feed_and_run_history_show_tokens_and_cost(self):
+        app = self._app([("cou-1", "acme", "x", "doing", "high", None)])
+        self._alter(app.conn, "ALTER TABLE runs ADD COLUMN input_tokens INTEGER",
+                    "ALTER TABLE runs ADD COLUMN cost_usd REAL",
+                    "CREATE TABLE IF NOT EXISTS run_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, task_id TEXT, verb TEXT, at TEXT)")
+        app.conn.execute("INSERT INTO runs(id,project,agent,status,started_at,ended_at,input_tokens,cost_usd) "
+                         "VALUES(9,'acme','engineer','succeeded',datetime('now','-10 minutes'),datetime('now'),186035,0.0625)")
+        app.conn.execute("INSERT INTO run_tasks(run_id,task_id,verb) VALUES(9,'cou-1','claim')")
+        app.conn.commit()
+        app.snap = d.load_snapshot(app.conn, root=app.root)
+        scr = FakeScr(40, 200)
+        pn.render_feed(scr, pn.Rect(0, 0, 1, 200), app)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("186k", text)
+        app.sel_id = "cou-1"
+        body = "\n".join(pn._panel_detail_lines(app, app._selected(app.left_rows())[1]))
+        self.assertIn("186k", body); self.assertIn("$0.06", body)
+
+    def test_vitals_warns_on_two_unisolated_runs_in_one_repo(self):
+        app = self._app([("cou-1", "acme", "x", "doing", "high", None)])
+        os.makedirs(os.path.join(app.root, "projects", "acme", "agents"), exist_ok=True)
+        app.snap.projects[0].running = [("engineer", "2026-09-09 10:00:00", 1), ("qa", "2026-09-09 10:01:00", 2)]
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("COLLISION acme", text)
+        for r in ("engineer", "qa"):
+            with open(os.path.join(app.root, "projects", "acme", "agents", r + ".md"), "w") as fh:
+                fh.write("---\nisolation: worktree\n---\npersona\n")
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertNotIn("COLLISION", text)
+
+    def test_vitals_shows_the_next_tick_preview_when_idle(self):
+        app = self._app([("cou-1", "acme", "x", "ready", "high", None)])
+        app.next_preview = lambda: [("acme", "engineer")]
+        scr = FakeScr(40, 200)
+        pn.render_vitals(scr, pn.Rect(0, 0, 1, 200), app)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("next: acme/engineer", text)
+
     # --- "why idle" (plan 1.7) in the cockpit ---------------------------------------------
     def _journaled_app(self):
         app = self._app([("cou-1", "acme", "x", "approved", "high", None)])     # nothing dispatchable

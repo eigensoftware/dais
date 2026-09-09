@@ -141,7 +141,8 @@ def _row_search_text(r):
     if r["kind"] == "running":
         return f"{r.get('task_id', '')} {r['project']} {r.get('agent', '')}"
     t = r.get("task")
-    return f"{r.get('tag', '')} {r['id']} {r['project']} {t.title if t else ''}"
+    # notes are searchable too (plan 4.3): "/ PELICAN" finds the task whose spec mentions it
+    return f"{r.get('tag', '')} {r['id']} {r['project']} {t.title if t else ''} {(t.notes or '')[:2000] if t else ''}"
 
 
 def _tag_attr(app, row):
@@ -398,6 +399,16 @@ def _panel_detail_lines(app, sel_row):
     if ob:                                              # the spend ceiling holds it (plan 1.6)
         out.append(f"⛔ over budget — {ob['runs']} runs · {d.fmt_tokens(ob['tokens'])} on this task; "
                    f"withheld from dispatch. Lift: dais task set {task.id} --budget-lift")
+    # plan 4.3: the reviewing role's verdict, the recorded checks, the PR's facts (gh, cached)
+    vl = _verdict_line(task)
+    if vl:
+        out.append("verdict: " + vl)
+    cl = _checks_line(task, app._now())
+    if cl:
+        out.append("checks: " + cl)
+    if task.pr_url:
+        facts = app.pr_facts(task.pr_url) if hasattr(app, "pr_facts") else None
+        out.append("PR " + (facts if facts else "facts need gh on PATH (size, state, mergeable)"))
     vst = _aggregate_map(p.machine).get(task.status)    # parked in a swept state (e.g. approved):
     if vst is not None:                                 # name the release vehicle that ships it
         vehicles = p.tasks_by_status.get(vst, [])
@@ -416,25 +427,68 @@ def _panel_detail_lines(app, sel_row):
     if lnk:
         out += lnk + [""]
     if task.notes:
-        out.append("notes:")
-        for ln in task.notes.split("\n"):           # keep the author's structure; blanks stay blank
-            if not ln.strip():
-                out.append("")
-                continue
-            # break a run-on line before each known sub-head so WHAT/WHY NOW/IMPACT/… each start a
-            # line and become a scannable outline (no-op when the author already broke them out)
-            for piece in _split_subheads(ln):
-                if piece.strip():
-                    out.append("  " + piece.strip())
-        out.append("")
+        # plan 4.3: a long log folds — the last NOTE_TAIL entries stay, older ones are counted
+        entries = [e for e in task.notes.split("\n\n") if e.strip()]
+        shown = entries if len(entries) <= NOTE_TAIL else entries[-NOTE_TAIL:]
+        out.append("notes:" if len(shown) == len(entries)
+                   else f"notes ({len(entries)} entries, last {NOTE_TAIL} — {len(entries) - NOTE_TAIL} older folded; dais task show {task.id} for all):")
+        for e in shown:
+            for ln in e.split("\n"):                # keep the author's structure inside an entry
+                if not ln.strip():
+                    continue
+                # break a run-on line before each known sub-head so WHAT/WHY NOW/IMPACT/… each
+                # start a line and become a scannable outline
+                for piece in _split_subheads(ln):
+                    if piece.strip():
+                        out.append("  " + piece.strip())
+            out.append("")
     out.append(f"runs touching {task.id}:")
     for r in d.runs_touching(p.recent_runs, task.id):
         dur = f"{r.dur_min}m" if r.dur_min is not None else "··"
         # the model column is what a run ACTUALLY launched on (runs.model) — reveals the
         # usage-cap auto-fallback, which the configured-model line elsewhere can't show
+        spend = ""                                   # the ledger (plan 4.3): tokens · dollars
+        if getattr(r, "input_tokens", None):
+            spend = f" {d.fmt_tokens(r.input_tokens)}" + (f" · ${r.cost_usd:.2f}" if getattr(r, "cost_usd", None) is not None else "")
         out.append(f"  {d.to_local_hhmm(r.started_at):<5} {r.agent:<10} {r.status:<11} "
-                   f"{dur:<4} {d.fmt_model(r.model)}")
+                   f"{dur:<4} {d.fmt_model(r.model)}{spend}")
     return out
+
+
+NOTE_TAIL = 6   # inspector: how many latest note entries stay unfolded
+
+
+def _verdict_line(task):
+    """'pass — all green (qa)' from the task's stored --verdict JSON, or None."""
+    import json
+    try:
+        v = json.loads(getattr(task, "verdict", None) or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(v, dict):
+        return None
+    line = str(v.get("verdict") or v.get("verb") or "?")
+    if v.get("summary"):
+        line += f" — {v['summary']}"
+    if v.get("by"):
+        line += f" ({v['by']})"
+    return line
+
+
+def _checks_line(task, now):
+    """'tests_pass ✓ (12m ago)' per recorded `dais check` result, or None."""
+    import json
+    try:
+        rec = json.loads(getattr(task, "check_results", None) or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rec, dict) or not rec:
+        return None
+    parts = []
+    for name, r in rec.items():
+        age = d.fmt_age(r.get("at", ""), now) or "just now"
+        parts.append(f"{name} {'✓' if r.get('ok') else '✗'} ({age}{' ago' if age != 'just now' else ''})")
+    return ", ".join(parts)
 
 
 def _find_task(snap, tid):
@@ -672,6 +726,26 @@ def render_vitals(scr, rect, app):
     if not threads and snap and getattr(snap, "last_tick", None):   # why idle, in a few words (plan 1.7)
         _why = snap.last_tick["text"].split(" — ")[0].split(";")[0]
         run_tok += f" · idle: {_why[:40]}"
+    if not threads and hasattr(app, "next_preview"):                # plan 4.3: what the next tick launches
+        try:
+            _nxt = app.next_preview() or []
+        except Exception:
+            _nxt = []
+        if _nxt:
+            run_tok += " · next: " + ", ".join(f"{pj}/{rl}" for pj, rl in _nxt[:2])
+    # plan 4.3: two live runs in one repo with no worktree isolation share one working tree
+    _coll = []
+    for _p in (snap.projects if snap else []):
+        _roles = [a for a, _s, _r in (_p.running or [])]
+        if len(_roles) >= 2:
+            try:
+                iso = [d.router.agent_setup(app.root, _p.name, r)["isolation"] for r in _roles]
+            except Exception:
+                iso = []
+            if any(i != "worktree" for i in iso) or not iso:
+                _coll.append(_p.name)
+    if _coll:
+        cool += " · ⚠ COLLISION " + ",".join(_coll)
     gage = d.oldest_gate_age(snap, now) if ng > 0 else ""     # how stale is the WORST gate
     gate_tok = (f"{_DOT_GATE} {ng} NEED YOU" + (f" · {gage}" if gage else "")
                 if ng > 0 else f"{_DOT_IDLE} {ng} need you")
@@ -824,6 +898,8 @@ def render_feed(scr, rect, app):
         if x >= end:
             break
         seg = f"{d.to_local_hhmm(r.started_at)} {r.agent} {r.status}"   # r.agent is already 'project/agent'
+        if getattr(r, "input_tokens", None):                                # the ledger (plan 4.3)
+            seg += f" {d.fmt_tokens(r.input_tokens)}"
         sep = "  ·  " if i < len(runs) - 1 else ""
         text = clip_cols(seg + sep, end - x)
         if not text:
@@ -1014,6 +1090,41 @@ _RENDER = {
 
 
 class PanelApp(d.App):
+    # plan 4.3: two cached lookups the inspector/vitals read every refresh
+    _PR_TTL, _PREVIEW_TTL = 120, 30
+
+    def pr_facts(self, pr_url):
+        """'+120 −8 in 6 files · OPEN · MERGEABLE' via gh (brief._pr_facts), cached 2 minutes."""
+        import time as _time
+        cache = self.__dict__.setdefault("_pr_cache", {})
+        hit = cache.get(pr_url)
+        if hit and _time.time() - hit[1] < self._PR_TTL:
+            return hit[0]
+        try:
+            import brief
+            facts = brief._pr_facts(pr_url)
+        except Exception:
+            facts = None
+        cache[pr_url] = (facts, _time.time())
+        return facts
+
+    def next_preview(self):
+        """[(project, role)] the next tick would launch — a dry-run tick, cached 30 seconds."""
+        import subprocess as _sp, time as _time
+        hit = self.__dict__.get("_preview")
+        if hit and _time.time() - hit[1] < self._PREVIEW_TTL:
+            return hit[0]
+        out = []
+        try:
+            r = _sp.run([os.path.join(d.ROOT, "harness", "dispatch.sh"), "--dry-run"],
+                        capture_output=True, text=True, timeout=20,
+                        env=dict(os.environ, DAIS_HOME=self.root, NO_COLOR="1"))
+            out = d.parse_dry_run(r.stdout)
+        except Exception:
+            out = []
+        self.__dict__["_preview"] = (out, _time.time())
+        return out
+
     """The control panel: App's data/engine/log/selection, a multi-pane responsive view."""
 
     def __init__(self, scr, interval=2.0, root=d.HOME, conn=None):
