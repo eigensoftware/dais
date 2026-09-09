@@ -166,7 +166,15 @@ attributed audit note on the task, and `--for` self-expires the mode. Design:
 the fix), `aggregate` a set (a release pulls in every `approved` task), or `then`-fire edges
 on what it encompasses (shipping a release closes its children); each nested change still a
 real, guarded edge. `fire` is atomic: a transition and all its effects commit or roll back
-together.
+together. A `spawn` may also be a LIST, so one approval fans out an initiative; an entry's
+`after: <template>` chains it behind the sibling spawned earlier in the same fan-out
+(`blocked_on`), and the scheduler runs the chain in order:
+
+```json
+"effect": {"spawn": [{"template": "design", "initial": "ready", "by": "engineer"},
+                     {"template": "build",  "initial": "ready", "by": "engineer", "after": "design"},
+                     {"template": "docs",   "initial": "ready", "by": "writer",   "after": "build"}]}
+```
 
 **Dispatch is derived.** The scheduler runs the role the machine names for the top pending
 task's state; cadence roles (e.g. a lead on `every:24h`) also run on their clock for periodic

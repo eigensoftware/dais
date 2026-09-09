@@ -116,12 +116,28 @@ def _lint_e1_references(m, states, edges, errors):
         for k in eff:
             if k not in EFFECT_KINDS:
                 errors.append(f"E1 {tag}: unknown effect kind {k!r}")
-        sp = eff.get("spawn")
-        if sp:
+        earlier = []
+        for sp in spawn_specs(eff):
+            if not isinstance(sp, dict):
+                errors.append(f"E1 {tag}: spawn entry {sp!r} is not an object"); continue
             if sp.get("initial") not in states:
                 errors.append(f"E1 {tag}: spawn.initial {sp.get('initial')!r} is not a state")
             if sp.get("by") not in roles:
                 errors.append(f"E1 {tag}: spawn.by {sp.get('by')!r} is not a role")
+            if sp.get("after") and sp["after"] not in earlier:
+                errors.append(f"E1 {tag}: spawn.after {sp['after']!r} names no EARLIER spawn template "
+                              f"in the same fan-out (earlier: {', '.join(earlier) or 'none'})")
+            earlier.append(sp.get("template", "task"))
+
+
+def spawn_specs(eff):
+    """The spawn entries of an effect as a list (plan 6.1): `spawn` is one spec (the historical
+    shape) or a list of specs — one approval fans out an initiative. An entry's `after: <template>`
+    chains it behind the sibling spawned earlier in the same fan-out (blocked_on)."""
+    sp = (eff or {}).get("spawn")
+    if not sp:
+        return []
+    return list(sp) if isinstance(sp, list) else [sp]
 
 
 def _lint_e2_dead_ends(states, out, errors):
@@ -170,8 +186,8 @@ def _lint_e5_duplicate_edges(edges, errors):
 def _lint_w1_reachability(states, edges, out, warns):
     """W1: entry points are declared initials PLUS any state a spawn effect drops a task into."""
     initials = {s for s, meta in states.items() if meta.get("initial")}
-    spawn_targets = {e["effect"]["spawn"]["initial"] for e in edges
-                     if e.get("effect", {}).get("spawn", {}).get("initial") in states}
+    spawn_targets = {sp.get("initial") for e in edges for sp in spawn_specs(e.get("effect"))
+                     if isinstance(sp, dict) and sp.get("initial") in states}
     seen = initials | spawn_targets
     stack = list(seen)
     while stack:
@@ -1076,7 +1092,9 @@ def _link_run(conn, tid, verb):
 def _apply_effect(conn, m, task, edge, result, ctx):
     eff = edge.get("effect", {})
     if "spawn" in eff:
-        _effect_spawn(conn, task, eff["spawn"], result)
+        spawned_by_template = {}                  # 6.1: a fan-out's earlier siblings, for `after`
+        for sp in spawn_specs(eff):
+            _effect_spawn(conn, task, sp, result, spawned_by_template)
     if "aggregate" in eff:
         _effect_aggregate(conn, m, task, eff["aggregate"], result)
     if "then" in eff:
@@ -1087,13 +1105,22 @@ def _apply_effect(conn, m, task, edge, result, ctx):
     # edge; the engine executing side-effect scripts itself would bypass exactly those gates.
 
 
-def _effect_spawn(conn, task, sp, result):
+def _effect_spawn(conn, task, sp, result, siblings=None):
     """spawn: create a linked child task (a fix, an impl from a proposal, a rollback).
     The child INHERITS the parent's notes — the spec the founder approved travels to the
     [impl] task, and QA-fail findings travel to the fix task — so nobody ever pulls a bare
-    title from `ready` (notes column arrives by base schema; degrade gracefully without it)."""
-    title = f"[{sp.get('template','task')}] {task['title']}"
+    title from `ready` (notes column arrives by base schema; degrade gracefully without it).
+    6.1: `after: <template>` sets blocked_on to the sibling spawned earlier in this fan-out
+    (`siblings`: template -> id), so the scheduler runs the chain in order; a db without the
+    blocked_on column (unmigrated) still fans out, unchained."""
+    template = sp.get("template", "task")
+    title = f"[{template}] {task['title']}"
     extra = {}
+    after = sp.get("after")
+    if after and siblings and siblings.get(after):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        if "blocked_on" in have:
+            extra["blocked_on"] = siblings[after]
     try:
         row = conn.execute("SELECT notes FROM tasks WHERE id=?", (task["id"],)).fetchone()
         inherited = f"[inherited from {task['id']}]"
@@ -1108,7 +1135,10 @@ def _effect_spawn(conn, task, sp, result):
     conn.execute("INSERT INTO task_links(parent_id,child_id,rel) VALUES(?,?,?)",
                  (task["id"], cid, rel))
     _link_run(conn, cid, "create")
-    result["spawned"].append({"id": cid, "rel": rel, "state": sp["initial"]})
+    if siblings is not None:
+        siblings[template] = cid
+    result["spawned"].append({"id": cid, "rel": rel, "state": sp["initial"], "template": template,
+                              "blocked_on": extra.get("blocked_on")})
 
 
 def _effect_aggregate(conn, m, task, agg, result):

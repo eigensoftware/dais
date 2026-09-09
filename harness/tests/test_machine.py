@@ -1319,3 +1319,58 @@ class TestYolo(unittest.TestCase):
         errors, warns = M.lint(M.load(CODING))
         self.assertEqual(errors, [])
         self.assertFalse(any("W4" in w for w in warns), warns)
+
+
+class TestMultiSpawn(unittest.TestCase):
+    """Plan 6.1: a spawn effect may be a LIST — one approval fans out an initiative — and an entry's
+    `after: <template>` chains it behind the sibling spawned earlier in the same fan-out
+    (blocked_on), so the scheduler runs them in order."""
+
+    M = {"name": "fan", "entry": "proposed",
+         "roles": {"lead": {"access": "draft"}, "engineer": {"access": "edit"}, "writer": {"access": "edit"},
+                   "founder": {"human": True}},
+         "states": {"proposed": {"initial": True}, "ready": {}, "done": {"terminal": True}},
+         "edges": [{"from": "proposed", "to": "done", "by": "founder", "verb": "approve",
+                    "effect": {"spawn": [{"template": "design", "initial": "ready", "by": "engineer"},
+                                         {"template": "build", "initial": "ready", "by": "engineer", "after": "design"},
+                                         {"template": "docs", "initial": "ready", "by": "writer", "after": "build"}]}},
+                   {"from": "ready", "to": "done", "by": "engineer", "verb": "finish"}]}
+
+    def setUp(self):
+        self.conn = _db()
+        self.conn.execute("ALTER TABLE tasks ADD COLUMN blocked_on TEXT")
+        self.m = M.load_dict(self.M) if hasattr(M, "load_dict") else self.M
+
+    def test_list_spawn_fans_out_and_chains_by_after(self):
+        p = M.create_task(self.conn, self.m, "proj", "ship the thing")
+        r = M.fire(self.conn, self.m, p, "approve", "founder")
+        self.assertEqual([s["template"] for s in r["spawned"]], ["design", "build", "docs"])
+        ids = {s["template"]: s["id"] for s in r["spawned"]}
+        rows = {row[0]: row[1] for row in self.conn.execute("SELECT id, blocked_on FROM tasks")}
+        self.assertIsNone(rows[ids["design"]])
+        self.assertEqual(rows[ids["build"]], ids["design"])
+        self.assertEqual(rows[ids["docs"]], ids["build"])
+        titles = {row[0]: row[1] for row in self.conn.execute("SELECT id, title FROM tasks")}
+        self.assertEqual(titles[ids["docs"]], "[docs] ship the thing")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM task_links WHERE parent_id=? AND rel='spawned_from'",
+                                           (p,)).fetchone()[0], 3)
+
+    def test_chain_degrades_without_the_blocked_on_column(self):
+        conn = _db()                                          # no blocked_on column (unmigrated)
+        p = M.create_task(conn, self.m, "proj", "ship")
+        r = M.fire(conn, self.m, p, "approve", "founder")
+        self.assertEqual(len(r["spawned"]), 3)                # the fan-out still happens, unchained
+
+    def test_lint_rejects_an_after_that_names_no_earlier_sibling(self):
+        bad = dict(self.M); bad["edges"] = [dict(self.M["edges"][0]), self.M["edges"][1]]
+        bad["edges"][0]["effect"] = {"spawn": [{"template": "build", "initial": "ready", "by": "engineer", "after": "design"},
+                                               {"template": "design", "initial": "ready", "by": "engineer"}]}
+        errors, _ = M.lint(bad)
+        self.assertTrue(any("after" in e and "design" in e for e in errors), errors)
+        ok = dict(self.M)
+        errors, _ = M.lint(ok)
+        self.assertEqual([e for e in errors if "spawn" in e], [])
+        bad2 = dict(self.M); bad2["edges"] = [dict(self.M["edges"][0]), self.M["edges"][1]]
+        bad2["edges"][0]["effect"] = {"spawn": [{"template": "x", "initial": "nowhere", "by": "engineer"}]}
+        errors, _ = M.lint(bad2)
+        self.assertTrue(any("spawn.initial" in e for e in errors), errors)

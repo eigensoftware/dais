@@ -203,7 +203,9 @@ def render(conn, root, tid, now=None):
         eff = e.get("effect") or {}
         fx = []
         if "spawn" in eff:
-            fx.append("spawns a %s task at %s" % (eff["spawn"].get("template", "task"), eff["spawn"].get("initial")))
+            for sp in MC.spawn_specs(eff):       # one spec or a fan-out list (6.1)
+                fx.append("spawns a %s task at %s%s" % (sp.get("template", "task"), sp.get("initial"),
+                                                       (" (after %s)" % sp["after"]) if sp.get("after") else ""))
         if "aggregate" in eff:
             fx.append("sweeps the %s pool" % (eff["aggregate"].get("select", "").split("=")[-1] or "approved"))
         if "then" in eff:
