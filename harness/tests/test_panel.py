@@ -419,6 +419,22 @@ class TestChromePanes(unittest.TestCase):
         text = " ".join(s for (_y, _x, s, _a) in scr.calls)
         self.assertIn("BUDGET SPENT", text)
 
+    def test_work_row_age_reads_state_entered_at(self):
+        # plan 2.3: the row's aging tag is how long the task has sat in THIS state
+        app = self._app([("cou-1", "acme", "old gate", "proposal_review", "high", None)])
+        try:
+            app.conn.execute("ALTER TABLE tasks ADD COLUMN state_entered_at TEXT")
+        except Exception:
+            pass
+        app.conn.execute("UPDATE tasks SET updated_at=datetime('now'), "
+                         "state_entered_at=datetime('now','-3 days') WHERE id='cou-1'")
+        app.conn.commit()
+        app.snap = d.load_snapshot(app.conn, root=app.root)
+        scr = FakeScr(40, 200)
+        pn.render_work(scr, pn.Rect(1, 0, 30, 200), app, focused=True)
+        text = " ".join(s for (_y, _x, s, _a) in scr.calls)
+        self.assertIn("· 3d", text)
+
     # --- "why idle" (plan 1.7) in the cockpit ---------------------------------------------
     def _journaled_app(self):
         app = self._app([("cou-1", "acme", "x", "approved", "high", None)])     # nothing dispatchable

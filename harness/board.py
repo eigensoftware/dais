@@ -66,13 +66,21 @@ class Task:
     assignee: str = None
     pr_url: str = None
     notes: str = None
-    updated_at: str = None   # last status change — used to sort the archive newest-first
+    updated_at: str = None   # last CHANGE of any kind (notes, priority, title, status) — archive sort
+    state_entered_at: str = None  # when it entered its current state (0011); None pre-migration
     blocked_on: str = None   # predecessor task id this task waits on (dependency)
     blocked: bool = False     # computed: blocked_on is set AND that predecessor isn't done/cancelled
     blocked_status: str = None  # computed: the open predecessor's CURRENT state (shown on the row)
     over_budget: dict = None  # computed (plan 1.6): {'runs', 'tokens'} when the task passed its
                               # project's spend ceiling — the dispatcher withholds it until
                               # `dais task set <id> --budget-lift`
+
+
+def entered_at(t):
+    """When a task entered its current state — the stamp fire() writes (plan 2.3), falling back
+    to updated_at for rows that predate it. THE reading for gate age everywhere (row tags, the
+    vitals alarm, the inspector's "since")."""
+    return getattr(t, "state_entered_at", None) or t.updated_at
 
 
 @dataclass
@@ -362,6 +370,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
     now = now or utc_now()
     projects = []
     dep = ",blocked_on" if _has_column(conn, "tasks", "blocked_on") else ""
+    sea = ",state_entered_at" if _has_column(conn, "tasks", "state_entered_at") else ""
     mcol = ",model" if _has_column(conn, "runs", "model") else ""    # migration 0006
     # Projects to render = those configured on disk (a dir under projects/ with a project.yaml —
     # the marker lint requires; the roles file is legacy and optional) UNIONed with any project
@@ -380,7 +389,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
     names = [n for n in names if n not in archived]
     for name in names:
         rows = conn.execute(
-            "SELECT id,title,status,priority,assignee,pr_url,notes,updated_at" + dep + " FROM tasks "
+            "SELECT id,title,status,priority,assignee,pr_url,notes,updated_at" + dep + sea + " FROM tasks "
             "WHERE project=? ORDER BY " + _PRIO + ", id", (name,)).fetchall()
         by_status = {}
         for r in rows:
@@ -388,6 +397,7 @@ def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
                 id=r["id"], title=r["title"], status=r["status"],
                 priority=r["priority"], assignee=r["assignee"],
                 pr_url=r["pr_url"], notes=r["notes"], updated_at=r["updated_at"],
+                state_entered_at=(r["state_entered_at"] if sea else None),
                 blocked_on=(r["blocked_on"] if dep else None)))
         run_rows = conn.execute(
             "SELECT id,started_at,ended_at,agent,status,summary,log_path,task_id" + mcol + " FROM runs "

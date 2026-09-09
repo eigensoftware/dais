@@ -750,6 +750,7 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         if cas.rowcount != 1:                       # someone else moved it between read and write
             raise GuardFailure(f"task {tid} left state {task['status']!r} concurrently — "
                                f"re-check with: dais edges {tid}")
+        _stamp_entered(conn, tid)                   # when it entered `to` (plan 2.3; 0011)
         # Keep `assignee` meaning WHO CARRIES THIS TASK NOW. On a handoff into a state a DIFFERENT
         # role dispatches, re-stamp to that role — so a task the lead promotes into `ready` reads as
         # the engineer's, not frozen on whoever last touched it. Only AUTO-stamps move: an assignee
@@ -788,6 +789,16 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         conn.execute("RELEASE SAVEPOINT dais_fire")
         conn.commit()
     return result
+
+
+def _stamp_entered(conn, tid):
+    """tasks.state_entered_at = now (migration 0011): the ONE reading of "how long has this sat
+    in its state" — updated_at moves on any metadata edit, which made an annotated 3-day-old
+    gate read as fresh. Only transitions (here) and creation stamp it. Pre-0011 db: no-op."""
+    try:
+        conn.execute("UPDATE tasks SET state_entered_at=datetime('now') WHERE id=?", (tid,))
+    except sqlite3.OperationalError:
+        pass
 
 
 def _append_note(conn, tid, actor, text):
@@ -1003,6 +1014,7 @@ def create_task(conn, m, project, title, state=None, assignee=None,
                                ("blocked_on", blocked_on),
                                ("touches_migrations", touches_migrations)) if v is not None}
     tid = _insert_task(conn, project, title, st, asg or None, tid=tid, extra=extra)
+    _stamp_entered(conn, tid)                       # born into `st` now (plan 2.3)
     conn.commit()
     return tid
 

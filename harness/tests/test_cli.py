@@ -460,6 +460,25 @@ class TestSpendLimits(CliTest):
         self.assertIn("budget", r.stdout.lower())
 
 
+class TestStateEnteredAt(CliTest):
+    """Plan 2.3: metadata edits must not reset a gate's age."""
+
+    def test_a_note_leaves_state_entered_at_alone_a_fire_moves_it(self):
+        import sqlite3
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "x", "--id", "d-1", "--status", "ready")
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("UPDATE tasks SET state_entered_at='2026-01-01 00:00:00', updated_at='2026-01-01 00:00:00' "
+                     "WHERE id='d-1'"); conn.commit(); conn.close()
+        dais(self.root, "task", "set", "d-1", "--notes", "still waiting on legal")
+        row = q(self.root, "SELECT state_entered_at, updated_at FROM tasks WHERE id='d-1'")
+        self.assertEqual(row[0], "2026-01-01 00:00:00")      # the gate is as old as it was
+        self.assertNotEqual(row[1], "2026-01-01 00:00:00")   # the note did bump updated_at
+        dais(self.root, "fire", "d-1", "claim", "--by", "engineer")
+        self.assertNotEqual(q(self.root, "SELECT state_entered_at FROM tasks WHERE id='d-1'")[0],
+                            "2026-01-01 00:00:00")
+
+
 class TestProbeLoopCooldown(CliTest):
     """design/probe-loop-cooldown.md option C (plan 2.2): progress is a NET STATUS DIFF of the
     role's dispatch-set between launch (runs.dispatch_fp) and now, not a verb count. A claim

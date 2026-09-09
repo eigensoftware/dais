@@ -225,7 +225,7 @@ def render_work(scr, rect, app, focused):
             # aging alarm: gated/parked work shows how long it has sat since its last change,
             # so a founder gate that's waited 2 days stops reading like one that just arrived
             if MC.band_of(m, r["task"].status) in ("NEEDS YOU", "WAITING"):
-                age = d.fmt_age(r["task"].updated_at, app._now())
+                age = d.fmt_age(d.entered_at(r["task"]), app._now())   # state age (plan 2.3)
                 if age:
                     title = f"{title} · {age}"
         line = f"  {tag:<7} {tid:<8} {proj[:11]:<11} {title}"
@@ -387,7 +387,7 @@ def _panel_detail_lines(app, sel_row):
     elif MC.band_of(p.machine, task.status) == "NEEDS YOU":
         # a founder gate answers "did my fire take?" persistently: this line exists ONLY while
         # the gate is still open — the moment an edge lands, status moves and it disappears.
-        since = d.to_local_hhmm(task.updated_at) if task.updated_at else "?"
+        since = d.to_local_hhmm(d.entered_at(task)) if d.entered_at(task) else "?"
         out.append(f"◆ waiting on YOU — in {task.status.replace('_', ' ')} since {since}; no edge has fired")
     if getattr(task, "blocked", False):                 # waiting on an unfinished predecessor —
         bt = _find_task(app.snap, task.blocked_on)      # name it AND identify it (id alone is a hunt)

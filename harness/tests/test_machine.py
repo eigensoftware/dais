@@ -301,6 +301,22 @@ class TestAssigneeStamp(unittest.TestCase):
     def _row(self, tid):
         return self.conn.execute("SELECT assignee FROM tasks WHERE id=?", (tid,)).fetchone()
 
+    def test_fire_and_create_stamp_state_entered_at(self):
+        # plan 2.3: gate age reads WHEN the task entered its state, not updated_at (which any
+        # note bumps). fire() stamps it on every transition; create_task at birth.
+        c = _db(); c.execute("ALTER TABLE tasks ADD COLUMN state_entered_at TEXT")
+        tid = M.create_task(c, self.m, "proj", "x", "ready")
+        born = c.execute("SELECT state_entered_at FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+        self.assertIsNotNone(born)
+        c.execute("UPDATE tasks SET state_entered_at='2026-01-01 00:00:00' WHERE id=?", (tid,))
+        M.fire(c, self.m, tid, "claim", "engineer")
+        moved = c.execute("SELECT state_entered_at FROM tasks WHERE id=?", (tid,)).fetchone()[0]
+        self.assertNotEqual(moved, "2026-01-01 00:00:00")
+        # a db without the column (pre-0011) still fires
+        c2 = _db(); t2 = M.create_task(c2, self.m, "proj", "y", "ready")
+        M.fire(c2, self.m, t2, "claim", "engineer")
+        self.assertEqual(_status(c2, t2), "doing")
+
     def test_agent_fire_stamps_empty_assignee(self):
         self.conn.execute("INSERT INTO tasks(id,project,title,status) "
                           "VALUES('t1','proj','x','ready')")

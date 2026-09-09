@@ -49,7 +49,7 @@ from board import (  # noqa: F401
     Task, Run, Project, Snapshot,
     connect, _has_column, _pid_alive, running_agents,
     project_field, agent_model, agent_provider, stage_goal, _load_machine,
-    tick_journal, tick_reason_line,
+    tick_journal, tick_reason_line, entered_at,
     _REVERSE_VERBS, _machine_actions, workspace_name,
     _PRIO, load_snapshot, load_runs, attach_run_tasks, runs_touching,
 )
@@ -370,7 +370,7 @@ def oldest_gate_age(snap, now):
             if not p.machine or MC.band_of(p.machine, st) != "NEEDS YOU":
                 continue
             for t in ts:
-                s = seconds_between(t.updated_at, now)
+                s = seconds_between(entered_at(t), now)      # state age, not last-edit age (plan 2.3)
                 if s is not None and (oldest is None or s > oldest):
                     oldest = s
     return _age_str(oldest)

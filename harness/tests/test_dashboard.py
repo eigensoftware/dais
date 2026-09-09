@@ -16,7 +16,8 @@ HARNESS = os.path.join(os.path.dirname(__file__), "..")
 
 SCHEMA = """
 CREATE TABLE tasks(id TEXT, project TEXT, title TEXT, status TEXT, assignee TEXT,
-  priority TEXT, pr_url TEXT, notes TEXT, updated_at TEXT, budget_lifted_at TEXT);
+  priority TEXT, pr_url TEXT, notes TEXT, updated_at TEXT, budget_lifted_at TEXT,
+  state_entered_at TEXT);
 CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,
   task_id TEXT, status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT,
   provider TEXT, input_tokens INTEGER, cost_usd REAL);
@@ -476,6 +477,21 @@ class TestDataLayer(unittest.TestCase):
         snap2 = d.load_snapshot(conn, root=root, now="2026-06-27 10:00:00")   # a new day
         self.assertFalse(snap2.budget["over"])
         self.assertIsNone(d.load_snapshot(_seed(), root="/nonexistent", now="2026-06-26 20:45:00").budget)
+
+    def test_gate_age_reads_state_entered_at_not_updated_at(self):
+        # plan 2.3: a note on a 3-day-old gate must not make it read as fresh
+        conn = _seed()
+        conn.execute("INSERT INTO tasks(id,project,title,status,priority,updated_at,state_entered_at) "
+                     "VALUES('cou-42','acme','old gate','proposal_review','high',"
+                     "'2026-06-26 20:44:00','2026-06-23 20:00:00')")
+        snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertEqual(d.oldest_gate_age(snap, "2026-06-26 20:45:00"), "3d")
+        t = {x.id: x for x in snap.projects[0].tasks_by_status["proposal_review"]}["cou-42"]
+        self.assertEqual(d.fmt_age(d.entered_at(t), "2026-06-26 20:45:00"), "3d")
+        # NULL (pre-0011) falls back to updated_at
+        conn.execute("UPDATE tasks SET state_entered_at=NULL WHERE id='cou-42'")
+        snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertEqual(d.oldest_gate_age(snap, "2026-06-26 20:45:00"), "1m")  # updated_at is 1m old
 
     # --- "why idle" (plan 1.7): the tick journal, attributed per project ---------------------
     JOURNAL = ("[2026-06-26 20:00:00] launch acme/qa (serial)\n"
