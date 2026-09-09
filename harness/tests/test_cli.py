@@ -2826,8 +2826,21 @@ class TestAccessHook(CliTest):
             self.assertEqual(r.returncode, 2, cmd)                  # 2 = block, per the hook contract
             self.assertIn("dais", r.stderr)
 
+    def test_review_role_cannot_wrap_or_bundle_past_the_guard(self):
+        """The classifier reads TOKENS, not the raw string: a shell wrapper, an absolute path, a
+        bundled rm flag, an env prefix, or a subshell re-run the wrapped command through the guard."""
+        for cmd in ("bash -c 'git push origin main'", "sh -c \"cd x; git commit -m y\"", "/usr/bin/git push",
+                    "rm -fr build", "rm --recursive --force build", "env GIT_DIR=x git push",
+                    "xargs -0 git push < list", "echo ok; (git push)", "python3 -c 'import os; os.system(\"git push\")'",
+                    "eval \"git push\"", "git -C /repo push", "git --no-pager push origin", "sudo rm -rf /"):
+            r = self._hook("review", cmd)
+            self.assertEqual(r.returncode, 2, cmd)
+            self.assertIn("dais", r.stderr)
+
     def test_review_role_may_read_and_test(self):
-        for cmd in ("git status", "git log --oneline -5", "bun test", "gh pr view 7 --json state", "ls -la"):
+        for cmd in ("git status", "git log --oneline -5", "bun test", "gh pr view 7 --json state", "ls -la",
+                    "git branch -a", "git checkout main", "rm -f /tmp/x", "grep -rn push src/", "gh pr list",
+                    "git diff --stat | head", "cat CHANGELOG.md", "echo 'git push' > notes.txt"):
             self.assertEqual(self._hook("review", cmd).returncode, 0, cmd)
 
     def test_edit_role_is_not_blocked(self):

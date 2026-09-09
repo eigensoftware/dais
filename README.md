@@ -376,8 +376,15 @@ runs the CLI as already logged in, nothing to configure.
 **Access is enforced, not just asked.** A claude role that is not `edit` runs with
 `Edit`/`Write` disallowed AND a PreToolUse hook (`harness/hooks/guard.sh`) that refuses outward
 shell with a message the model reads: `git push|commit|merge|rebase|reset`, `gh pr
-merge|create|close`, `rm -rf`. Review and draft roles read and test; only an edit role commits,
-pushes, merges, or deletes. Codex has no hooks; its sandbox is the guard there.
+merge|create|close`, `rm -rf`. The guard classifies the parsed command, not the raw text: it
+peels `env`/`sudo`/`xargs`/`timeout` wrappers and absolute paths, looks inside `bash -c "…"`,
+`eval` and inline `python3 -c`/`node -e` code, and matches git, gh and rm on their subcommand
+and flags (`rm -fr`, `git -C x push`, `git branch -D`, `gh api -X POST` are caught; `grep push`,
+`rm -f tmp`, `echo 'git push' > notes` pass). It is a guardrail, not a sandbox: a script file
+the role runs is not opened. Review and draft roles read and test; only an edit role commits,
+pushes, merges, or deletes. Codex has no hooks; its sandbox is the guard there. opencode roles
+below `edit` run its read-only `plan` agent (the same posture: an unattended run cannot answer
+a permission prompt, so both edit paths skip prompts by design — see the codex note below).
 
 **How codex roles are sandboxed, and why `edit` roles bypass it:**
 - **`edit` roles run codex with its sandbox disabled** (`--dangerously-bypass-approvals-and-sandbox`).
