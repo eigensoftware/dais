@@ -40,21 +40,25 @@ def _median(xs):
     return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
 
 
-def report(conn, now=None, since_days=30):
+def _events(conn, now, since_days):
+    """(all events, events in the window) as dicts; None when the log doesn't exist."""
     have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "task_events" not in have:
-        return ("dais retro: this db has no transition log yet — run `dais migrate` (with the loop paused); "
-                "decisions are recorded from the next fire on")
-    now = now or time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        return None, None
     cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(_t(now) - since_days * 86400))
     rows = conn.execute("SELECT task_id, project, verb, from_state, to_state, actor, at FROM task_events "
                         "ORDER BY id").fetchall()
     allev = [dict(r) for r in rows]
-    ev = [e for e in allev if (e["at"] or "") >= cutoff]
-    out = ["dais retro — last %dd · %d transitions" % (since_days, len(ev)), ""]
-    P = out.append
+    return allev, [e for e in allev if (e["at"] or "") >= cutoff]
 
-    # --- founder gates: decisions, approval share, median wait --------------------------------
+
+def gate_stats(conn, now=None, since_days=30):
+    """[{project, state, n, pct, wait_median_s, candidate}] per founder gate in the window —
+    the data behind the report's gates section and the web charts (plan 4.6)."""
+    now = now or time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    allev, ev = _events(conn, now, since_days)
+    if allev is None:
+        return []
     gates = {}
     for e in ev:
         if e["actor"] != "founder":
@@ -71,14 +75,32 @@ def report(conn, now=None, since_days=30):
         g["n"] += 1
         g["ok"] += 0 if e["verb"] in CHANGE_VERBS else 1
         g["waits"].append(wait)
-    P("  founder gates (project · state · decisions · approved unchanged · median wait on you)")
-    cands = []
+    out = []
     for (proj, st), g in sorted(gates.items()):
         pct = int(round(100.0 * g["ok"] / g["n"])) if g["n"] else 0
+        out.append({"project": proj, "state": st, "n": g["n"], "pct": pct,
+                    "wait_median_s": _median(g["waits"]), "candidate": g["n"] >= 10 and pct >= 90})
+    return out
+
+
+def report(conn, now=None, since_days=30):
+    now = now or time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    allev, ev = _events(conn, now, since_days)
+    if allev is None:
+        return ("dais retro: this db has no transition log yet — run `dais migrate` (with the loop paused); "
+                "decisions are recorded from the next fire on")
+    out = ["dais retro — last %dd · %d transitions" % (since_days, len(ev)), ""]
+    P = out.append
+
+    # --- founder gates: decisions, approval share, median wait --------------------------------
+    gates = gate_stats(conn, now, since_days)
+    P("  founder gates (project · state · decisions · approved unchanged · median wait on you)")
+    cands = []
+    for g in gates:
         P("    %-12s %-18s %3d decisions · %3d%% approved · median wait %s"
-          % (proj, st, g["n"], pct, _dur(_median(g["waits"]))))
-        if g["n"] >= 10 and pct >= 90:
-            cands.append("%s: %s (%d%% of %d)" % (proj, st, pct, g["n"]))
+          % (g["project"], g["state"], g["n"], g["pct"], _dur(g["wait_median_s"])))
+        if g["candidate"]:
+            cands.append("%s: %s (%d%% of %d)" % (g["project"], g["state"], g["pct"], g["n"]))
     if not gates:
         P("    (no founder decisions in the window)")
     P("")

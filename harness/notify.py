@@ -56,12 +56,17 @@ def current(root, conn, now=None):
     out = {}
     for p in _projects(root):
         m = MC.load(MC.project_machine_path(root, p))
-        # keyed on the ARRIVAL (state_entered_at, 0011): a task that bounces out and back between
-        # two ticks is a new arrival, not the one already announced
+        # keyed on the ARRIVAL: the task's transition count (task_events, 0014) — a bounce out
+        # and back is a new arrival even within the same second (a stamp at 1s resolution was
+        # not); without the log, the state_entered_at stamp, else updated_at
         have = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-        stamp = "state_entered_at" if "state_entered_at" in have else "updated_at"
-        rows = conn.execute("SELECT id, title, status, COALESCE(%s,'') FROM tasks WHERE project=? "
-                            "AND status NOT IN ('done','cancelled')" % stamp, (p,)).fetchall()
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "task_events" in tables:
+            arrival = "(SELECT COUNT(*) FROM task_events e WHERE e.task_id=t.id)"
+        else:
+            arrival = "COALESCE(t.%s,'')" % ("state_entered_at" if "state_entered_at" in have else "updated_at")
+        rows = conn.execute("SELECT t.id, t.title, t.status, %s FROM tasks t WHERE t.project=? "
+                            "AND t.status NOT IN ('done','cancelled')" % arrival, (p,)).fetchall()
         for tid, title, st, at in rows:
             if MC.band_of(m, st) == "NEEDS YOU":
                 out["%s|%s|%s" % (tid, st, at)] = "◆ %s · %s [%s] %s — dais brief %s" % (p, tid, st.replace("_", " "), title, tid)

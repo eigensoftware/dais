@@ -38,6 +38,25 @@
   svg text { font:11px var(--mono); fill:var(--fg) } svg .node rect { fill:var(--card); stroke:var(--line); rx:8 } svg .node.need rect { stroke:var(--need); stroke-width:2 }
   svg .node.term rect { stroke-dasharray:4 3 } svg .edge path { stroke:var(--dim); fill:none; marker-end:url(#arr) } svg .edge text { fill:var(--dim); font-size:10px }
   svg .count { font-weight:700; fill:var(--accent) } table { border-collapse:collapse; width:100% } td, th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); font-size:13px }
+  /* the charts (plan 4.6): the dataviz reference palette, both modes validated (4 categorical
+     slots pass every gate; status colors are reserved and ride with an icon + label) */
+  .viz-root { color-scheme:light; --surface-1:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781; --grid:#e1e0d9; --base:#c3c2b7;
+    --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --critical:#d03b3b; --de:#c3c2b7 }
+  @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) .viz-root { color-scheme:dark; --surface-1:#1a1a19; --ink:#ffffff; --ink-2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --base:#383835; --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --de:#383835 } }
+  :root[data-theme="dark"] .viz-root { color-scheme:dark; --surface-1:#1a1a19; --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --base:#383835;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --de:#383835 }
+  .viz-root { background:var(--surface-1); color:var(--ink); border-radius:10px; padding:12px }
+  .viz-root h4 { margin:14px 0 6px; font-size:13px; font-weight:600; color:var(--ink) } .viz-root .sub { color:var(--ink-2); font-size:12px; margin-bottom:6px }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px } .tile { border:1px solid var(--grid); border-radius:8px; padding:10px 12px }
+  .tile .lab { font-size:12px; color:var(--ink-2) } .tile .val { font-size:26px; font-weight:600; color:var(--ink); line-height:1.2 }
+  .viz-root svg text { font:11px system-ui,-apple-system,"Segoe UI",sans-serif; fill:var(--ink-2); font-variant-numeric:tabular-nums }
+  .viz-root svg .grid { stroke:var(--grid); stroke-width:1 } .viz-root svg .base { stroke:var(--base); stroke-width:1 }
+  .viz-root svg rect.mark:hover, .viz-root svg rect.mark:focus { filter:brightness(1.12); outline:none }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 14px; font-size:12px; color:var(--ink-2); margin:4px 0 } .legend .sw { display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:-2px; margin-right:5px }
+  .viz-tip { position:fixed; pointer-events:none; background:var(--ink); color:var(--surface-1); padding:6px 9px; border-radius:6px; font-size:12px; display:none; z-index:30; max-width:260px }
+  .viz-tip b { font-size:13px } .viz-tip .k { display:inline-block; width:10px; height:2px; vertical-align:middle; margin-right:5px }
+  .viz-table { width:100%; font-size:12px } .viz-table td, .viz-table th { border-bottom:1px solid var(--grid); padding:3px 6px; color:var(--ink) } .viz-table td.n { text-align:right; font-variant-numeric:tabular-nums }
   .hidden { display:none } .toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:var(--fg); color:var(--bg); padding:8px 14px; border-radius:8px; display:none; z-index:20 }
 </style>
 </head>
@@ -51,7 +70,7 @@
   <label class="muted">theme <select id="theme"><option value="">system</option><option value="light">light</option><option value="dark">dark</option></select></label>
   <span id="clock" class="muted"></span>
 </header>
-<nav class="tabs"><button data-tab="board" class="on">board</button><button data-tab="machine">machine</button><button data-tab="runs">runs</button><button data-tab="cost">cost</button><button data-tab="retro">retro</button></nav>
+<nav class="tabs"><button data-tab="board" class="on">board</button><button data-tab="machine">machine</button><button data-tab="charts">charts</button><button data-tab="runs">runs</button><button data-tab="cost">cost</button><button data-tab="retro">retro</button></nav>
 <main>
   <aside class="card rail" id="rail"></aside>
   <section class="card" id="center"></section>
@@ -59,6 +78,7 @@
 </main>
 <div class="modal" id="modal"><div class="box" id="modalBox"></div></div>
 <div class="toast" id="toast"></div>
+<div class="viz-tip" id="viztip"></div>
 <script>
 (function(){
   const $ = s => document.querySelector(s);
@@ -148,6 +168,82 @@
       $('#center').innerHTML = `<div class="muted" style="margin-bottom:6px">${esc(p.name)} · ${esc(m.name)} · counts are live · ◆ = a founder edge</div>` + svg;
     }).catch(() => $('#center').innerHTML = '<span class="muted">could not load the machine</span>');
   }
+  // ---- charts (plan 4.6) — the dataviz method: form by the data's job, color by its job, thin
+  // marks with 2px surface gaps, a legend for ≥2 series, one tooltip listing every series,
+  // values in text tokens (never the series color), a table view as the relief channel
+  const SERIES = ['--s1', '--s2', '--s3', '--s4'];
+  const STATUS = { succeeded: ['--good', '✓'], failed: ['--serious', '✗'], capped: ['--warn', '⏸'], interrupted: ['--de', '⌁'], running: ['--s1', '▶'] };
+  const tip = $('#viztip');
+  function showTip(ev, html) { tip.innerHTML = html; tip.style.display = 'block'; const x = Math.min(ev.clientX + 14, window.innerWidth - 280), y = ev.clientY + 14; tip.style.left = x + 'px'; tip.style.top = y + 'px'; }
+  function hideTip() { tip.style.display = 'none'; }
+  function niceMax(v) { if (v <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); const m = v / p; const k = m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10; return k * p; }
+  function renderCharts() {
+    $('#center').innerHTML = '<span class="muted">loading…</span>';
+    api('series?days=14').then(r => r.json()).then(S => {
+      const roles = Object.keys(S.spend_by_role); const n = S.days.length;
+      const totals = S.days.map((_, i) => roles.reduce((a, r) => a + (S.spend_by_role[r][i] || 0), 0));
+      const t = S.tiles; const fmtD = d => d.slice(5);
+      let h = '<div class="viz-root">';
+      h += `<div class="tiles"><div class="tile"><div class="lab">Tokens today</div><div class="val">${tokens(t.tokens_today) || '0'}</div></div>
+        <div class="tile"><div class="lab">Cost today (claude runs)</div><div class="val">${t.cost_today != null ? '$' + t.cost_today.toFixed(2) : '—'}</div></div>
+        <div class="tile"><div class="lab">Runs today</div><div class="val">${t.runs_today}</div></div>
+        <div class="tile"><div class="lab">Waiting on you</div><div class="val">${t.gates_waiting}</div><div class="lab">${t.median_wait_s != null ? 'median wait ' + Math.round(t.median_wait_s / 3600) + 'h (30d)' : ''}</div></div></div>`;
+      // --- spend per day, stacked by role (top 3 + Other), categorical slots in fixed order ---
+      h += `<h4>Prompt tokens per day, by role</h4><div class="sub">last ${n} days · ${roles.length ? '' : 'no runs recorded in the ledger yet'}</div>`;
+      if (roles.length) {
+        const W = 720, H = 220, L = 46, R = 10, T = 10, B = 26, plotW = W - L - R, plotH = H - T - B;
+        const ymax = niceMax(Math.max(...totals)); const slot = plotW / n; const bw = Math.min(24, slot * 0.6);
+        let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="prompt tokens per day by role">`;
+        for (let k = 0; k <= 4; k++) { const y = T + plotH - (plotH * k / 4); svg += `<line class="${k ? 'grid' : 'base'}" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 6}" y="${y + 4}" text-anchor="end">${tokens(ymax * k / 4) || '0'}</text>`; }
+        S.days.forEach((d, i) => { let y0 = T + plotH; const x = L + slot * i + (slot - bw) / 2; const segs = [];
+          roles.forEach((r, ri) => { const v = S.spend_by_role[r][i] || 0; if (!v) return; const hh = plotH * v / ymax; segs.push([r, ri, v, hh]); });
+          segs.forEach(([r, ri, v, hh], si) => { const top = si === segs.length - 1; const gap = si ? 2 : 0; const y = y0 - hh; const hgt = Math.max(0, hh - gap);
+            const rx = top ? 4 : 0;   // 4px rounded data-end on the topmost segment; square at the baseline
+            svg += `<path class="mark" tabindex="0" data-i="${i}" d="M${x},${y + hgt} v${-(hgt - rx)} a${rx},${rx} 0 0 1 ${rx},${-rx} h${bw - 2 * rx} a${rx},${rx} 0 0 1 ${rx},${rx} v${hgt - rx} z" fill="var(${SERIES[ri % 4]})"/>`;
+            y0 = y; });
+          if (i % Math.ceil(n / 7) === 0 || i === n - 1) svg += `<text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle">${fmtD(d)}</text>`;
+        });
+        // the top of the highest day gets a direct label; the rest live in the tooltip and the table
+        const imax = totals.indexOf(Math.max(...totals)); if (totals[imax] > 0) { const x = L + slot * imax + slot / 2; const y = T + plotH - plotH * totals[imax] / ymax - 6; svg += `<text x="${x}" y="${y}" text-anchor="middle">${tokens(totals[imax])}</text>`; }
+        svg += '</svg>';
+        h += svg + '<div class="legend">' + roles.map((r, ri) => `<span><span class="sw" style="background:var(${SERIES[ri % 4]})"></span>${esc(r)}</span>`).join('') + ' <button id="vizTable" style="margin-left:auto;font-size:12px">table</button></div>';
+        h += `<table class="viz-table hidden" id="vizTableEl"><tr><th>day</th>${roles.map(r => `<th>${esc(r)}</th>`).join('')}<th>total</th></tr>` + S.days.map((d, i) => `<tr><td>${d}</td>${roles.map(r => `<td class="n">${(S.spend_by_role[r][i] || 0).toLocaleString()}</td>`).join('')}<td class="n">${totals[i].toLocaleString()}</td></tr>`).join('') + '</table>';
+      }
+      // --- the last 24h of runs as a timeline, colored by STATUS (reserved palette, icon + label) ---
+      h += `<h4>Runs, last 24 hours</h4>`;
+      if (S.runs.length) {
+        const projects = [...new Set(S.runs.map(r => r.project))]; const now = Date.now(); const t0 = now - 24 * 3600e3;
+        const W = 720, L = 110, R = 10, rowH = 22, H = 16 + projects.length * rowH + 20; const plotW = W - L - R;
+        const px = ts => L + plotW * (Date.parse(ts.replace(' ', 'T') + 'Z') - t0) / (now - t0);
+        let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="runs in the last 24 hours">`;
+        for (let k = 0; k <= 4; k++) { const x = L + plotW * k / 4; svg += `<line class="grid" x1="${x}" x2="${x}" y1="8" y2="${H - 20}"/><text x="${x}" y="${H - 6}" text-anchor="middle">${k === 4 ? 'now' : '-' + (24 - 6 * k) + 'h'}</text>`; }
+        projects.forEach((p, pi) => { const y = 12 + pi * rowH; svg += `<text x="${L - 8}" y="${y + 13}" text-anchor="end">${esc(p)}</text>`;
+          S.runs.filter(r => r.project === p).forEach(r => { const x1 = Math.max(L, px(r.started_at)); const x2 = r.ended_at ? px(r.ended_at) : L + plotW; const w = Math.max(3, x2 - x1); const st = STATUS[r.status] || STATUS.interrupted;
+            svg += `<rect class="mark" tabindex="0" data-run="${r.id}" x="${x1}" y="${y + 2}" width="${w}" height="16" rx="3" fill="var(${st[0]})"/>`; }); });
+        svg += '</svg>';
+        h += svg + '<div class="legend">' + Object.entries(STATUS).map(([k, [v, ic]]) => `<span><span class="sw" style="background:var(${v})"></span>${ic} ${k}</span>`).join('') + '</div>';
+      } else h += '<div class="sub">no runs in the last 24 hours</div>';
+      // --- founder gates: approved-unchanged share per gate — one hue (magnitude), label at the tip ---
+      h += `<h4>Founder gates, last 30 days</h4><div class="sub">share of decisions approved unchanged · ⚡ = a yolo candidate (≥90% over ≥10)</div>`;
+      if (S.gates.length) {
+        const W = 720, L = 190, R = 90, rowH = 22, H = 8 + S.gates.length * rowH + 4; const plotW = W - L - R;
+        let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="approved unchanged share per founder gate">`;
+        S.gates.forEach((g, i) => { const y = 6 + i * rowH; const w = plotW * g.pct / 100;
+          svg += `<text x="${L - 8}" y="${y + 13}" text-anchor="end">${esc(g.project)} · ${esc(g.state.replace(/_/g, ' '))}</text><rect class="mark" x="${L}" y="${y + 3}" width="${Math.max(2, w)}" height="14" rx="4" fill="var(--s1)"/><text x="${L + Math.max(2, w) + 6}" y="${y + 14}">${g.pct}% · ${g.n}${g.wait_median_s != null ? ' · ' + Math.round(g.wait_median_s / 3600) + 'h' : ''}${g.candidate ? ' ⚡' : ''}</text>`; });
+        svg += `<line class="base" x1="${L}" x2="${L}" y1="4" y2="${H - 4}"/></svg>`;
+        h += svg;
+      } else h += '<div class="sub">no founder decisions recorded yet (the transition log starts at migration 0014)</div>';
+      h += '</div>';
+      $('#center').innerHTML = h;
+      const tbl = $('#vizTable'); if (tbl) tbl.onclick = () => $('#vizTableEl').classList.toggle('hidden');
+      // one tooltip, every series at that day
+      $('#center').querySelectorAll('path.mark[data-i]').forEach(el => { const i = +el.dataset.i; const rows = roles.map((r, ri) => `<div><span class="k" style="background:var(${SERIES[ri % 4]})"></span>${esc(r)} <b>${(S.spend_by_role[r][i] || 0).toLocaleString()}</b></div>`).join('');
+        const html = `<div><b>${S.days[i]}</b> · ${totals[i].toLocaleString()} tokens</div>${rows}`; el.onpointermove = ev => showTip(ev, html); el.onpointerleave = hideTip; el.onfocus = () => showTip({clientX: 20, clientY: 80}, html); el.onblur = hideTip; });
+      $('#center').querySelectorAll('rect.mark[data-run]').forEach(el => { const r = S.runs.find(x => String(x.id) === el.dataset.run); if (!r) return;
+        const html = `<div><b>${esc(r.project)}/${esc(r.agent)}</b> · ${esc(r.status)}</div><div>${esc((r.started_at || '').slice(11, 16))} → ${esc((r.ended_at || 'running').slice(11, 16))} UTC${r.input_tokens ? ' · ' + tokens(r.input_tokens) + ' tokens' : ''}</div>`;
+        el.onpointermove = ev => showTip(ev, html); el.onpointerleave = hideTip; });
+    }).catch(() => $('#center').innerHTML = '<span class="muted">charts unavailable</span>');
+  }
   function renderRuns() {
     const runs = (snap.recent_runs || []); $('#center').innerHTML = '<table><tr><th>started</th><th>run</th><th>status</th><th>dur</th><th>model</th><th>tokens</th><th>cost</th><th>task</th></tr>' +
       runs.map(r => `<tr><td class="muted">${esc((r.started_at || '').slice(5, 16))}</td><td>${esc(r.agent)}</td><td>${esc(r.status)}</td><td>${r.dur_min != null ? r.dur_min + 'm' : ''}</td><td class="muted">${esc((r.model || '').replace('claude-', ''))}</td><td>${tokens(r.input_tokens)}</td><td>${r.cost_usd != null ? '$' + r.cost_usd.toFixed(2) : ''}</td><td class="muted">${esc(r.task_id || '')}</td></tr>`).join('') + '</table>';
@@ -204,13 +300,13 @@
       post('fire', body).then(r => { $('#modal').classList.remove('on'); toast(r.ok ? (r.body.output || 'fired') : ('refused: ' + (r.body.error || r.code))); refresh(); });
     };
   }
-  function render() { if (!snap) return; renderHeader(); renderRail(); ({board: renderBoard, machine: renderMachine, runs: renderRuns, cost: () => renderReport('cost'), retro: () => renderReport('retro')})[tab](); }
+  function render() { if (!snap) return; renderHeader(); renderRail(); ({board: renderBoard, machine: renderMachine, charts: renderCharts, runs: renderRuns, cost: () => renderReport('cost'), retro: () => renderReport('retro')})[tab](); }
   function refresh() { api('snapshot').then(r => r.json()).then(s => { snap = s; render(); if (selected) loadSide(); }); }
   document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => { document.querySelectorAll('nav.tabs button').forEach(x => x.classList.remove('on')); b.classList.add('on'); tab = b.dataset.tab; render(); });
   $('#pause').onclick = () => post('loop', {action: 'pause'}).then(r => { toast(r.body.output || 'paused'); refresh(); });
   $('#resume').onclick = () => post('loop', {action: 'resume'}).then(r => { toast(r.body.output || 'resumed'); refresh(); });
   // live: one SSE stream; the board re-renders on each frame (the side panel only on selection or actions)
-  try { const es = new EventSource('./api/events'); es.onmessage = ev => { snap = JSON.parse(ev.data); if (tab !== 'machine' && tab !== 'cost' && tab !== 'retro') render(); else renderHeader(); }; es.onerror = () => setTimeout(refresh, 3000); } catch (e) { refresh(); setInterval(refresh, 5000); }
+  try { const es = new EventSource('./api/events'); es.onmessage = ev => { snap = JSON.parse(ev.data); if (!['machine', 'charts', 'cost', 'retro'].includes(tab)) render(); else renderHeader(); }; es.onerror = () => setTimeout(refresh, 3000); } catch (e) { refresh(); setInterval(refresh, 5000); }
   refresh();
 })();
 </script>

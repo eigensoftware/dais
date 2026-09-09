@@ -242,7 +242,10 @@ role the machine dispatches for the task's state, honoring the dependency chain.
 The same board in your browser, over the same data layer as `dais top`: `dais web [port]`
 prints a localhost URL with a per-launch token (a wrong token is a 404 everywhere). Tabs:
 the **board** by band per project with the selected task's brief and its fireable edges;
-the **machine** as a live diagram (counts on each state, founder edges marked); **runs** with
+the **machine** as a live diagram (counts on each state, founder edges marked); **charts**:
+stat tiles (tokens, cost and runs today, what waits on you), prompt tokens per day stacked
+by role with a table view, the last 24 hours of runs as a timeline colored by outcome, and
+each founder gate's approved-unchanged share with the yolo candidates marked; **runs** with
 tokens and cost; **cost** and **retro**. Actions go through `dais fire` in a subprocess, so
 the engine enforces every guard exactly as the CLI does: the page asks for what
 `prompts_for` says the edge needs (typing the task id, naming the attest, a note, a click)

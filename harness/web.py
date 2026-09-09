@@ -11,6 +11,7 @@ Routes (all under /<token>/; a wrong token is a 404 everywhere):
   GET  /api/brief/<task>      the decision packet (text)
   GET  /api/machine/<project> states, edges, live counts, bands
   GET  /api/cost?by=&since=   the ledger report (text) · GET /api/retro?since= the retro (text)
+  GET  /api/series?days=14    the charts' data: daily tokens by role, the 24h run timeline, gate stats, tiles
   POST /api/fire              {task, verb, confirm?, typed?, attest?[], verify?[], notes?, verdict?}
   POST /api/task              {task, notes? | priority? | title? | pr? | budget_lift?}
   POST /api/loop              {action: pause | resume}
@@ -101,6 +102,46 @@ def machine_json(root, project):
                                                 (project,))}
     return {"name": m.get("name"), "states": m.get("states", {}), "edges": m.get("edges", []),
             "counts": counts, "bands": MC.bands(m), "roles": m.get("roles", {})}
+
+
+def series_json(root, days=14):
+    """The charts' data (plan 4.6): daily prompt tokens by role (top 3 roles + Other), the
+    last 24h of runs as a timeline, the founder gates' stats, and the stat tiles."""
+    conn = _conn(root)
+    days = max(1, min(int(days or 14), 90))
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    dates = [time.strftime("%Y-%m-%d", time.gmtime(time.time() - i * 86400)) for i in range(days - 1, -1, -1)]
+    by_role = {}
+    try:
+        rows = conn.execute("SELECT agent, date(started_at) d, COALESCE(SUM(input_tokens),0) t FROM runs "
+                            "WHERE date(started_at) >= ? GROUP BY agent, d", (dates[0],)).fetchall()
+    except Exception:
+        rows = []
+    for agent, dday, t in rows:
+        by_role.setdefault(agent, {})[dday] = t
+    totals = sorted(by_role, key=lambda a: -sum(by_role[a].values()))
+    top, other = totals[:3], totals[3:]
+    spend = {a: [by_role[a].get(dd, 0) for dd in dates] for a in top}
+    if other:
+        spend["other"] = [sum(by_role[a].get(dd, 0) for a in other) for dd in dates]
+    try:
+        runs = [dict(r) for r in conn.execute(
+            "SELECT id, project, agent, status, started_at, ended_at, input_tokens FROM runs "
+            "WHERE started_at > datetime('now','-24 hours') ORDER BY started_at").fetchall()]
+    except Exception:
+        runs = []
+    gates = retromod.gate_stats(conn, since_days=30)
+    try:
+        tt = conn.execute("SELECT COUNT(*), COALESCE(SUM(input_tokens),0), SUM(cost_usd) FROM runs "
+                          "WHERE date(started_at)=date('now')").fetchone()
+    except Exception:
+        tt = (0, 0, None)
+    snap = d.load_snapshot(conn, root=root)
+    waits = [g["wait_median_s"] for g in gates if g["wait_median_s"] is not None]
+    return {"days": dates, "today": today, "spend_by_role": spend, "runs": runs, "gates": gates,
+            "tiles": {"tokens_today": tt[1], "cost_today": tt[2], "runs_today": tt[0],
+                      "gates_waiting": d.gate_count(snap),
+                      "median_wait_s": (sorted(waits)[len(waits) // 2] if waits else None)}}
 
 
 # --------------------------------------------------------------------------- actions
@@ -209,6 +250,9 @@ def make_server(root, host, port, token):
                 if len(parts) == 3 and parts[1] == "machine":
                     m = machine_json(root, parts[2])
                     return self._send(200, m) if m else self._send(404, {"error": "no project"})
+                if path == "/api/series":
+                    dd = qs.get("days", ["14"])[0]
+                    return self._send(200, series_json(root, int(dd) if dd.isdigit() else 14))
                 if path == "/api/cost":
                     since = qs.get("since", [""])[0].rstrip("d")
                     return self._send(200, costmod.report(_conn(root), by=qs.get("by", ["project"])[0],

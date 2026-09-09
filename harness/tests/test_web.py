@@ -137,6 +137,31 @@ class WebTest(unittest.TestCase):
             self.assertTrue(line.startswith("data: "), line)
             self.assertIn("projects", json.loads(line[6:]))
 
+    def test_series_endpoint_feeds_the_charts(self):
+        # plan 4.6: daily spend by role, the run timeline, gate stats, and the stat tiles
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,status,started_at,ended_at,input_tokens,cost_usd,provider) "
+                     "VALUES('demo','engineer','succeeded',datetime('now','-2 hours'),datetime('now','-1 hour'),120000,1.2,'anthropic')")
+        conn.execute("INSERT INTO runs(project,agent,status,started_at,ended_at,input_tokens,provider) "
+                     "VALUES('demo','qa','failed',datetime('now','-30 minutes'),datetime('now','-20 minutes'),30000,'anthropic')")
+        conn.commit(); conn.close()
+        s = self._get("/api/series?days=7")
+        self.assertEqual(len(s["days"]), 7)
+        self.assertEqual(s["days"][-1], s["today"])
+        self.assertIn("engineer", s["spend_by_role"]); self.assertEqual(s["spend_by_role"]["engineer"][-1], 120000)
+        self.assertEqual(s["spend_by_role"]["qa"][-1], 30000)
+        self.assertTrue(any(r["agent"] == "qa" and r["status"] == "failed" for r in s["runs"]))
+        self.assertIn("gates", s)                       # [] until decisions exist; the shape is there
+        self.assertEqual(s["tiles"]["tokens_today"], 150000)
+        self.assertEqual(s["tiles"]["runs_today"], 2)
+        self.assertIn("gates_waiting", s["tiles"])
+
+    def test_page_has_a_charts_tab(self):
+        html = self._get("/", raw=True)
+        self.assertIn('data-tab="charts"', html)
+        self.assertIn("viz-root", html)
+
     def test_bad_json_and_unknown_route(self):
         req = urllib.request.Request(self._url("/api/fire"), data=b"{not json", method="POST",
                                      headers={"Content-Type": "application/json"})
