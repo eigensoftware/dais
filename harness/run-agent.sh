@@ -149,6 +149,17 @@ if [ -z "$TASK_ID" ]; then
 fi
 export DAIS_TASK_ID="$TASK_ID"
 
+# Tiers by the pinned task's priority (plan 3.3): `model_by_priority: critical=claude-fable-5,
+# low=claude-haiku-4-5` (and effort_by_priority) override the role's model/effort for THIS run
+# — the top model only where the board says it matters. No tier for the priority = the role's own.
+tier(){ printf '%s' "$1" | tr ',' '\n' | sed -n "s/^$2=//p" | head -1; }
+if [ -n "$TASK_ID" ]; then
+  tprio="$(db "SELECT COALESCE(priority,'medium') FROM tasks WHERE id='$(sqlesc "$TASK_ID")';" 2>/dev/null)"
+  tm="$(tier "$(cfg model_by_priority)" "$tprio")";  [ -n "$tm" ] && MODEL="$tm"
+  te="$(tier "$(cfg effort_by_priority)" "$tprio")"; [ -n "$te" ] && { EFF="$te"; EFFORT_FLAG=(--effort "$EFF"); }
+  [ "$FALLBACK" = "$MODEL" ] && FALLBACK=""      # the tier may have landed on the backup model
+fi
+
 mkdir -p "$PDIR/logs"
 TS="$(date +%Y%m%d-%H%M%S)"; LOG="$PDIR/logs/$AGENT-$TS.log"
 # record the resolved model with the run (migration 0006); fall back to the legacy shape on a

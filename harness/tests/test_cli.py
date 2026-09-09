@@ -1414,6 +1414,34 @@ class TestPerRoleModelOverride(CliTest):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(q(self.root, "SELECT dispatch_fp FROM runs ORDER BY id DESC LIMIT 1")[0], fp)
 
+    # --- model / effort tiers by task priority (plan 3.3) ----------------------------------------
+    def _tiered_argv(self, fm, task_id, priority):
+        argv = os.path.join(self.root, "claude-argv")
+        if os.path.exists(argv):
+            os.unlink(argv)
+        dais(self.root, "task", "add", "demo", "work " + task_id, "--id", task_id, "--status", "qa_review",
+             "--priority", priority)
+        self._set_role("qa", fm)
+        r = self._run_agent("qa", env={"PATH": self._tmpbin(fake_claude=self._fake_claude(argv)),
+                                       "HOME": self._fake_home(), "DAIS_TASK_ID": task_id})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        args = open(argv).read().split("\n")
+        return args[args.index("--model") + 1], (args[args.index("--effort") + 1] if "--effort" in args else "")
+
+    def test_model_and_effort_follow_the_pinned_tasks_priority(self):
+        fm = ("model: claude-opus-5\neffort: medium\n"
+              "model_by_priority: critical=claude-fable-5, low=claude-haiku-4-5\n"
+              "effort_by_priority: critical=high, low=low\n")
+        self.assertEqual(self._tiered_argv(fm, "t-crit", "critical"), ("claude-fable-5", "high"))
+        self.assertEqual(self._tiered_argv(fm, "t-low", "low"), ("claude-haiku-4-5", "low"))
+        self.assertEqual(self._tiered_argv(fm, "t-med", "medium"), ("claude-opus-5", "medium"))  # no tier: the role's own
+        self.assertEqual(q(self.root, "SELECT model FROM runs ORDER BY id DESC LIMIT 1")[0], "claude-opus-5")
+
+    def test_tiers_apply_project_wide_from_project_yaml(self):
+        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as f:
+            f.write("model_by_priority: critical=claude-fable-5\n")
+        self.assertEqual(self._tiered_argv("", "t-crit", "critical")[0], "claude-fable-5")
+
     # --- session resume (plan 3.2) -----------------------------------------------------------
     def _prior_run(self, task_id, hours_ago=1, status="succeeded", session="sess-abc", agent="qa"):
         import sqlite3

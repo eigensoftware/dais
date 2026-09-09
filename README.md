@@ -369,6 +369,19 @@ winterbraid/lead — board unchanged since its last run 5.2h ago`). A new task, 
 or a priority change wakes it; a 24-hour heartbeat runs it regardless. Reactive dispatch is
 untouched: a `proposed` task still wakes the lead at once.
 
+## Tiers: the top model only where the board says it matters
+
+`model_by_priority` and `effort_by_priority`, in a role's frontmatter or project-wide in
+`project.yaml`, override the role's model and effort for a run by the pinned task's priority:
+
+```
+model_by_priority: critical=claude-fable-5, low=claude-haiku-4-5
+effort_by_priority: critical=high, low=low
+```
+
+A priority with no tier keeps the role's own setting; the run row records the model actually
+used, so `dais cost --by role` shows the split.
+
 ## Budget caps: no run is unbounded unless you say so
 
 Three per-role (or project-wide) caps, all unset by default, which is the historical
