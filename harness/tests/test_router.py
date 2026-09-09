@@ -245,6 +245,31 @@ class TestCadence(unittest.TestCase):
         self._mark(root, router.board_fingerprint(conn, "p"), hours_old=30)
         self.assertEqual(router.decide(root, "p"), "lead")
 
+    def test_quiet_hours_window_math(self):
+        # plan 3.6: "23-7" spans midnight; "9-17" does not; '' = no window
+        self.assertTrue(router.in_quiet_hours("23-7", 2))
+        self.assertTrue(router.in_quiet_hours("23-7", 23))
+        self.assertFalse(router.in_quiet_hours("23-7", 7))
+        self.assertFalse(router.in_quiet_hours("23-7", 12))
+        self.assertTrue(router.in_quiet_hours("9-17", 12))
+        self.assertFalse(router.in_quiet_hours("9-17", 8))
+        self.assertFalse(router.in_quiet_hours("", 3))
+        self.assertFalse(router.in_quiet_hours("night", 3))   # unparseable = no window
+
+    def test_cadence_respects_quiet_hours_but_reactive_work_does_not(self):
+        root = self._lead_ws()                               # lead's 5h cadence has elapsed
+        with open(os.path.join(root, "projects", "p", "project.yaml"), "w") as f:
+            f.write("project: p\nrepo: p\nstage_goal: x\nquiet_hours: 23-7\n")
+        old = os.environ.get("DAIS_NOW_HOUR"); os.environ["DAIS_NOW_HOUR"] = "3"
+        self.addCleanup(lambda: os.environ.__setitem__("DAIS_NOW_HOUR", old) if old else os.environ.pop("DAIS_NOW_HOUR", None))
+        self.assertIsNone(router.decide(root, "p"))          # 03:00 -> the lead sleeps
+        os.environ["DAIS_NOW_HOUR"] = "10"
+        self.assertEqual(router.decide(root, "p"), "lead")   # 10:00 -> runs
+        os.environ["DAIS_NOW_HOUR"] = "3"
+        conn = sqlite3.connect(os.path.join(root, "dais.db"))
+        conn.execute("INSERT INTO tasks(id,project,title,status) VALUES('r','p','urgent','ready')"); conn.commit()
+        self.assertEqual(router.decide(root, "p"), "engineer")   # reactive work ignores quiet hours
+
     def test_cadence_without_a_marker_runs_as_before(self):
         self.assertEqual(router.decide(self._lead_ws(), "p"), "lead")
 

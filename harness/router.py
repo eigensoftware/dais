@@ -380,6 +380,38 @@ def over_budget_tasks(root, project, conn=None):
     return out
 
 
+# --- quiet hours (plan 3.6): cadence roles sleep through a window ("23-7", local time); reactive
+# work never does — a proposed task still wakes the lead at 3am, a 5h lead clock does not. ---
+def in_quiet_hours(spec, hour):
+    """True when `hour` (0-23) falls in a "A-B" window; A>B spans midnight; unparseable = no window."""
+    try:
+        a, b = (int(x) for x in str(spec or "").strip().split("-"))
+    except ValueError:
+        return False
+    if not (0 <= a <= 23 and 0 <= b <= 23) or a == b:
+        return False
+    return (a <= hour < b) if a < b else (hour >= a or hour < b)
+
+
+def _now_hour():
+    import time as _t
+    h = os.environ.get("DAIS_NOW_HOUR", "")          # test seam
+    return int(h) if h.isdigit() else _t.localtime().tm_hour
+
+
+def quiet_hours_for(root, project):
+    """project.yaml `quiet_hours:` else dais.yaml `quiet_hours:` ('' = none)."""
+    for path in (os.path.join(root, "projects", project, "project.yaml"), os.path.join(root, "dais.yaml")):
+        try:
+            with open(path) as fh:
+                v = _yaml_line(fh.read(), "quiet_hours")
+        except OSError:
+            v = ""
+        if v:
+            return v
+    return ""
+
+
 # --- the harness-side idle check (plan 1.5). A cadence role (every:Nh) used to run on its clock
 # regardless, and in the workspace 75–87% of lead runs ended as no-ops: the "cheap idle check"
 # lived INSIDE the model, so each no-op still paid the full startup. Now the role records the
@@ -471,7 +503,13 @@ def decide(root, project, excluded=None, live=None):
     if role:
         return role
 
-    # 2) cadence: a role whose interval has elapsed (only when no reactive work)
+    # 2) cadence: a role whose interval has elapsed (only when no reactive work) — and only
+    #    outside quiet hours (plan 3.6)
+    qh = quiet_hours_for(root, project)
+    if qh and in_quiet_hours(qh, _now_hour()):
+        print("quiet-hours: %s cadence roles sleep (%s, local %02d:00)" % (project, qh, _now_hour()),
+              file=sys.stderr)
+        return None
     for r in sorted([r for r in roles if r["trigger"].startswith("every:")
                      and r["name"] not in excluded],
                     key=lambda r: r["prec"]):

@@ -20,10 +20,12 @@ CHANGES: fail it back, don't go hunting.
   screenshot what shipped and look at it.
 
 Then route it — you never fix, you report:
-- PASS → fire `pass --verify tests_pass`; PR comment starts `✅ QA: PASS`,
-  then what you actually verified.
+- PASS → fire `pass --verify tests_pass --verdict '{"verdict":"pass","summary":"…","checks":["…"],"risks":["…"]}'`;
+  PR comment starts `✅ QA: PASS`, then what you actually verified. The --verdict JSON is
+  what the founder's brief reads; the notes are for the next reader.
 - CHANGES → notes name the exact file/line or failing assertion AND the exact
-  command to re-verify, then fire `fail`; PR comment starts
+  command to re-verify, then fire `fail --verdict '{"verdict":"fail","summary":"…","blocking":["…"]}'`;
+  PR comment starts
   `❌ QA: CHANGES REQUESTED — DO NOT MERGE`. GitHub's "Mergeable" is not a
   verdict.
 

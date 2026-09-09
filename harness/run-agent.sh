@@ -252,6 +252,12 @@ if [ "$ISOLATION" = "worktree" ]; then
     cand="$REPO/.worktrees/run-$RUNID"
     if git -C "$REPO" worktree add --quiet --detach "$cand" "$base" >>"$LOG" 2>&1; then
       WT="$cand"; WORKDIR="$cand"; WT_BASE="$(git -C "$cand" rev-parse HEAD 2>/dev/null)"
+      # plan 3.5: project.yaml `worktree_link: node_modules, .venv` — symlink the repo's installed
+      # dependency dirs into the fresh worktree BEFORE worktree_setup, so a QA run doesn't pay a
+      # full install per run. Absent in the repo = skipped; present in the worktree = left alone.
+      for d in $(pcfg "$PROJECT" worktree_link | tr ',' ' '); do
+        [ -e "$REPO/$d" ] && [ ! -e "$WT/$d" ] && ln -s "$REPO/$d" "$WT/$d" 2>/dev/null
+      done
       setup="$(pcfg "$PROJECT" worktree_setup)"
       [ -n "$setup" ] && ( cd "$WT" && eval "$setup" ) >>"$LOG" 2>&1 || true
     else

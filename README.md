@@ -369,6 +369,22 @@ winterbraid/lead — board unchanged since its last run 5.2h ago`). A new task, 
 or a priority change wakes it; a 24-hour heartbeat runs it regardless. Reactive dispatch is
 untouched: a `proposed` task still wakes the lead at once.
 
+## Structured verdicts, quiet hours, throughput
+
+**Verdicts.** A reviewing role hands its verdict over WITH the transition: `dais fire <id> pass
+--verdict '{"verdict":"pass","summary":"…","checks":["bun test"],"risks":[]}'`. The JSON is
+stored on the task (plus who, which verb, when) and a rendered line rides the notes log; the
+stock QA persona sends one on `pass` and `fail`. Provider-agnostic on purpose: it is a CLI
+convention, not a model feature. `dais brief` and the change-request analytics read it.
+
+**Quiet hours.** `quiet_hours: 23-7` (local time) in `dais.yaml` or a project's `project.yaml`:
+cadence roles (`every:Nh`) sleep through the window; reactive work never does.
+
+**Throughput.** `parallel: 3` in `dais.yaml` is the loop's default width (`dais watch` with no
+explicit N, and every launchd tick, read it). `worktree_link: node_modules, .venv` in
+`project.yaml` symlinks the repo's installed dependency dirs into each fresh isolated worktree
+before `worktree_setup` runs, so a QA run stops paying a full install per run.
+
 ## Tiers: the top model only where the board says it matters
 
 `model_by_priority` and `effort_by_priority`, in a role's frontmatter or project-wide in

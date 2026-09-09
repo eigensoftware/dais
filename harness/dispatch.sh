@@ -163,10 +163,13 @@ withheld=0   # candidates a provider gate skipped this tick (paces the exit code
 
 # --- parallel width: how many agents may run at once (default 1 = serial, today's behavior).
 #     Set by `dais watch <interval> <N>` via DAIS_MAX_PARALLEL; clamped to 1..5. ---
-MAX="${DAIS_MAX_PARALLEL:-1}"
+MAX="${DAIS_MAX_PARALLEL:-}"
+# no env (a launchd tick, a manual tick): dais.yaml `parallel:` is the workspace default (plan 3.5)
+[ -n "$MAX" ] || MAX="$(sed -n 's/^parallel:[[:space:]]*//p' "$DAIS_HOME/dais.yaml" 2>/dev/null | sed 's/[[:space:]]*#.*$//' | head -1)"
 [[ "$MAX" =~ ^[0-9]+$ ]] || MAX=1
 [ "$MAX" -lt 1 ] && MAX=1
 [ "$MAX" -gt 5 ] && MAX=5
+[ "$DRY" = 1 ] && echo "${CD}tick: pool width $MAX${C0}"
 
 # how many agents are live right now (across all projects) → how many slots are free this tick
 running="$(live_lock_pids | wc -l | tr -d ' ')"

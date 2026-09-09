@@ -32,7 +32,7 @@ dais — your agent company control panel
   dais unarchive <project>            restore an archived project to the board
   dais start <id>                      run the role the machine dispatches for this task's state, now
   dais run <project> <agent>          run a specific agent now (headless claude)
-  dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify; --notes rides along)
+  dais fire <task-id> <verb>          advance a task by firing a machine edge (guards: --confirm/--typed/--attest/--verify; --notes and --verdict '{json}' ride along)
   dais edges <task-id>                the fireable edges from a task's current state
   dais check <task-id> [<check>] [--branch B]   run the machine's declared check in a worktree of the task's PR branch; record it (verify: honors it)
   dais logs <project> [N]             recent runs (+ tokens · cost once the ledger is on)
@@ -179,6 +179,7 @@ MD
         [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='touches_migrations';" 2>/dev/null)" ] && cols="$cols, touches_migrations"
         [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='budget_lifted_at';" 2>/dev/null)" ] && cols="$cols, budget_lifted_at"
         [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='check_results';" 2>/dev/null)" ] && cols="$cols, check_results"
+        [ -n "$(db "SELECT 1 FROM pragma_table_info('tasks') WHERE name='verdict';" 2>/dev/null)" ] && cols="$cols, verdict"
         db -line "SELECT $cols FROM tasks WHERE id='$(sqlesc "$id")';"
         links="$(db "SELECT rel || ' -> ' || child_id FROM task_links WHERE parent_id='$(sqlesc "$id")'
                      UNION ALL SELECT rel || ' <- ' || parent_id FROM task_links WHERE child_id='$(sqlesc "$id")';" 2>/dev/null)"
@@ -615,7 +616,9 @@ effort: <optional low|medium|high, or blank>
       *) _wargs+=("$1"); shift;; esac; done
     set -- ${_wargs[@]+"${_wargs[@]}"}
     interval="${1:-900}"
-    par="${2:-1}"   # parallel width: how many agents may run at once (1 = serial, the default)
+    # parallel width: explicit N, else dais.yaml `parallel:` (plan 3.5), else 1 = serial
+    par="${2:-$(sed -n 's/^parallel:[[:space:]]*//p' "$DAIS_HOME/dais.yaml" 2>/dev/null | sed 's/[[:space:]]*#.*$//' | head -1)}"
+    par="${par:-1}"
     [[ "$interval" =~ ^[0-9]+$ ]] || { echo "usage: dais watch [interval-seconds] [parallel-1to5]"; exit 1; }
     [[ "$par" =~ ^[0-9]+$ ]]      || { echo "usage: dais watch [interval-seconds] [parallel-1to5]"; exit 1; }
     [ "$par" -lt 1 ] && par=1; [ "$par" -gt 5 ] && par=5

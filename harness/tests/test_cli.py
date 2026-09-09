@@ -562,6 +562,34 @@ class TestLearnReviewQueue(CliTest):
         self.assertIn("dais learn demo --review", r.stdout)
 
 
+class TestVerdict(CliTest):
+    """`dais fire … --verdict '{json}'` (plan 3.4): a structured verdict rides the transition,
+    stored on the task and rendered into the notes log. Provider-agnostic on purpose."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        dais(self.root, "task", "add", "demo", "review me", "--id", "d-1", "--status", "qa_review")
+
+    def test_verdict_is_stored_and_rendered(self):
+        v = '{"verdict":"pass","summary":"all green","checks":["bun test","typecheck"],"risks":["none"]}'
+        r = dais(self.root, "fire", "d-1", "pass", "--by", "qa", "--verify", "tests_pass", "--verdict", v)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        stored = json.loads(q(self.root, "SELECT verdict FROM tasks WHERE id='d-1'")[0])
+        self.assertEqual(stored["verdict"], "pass")
+        self.assertEqual(stored["by"], "qa")
+        self.assertIn("verb", stored)
+        notes = q(self.root, "SELECT notes FROM tasks WHERE id='d-1'")[0]
+        self.assertIn("verdict: pass", notes); self.assertIn("bun test", notes)
+        self.assertIn("verdict", dais(self.root, "task", "show", "d-1").stdout)
+
+    def test_malformed_verdict_refuses_the_fire(self):
+        r = dais(self.root, "fire", "d-1", "pass", "--by", "qa", "--verify", "tests_pass", "--verdict", "{not json")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("verdict", r.stdout + r.stderr)
+        self.assertEqual(q(self.root, "SELECT status FROM tasks WHERE id='d-1'")[0], "qa_review")
+
+
 class TestDaisCheck(CliTest):
     """`dais check <task> [<check>] [--branch B]` (plan 2.7): runs the machine's declared check in
     a throwaway worktree of the PR branch, records the result on the task, cleans up."""
@@ -692,6 +720,22 @@ class TestProbeLoopCooldown(CliTest):
         self.assertNotIn("running engineer", r.stdout)
         self.assertTrue(os.path.exists(os.path.join(self.root, "projects", "demo", ".stalled-engineer")))
         self.assertIn("STALL", open(os.path.join(self.root, "projects", ".watch.log")).read())
+
+
+class TestParallelDefault(CliTest):
+    """plan 3.5: dais.yaml `parallel: N` is the loop's default width (a launchd tick and
+    `dais watch` with no explicit N both read it); DAIS_MAX_PARALLEL still wins."""
+
+    def test_dry_run_reports_the_pool_width(self):
+        dais(self.root, "scaffold", "demo")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("pool width 1", r.stdout)
+        with open(os.path.join(self.root, "dais.yaml"), "a") as f:
+            f.write("parallel: 3\n")
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertIn("pool width 3", r.stdout)
+        r = dais(self.root, "tick", "demo", "--dry-run", env={"DAIS_MAX_PARALLEL": "2"})
+        self.assertIn("pool width 2", r.stdout)
 
 
 class TestDispatcherHygiene(CliTest):
@@ -2467,6 +2511,20 @@ class TestWorktreeIsolation(CliTest):
         with open(marker) as f:
             where = f.read().strip()
         self.assertIn("/.worktrees/run-", where)   # ran in a private worktree, not the shared repo
+
+    def test_worktree_links_shared_dependency_dirs(self):
+        # plan 3.5: a fresh worktree paid `bun install` every run; `worktree_link:` symlinks the
+        # repo's installed deps in before worktree_setup runs
+        self._isolate()
+        repo = self._git_repo()
+        os.makedirs(os.path.join(repo, "node_modules", "left-pad"))
+        with open(os.path.join(self.root, "projects", "demo", "project.yaml"), "a") as f:
+            f.write("worktree_link: node_modules, .venv\n")           # .venv absent: skipped quietly
+        marker = os.path.join(self.repo_base, "link.txt")
+        self._run("readlink node_modules > %s; ls .venv > /dev/null 2>&1 || echo no-venv >> %s" % (marker, marker))
+        out = open(marker).read()
+        self.assertIn(os.path.join(repo, "node_modules"), out)
+        self.assertIn("no-venv", out)
 
     def test_read_only_run_tears_down_its_worktree(self):
         self._isolate()

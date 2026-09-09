@@ -904,6 +904,7 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         if actor != edge.get("by"):
             raise GuardFailure(f"actor {actor!r} may not fire this edge (owner is {edge.get('by')!r})")
         _check_guards(conn, m, edge, task, ctx)
+        verdict = _parse_verdict(ctx.get("verdict"))   # plan 3.4: refuse malformed JSON up front
 
         # "@history" returns the task to wherever it was PARKED FROM (statechart history): a
         # deferred proposal goes back to proposed — never skipping the front gate — a deferred
@@ -956,6 +957,8 @@ def fire(conn, m, tid, verb, actor, ctx=None, _nested=False):
         # (the change request travels with the bounced proposal, the answer with the resumed work).
         if (ctx.get("notes") or "").strip():
             _append_note(conn, tid, actor, ctx["notes"].strip())
+        if verdict is not None:
+            _store_verdict(conn, tid, actor, verb, verdict)
         result = {"task": tid, "from": task["status"], "to": to, "verb": verb, "spawned": [], "encompassed": []}
         if bounced:
             _append_note(conn, tid, "system",
@@ -982,6 +985,41 @@ def _stamp_entered(conn, tid):
         conn.execute("UPDATE tasks SET state_entered_at=datetime('now') WHERE id=?", (tid,))
     except sqlite3.OperationalError:
         pass
+
+
+def _parse_verdict(raw):
+    """--verdict '{…}' -> dict, or None when absent. Malformed JSON is a GuardFailure: the
+    transition is refused rather than recorded with a verdict nobody can read."""
+    if raw is None or str(raw).strip() == "":
+        return None
+    import json
+    try:
+        v = json.loads(raw)
+    except ValueError as ex:
+        raise GuardFailure(f"--verdict must be valid JSON ({ex})")
+    if not isinstance(v, dict):
+        raise GuardFailure("--verdict must be a JSON object")
+    return v
+
+
+def _store_verdict(conn, tid, actor, verb, v):
+    """tasks.verdict (0013) = the JSON plus by/verb/at; a rendered line rides the notes log so
+    the next reader (or the founder at a gate) sees it without parsing anything."""
+    import json
+    rec = dict(v, by=actor, verb=verb, at=time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()))
+    try:
+        conn.execute("UPDATE tasks SET verdict=? WHERE id=?", (json.dumps(rec), tid))
+    except sqlite3.OperationalError:
+        raise GuardFailure("this db has no verdict column — run `dais migrate`, then re-fire")
+    head = "verdict: %s" % (v.get("verdict") or verb)
+    parts = [head]
+    if v.get("summary"):
+        parts.append(str(v["summary"]))
+    for key in ("checks", "risks", "blocking"):
+        if v.get(key):
+            val = v[key]
+            parts.append("%s: %s" % (key, ", ".join(map(str, val)) if isinstance(val, list) else val))
+    _append_note(conn, tid, actor, " — ".join(parts))
 
 
 def _append_note(conn, tid, actor, text):
@@ -1390,6 +1428,8 @@ def _main(argv):
                 ctx.setdefault("verifiers", {})[rest[i + 1]] = True; i += 2
             elif a == "--notes":
                 ctx["notes"] = rest[i + 1]; i += 2
+            elif a == "--verdict":
+                ctx["verdict"] = rest[i + 1]; i += 2
             else:
                 i += 1
         conn = open_db(db)
