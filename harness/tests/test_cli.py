@@ -460,6 +460,49 @@ class TestSpendLimits(CliTest):
         self.assertIn("budget", r.stdout.lower())
 
 
+class TestDispatcherHygiene(CliTest):
+    """Plan 2.1: a dry-run tick is read-only, and only one tick runs at a time."""
+
+    def setUp(self):
+        super().setUp()
+        dais(self.root, "scaffold", "demo")
+        # the template lead is a never-run cadence role: a real tick would try to launch it.
+        # Dormant, so an empty board means "nothing to run".
+        with open(os.path.join(self.root, "projects", "demo", "agents", "lead.md"), "w") as f:
+            f.write("---\ntrigger: none\n---\npersona\n")
+
+    def test_dry_run_leaves_a_mismatched_stall_marker_alone(self):
+        sm = os.path.join(self.root, "projects", "demo", ".stalled-lead")
+        with open(sm, "w") as f:
+            f.write("t-9|proposed\n")                      # a world that no longer exists
+        dais(self.root, "tick", "demo", "--dry-run")
+        self.assertTrue(os.path.exists(sm), "dry-run must not clear stall markers")
+        dais(self.root, "tick", "demo")
+        self.assertFalse(os.path.exists(sm), "a real tick clears a marker whose world changed")
+
+    def test_a_live_tick_makes_the_next_one_step_aside(self):
+        lock = os.path.join(self.root, "projects", ".tick.lock")
+        os.makedirs(lock)
+        holder = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(holder.kill)
+        with open(os.path.join(lock, "pid"), "w") as f:
+            f.write("%d\n" % holder.pid)
+        r = dais(self.root, "tick", "demo")
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+        self.assertIn("another tick", r.stdout)
+        self.assertTrue(os.path.isdir(lock))               # the holder's lock is untouched
+
+    def test_a_stale_tick_lock_is_reclaimed_and_released(self):
+        lock = os.path.join(self.root, "projects", ".tick.lock")
+        os.makedirs(lock)
+        with open(os.path.join(lock, "pid"), "w") as f:
+            f.write("999999\n")                              # a pid that is not alive
+        r = dais(self.root, "tick", "demo")
+        self.assertNotIn("another tick", r.stdout)
+        self.assertIn("nothing to run", r.stdout)
+        self.assertFalse(os.path.exists(lock))              # released on exit
+
+
 class TestIdleCheckTick(CliTest):
     """End to end through `dais tick --dry-run`: a cadence lead whose interval elapsed is skipped
     while the board is exactly as it left it, and runs once anything on the board moves."""

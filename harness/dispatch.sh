@@ -16,6 +16,27 @@ for a in "$@"; do
   esac
 done
 
+# --- one tick at a time (plan 2.1). `dais watch`, a launchd `dais tick`, and a manual tick are
+#     independent processes; each counted free slots from its own snapshot and could launch into
+#     the same idle project (or overfill the pool). A lock DIRECTORY (mkdir is atomic) under
+#     projects/ holds the tick's pid; a second tick that finds a live holder steps aside as idle
+#     (exit 10, so `dais watch` waits its interval); a dead holder's lock is reclaimed. Released
+#     on exit — the serial path holds it for the whole run, which is exactly right. ---
+TICK_LOCK="$DAIS_HOME/projects/.tick.lock"
+if [ "$DRY" = 0 ]; then
+  mkdir -p "$DAIS_HOME/projects"
+  if ! mkdir "$TICK_LOCK" 2>/dev/null; then
+    holder="$(cat "$TICK_LOCK/pid" 2>/dev/null)"
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+      echo "${CD}tick: another tick is running (pid $holder) — skipping this one${C0}"; exit 10
+    fi
+    rm -rf "$TICK_LOCK"
+    mkdir "$TICK_LOCK" 2>/dev/null || { echo "tick: could not take the tick lock ($TICK_LOCK)"; exit 10; }
+  fi
+  echo $$ > "$TICK_LOCK/pid"
+  trap 'rm -rf "$TICK_LOCK"' EXIT
+fi
+
 # --- tick journal: every REAL tick's outcome is appended to projects/.watch.log (rotated),
 #     so "why didn't that tick launch anything?" is answerable after the fact — the console
 #     scrollback is not the only record. One line per outcome; the console output is unchanged. ---
@@ -181,7 +202,9 @@ for proj in "${projects[@]}"; do
     [ -e "$sm" ] || continue
     r="$(basename "$sm")"; r="${r#.stalled-}"
     fp="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$proj" "$r" 2>/dev/null)"
-    [ "$fp" = "$(cat "$sm" 2>/dev/null)" ] || { rm -f "$sm"; tlog "unstall $proj/$r — stall-world gone (marker cleared)"; }
+    [ "$fp" = "$(cat "$sm" 2>/dev/null)" ] && continue
+    if [ "$DRY" = 1 ]; then echo "${CD}tick[$proj]: WOULD un-stall $r (its stall-world is gone)${C0}"; continue; fi
+    rm -f "$sm"; tlog "unstall $proj/$r — stall-world gone (marker cleared)"
   done
 done
 
@@ -244,7 +267,7 @@ for proj in "${projects[@]}"; do
     sm="$DAIS_HOME/projects/$proj/.stalled-$cand"
     if [ -f "$sm" ]; then
       if [ -n "$(find "$sm" -mmin +360 2>/dev/null)" ]; then
-        rm -f "$sm"      # TTL heartbeat: allow one probe run; it re-stalls if still fruitless
+        [ "$DRY" = 0 ] && rm -f "$sm"      # TTL heartbeat: allow one probe run; it re-stalls if still fruitless
       else
         fp="$(python3 "$SELF/router.py" --dispatch-set "$DAIS_HOME" "$proj" "$cand" 2>/dev/null)"
         if [ "$fp" = "$(cat "$sm" 2>/dev/null)" ]; then
@@ -252,7 +275,7 @@ for proj in "${projects[@]}"; do
           excl="${excl:+$excl,}$cand"
           continue
         fi
-        rm -f "$sm"      # the role's world changed — un-stall and dispatch normally
+        [ "$DRY" = 0 ] && rm -f "$sm"      # the role's world changed — un-stall and dispatch normally
       fi
     fi
     last="$(db "SELECT r.status || '|' || (r.started_at > datetime('now','-45 minutes'))
