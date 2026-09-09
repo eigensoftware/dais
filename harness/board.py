@@ -496,14 +496,24 @@ def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
     # shows COOLING for the full 90m even after the loop has already resumed dispatching.
     # Per PROVIDER (runs.provider, 0007), exactly like the gate: a cap counts only against the
     # provider that hit it, and only that provider's later success clears it. NULL = anthropic.
-    try:
-        cooling = [r["p"] for r in conn.execute(
-            "SELECT DISTINCT COALESCE(r.provider,'anthropic') p FROM runs r WHERE r.status='capped' "
-            "AND r.started_at > datetime(?, '-90 minutes') "
-            "AND r.started_at > COALESCE((SELECT MAX(s.started_at) FROM runs s "
-            "WHERE s.status='succeeded' AND COALESCE(s.provider,'anthropic')="
-            "COALESCE(r.provider,'anthropic')), '') ORDER BY p", (now,))]
-    except sqlite3.OperationalError:            # pre-0007 db: providers indistinguishable
+    # 5.4: per ACCOUNT (runs.account, 0015) when the column exists; NULL = the provider's
+    # implicit account, named like the provider — so the badge reads the same as before.
+    cooling = None
+    for key in ("COALESCE(X.account,X.provider,'anthropic')", "COALESCE(X.provider,'anthropic')"):
+        rk, sk = key.replace("X", "r"), key.replace("X", "s")
+        try:
+            cooling = [r["p"] for r in conn.execute(
+                "SELECT DISTINCT " + rk + " p FROM runs r WHERE r.status='capped' "
+                "AND r.started_at > datetime(?, '-90 minutes') "
+                "AND r.started_at > COALESCE((SELECT MAX(s.started_at) FROM runs s "
+                "WHERE s.status='succeeded' AND " + sk + "=" + rk + "), '') "
+                "ORDER BY p", (now,))]
+            break
+        except sqlite3.OperationalError:
+            continue
+    if cooling is not None:
+        pass
+    else:                                       # pre-0007 db: providers indistinguishable
         capped = conn.execute(
             "SELECT COUNT(*) c FROM runs WHERE status='capped' "
             "AND started_at > datetime(?, '-90 minutes') "

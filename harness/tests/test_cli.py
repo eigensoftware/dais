@@ -334,14 +334,72 @@ class TestProviderScopedGates(CliTest):
         with open(os.path.join(self.root, "projects", "demo", "agents", "engineer.md"), "w") as f:
             f.write("---\nprovider: %s\n---\npersona\n" % provider)
 
-    def _seed_run(self, status, provider, mins_ago, agent="lead"):
+    def _seed_run(self, status, provider, mins_ago, agent="lead", account=None):
         import sqlite3
         conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
-        conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status,provider) "
+        conn.execute("INSERT INTO runs(project,agent,started_at,ended_at,status,provider,account) "
                      "VALUES('demo',?,datetime('now','-%d minutes'),"
-                     "datetime('now','-%d minutes'),?,?)" % (mins_ago, mins_ago),
-                     (agent, status, provider))
+                     "datetime('now','-%d minutes'),?,?,?)" % (mins_ago, mins_ago),
+                     (agent, status, provider, account))
         conn.commit(); conn.close()
+
+    # --- 5.4: the gate keys on the ACCOUNT; a role with any free account still runs ---------
+    def _accounts_env(self):
+        d = tempfile.mkdtemp(prefix="dais-accts-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, "accounts.yaml"), "w") as f:
+            f.write("accounts:\n"
+                    "  max-a: {provider: anthropic, kind: subscription, config_dir: %s/a}\n"
+                    "  max-b: {provider: anthropic, kind: subscription, config_dir: %s/b}\n"
+                    "pools:\n  max: {members: [max-a, max-b]}\n" % (d, d))
+        return {"DAIS_ACCOUNTS_FILE": os.path.join(d, "accounts.yaml"), "DAIS_ACCOUNTS_DIR": os.path.join(d, "m")}
+
+    def _engineer_fm(self, fm):
+        with open(os.path.join(self.root, "projects", "demo", "agents", "engineer.md"), "w") as f:
+            f.write("---\n%s---\npersona\n" % fm)
+
+    def test_a_cap_on_one_pool_member_leaves_the_role_dispatchable(self):
+        env = self._accounts_env()
+        self._engineer_fm("account: pool:max\n")
+        self._seed_run("capped", "anthropic", 5, account="max-a")
+        r = dais(self.root, "tick", "demo", "--dry-run", env=env)
+        self.assertIn("WOULD run engineer", r.stdout)               # max-b is free: the role still runs
+
+    def test_every_pool_member_capped_withholds_the_role_and_names_them(self):
+        env = self._accounts_env()
+        self._engineer_fm("account: pool:max\n")
+        self._seed_run("capped", "anthropic", 5, account="max-a")
+        self._seed_run("capped", "anthropic", 4, account="max-b")
+        r = dais(self.root, "tick", "demo", "--dry-run", env=env)
+        self.assertNotIn("WOULD run engineer", r.stdout)
+        self.assertIn("cooling", r.stdout); self.assertIn("max-a", r.stdout); self.assertIn("max-b", r.stdout)
+
+    def test_a_success_on_the_capped_account_clears_only_that_account(self):
+        env = self._accounts_env()
+        self._engineer_fm("account: max-b\n")
+        self._seed_run("capped", "anthropic", 10, account="max-a")
+        self._seed_run("capped", "anthropic", 10, account="max-b")
+        self._seed_run("succeeded", "anthropic", 5, account="max-a")      # max-a's window is back; max-b's is not
+        r = dais(self.root, "tick", "demo", "--dry-run", env=env)
+        self.assertNotIn("WOULD run engineer", r.stdout)
+        self._engineer_fm("account: max-a\n")
+        r = dais(self.root, "tick", "demo", "--dry-run", env=env)
+        self.assertIn("WOULD run engineer", r.stdout)
+
+    def test_a_capped_pool_still_runs_when_its_fallback_account_is_free(self):
+        env = self._accounts_env()
+        self._engineer_fm("account: pool:max\nfallback_account: openai\nfallback_model: gpt-5.4\n")
+        self._seed_run("capped", "anthropic", 5, account="max-a")
+        self._seed_run("capped", "anthropic", 4, account="max-b")
+        r = dais(self.root, "tick", "demo", "--dry-run", env=env)
+        self.assertIn("WOULD run engineer", r.stdout)
+
+    def test_pre_0015_rows_read_as_the_providers_implicit_account(self):
+        self._engineer_on("anthropic")
+        self._seed_run("capped", "anthropic", 5)                          # account NULL
+        r = dais(self.root, "tick", "demo", "--dry-run")
+        self.assertNotIn("WOULD run engineer", r.stdout)
+        self.assertIn("anthropic", r.stdout)
 
     def test_claude_cap_does_not_park_a_codex_role(self):
         self._engineer_on("openai")

@@ -138,12 +138,22 @@ fi
 #       spin on a persistent fault (execution error, outage); a success after it clears it.
 #     Pre-0007 rows are NULL and read as anthropic (every historical run was Claude). A db
 #     with no provider column at all can't tell providers apart -> 'all' = the old global gate. ---
+#     5.4: COOLING is keyed by ACCOUNT (runs.account, 0015; NULL = the provider's implicit
+#     account, whose name is the provider's) — a cap on one subscription says nothing about
+#     another on the same provider. A role is withheld only when EVERY account in its attempt
+#     plan (pool members + the fallback tier) is cooling. BACKOFF stays per provider. ---
 COOLING=""; BACKOFF=""
 if [ -n "$(db "SELECT 1 FROM pragma_table_info('runs') WHERE name='provider';" 2>/dev/null)" ]; then
-  COOLING="$(db "SELECT DISTINCT COALESCE(r.provider,'anthropic') FROM runs r WHERE r.status='capped'
+  if [ -n "$(db "SELECT 1 FROM pragma_table_info('runs') WHERE name='account';" 2>/dev/null)" ]; then
+    _ak="COALESCE(%s.account,%s.provider,'anthropic')"
+  else
+    _ak="COALESCE(%s.provider,'anthropic')"
+  fi
+  _rk="$(printf "$_ak" r r)"; _sk="$(printf "$_ak" s s)"
+  COOLING="$(db "SELECT DISTINCT $_rk FROM runs r WHERE r.status='capped'
                  AND r.started_at > datetime('now','-90 minutes')
                  AND r.started_at > COALESCE((SELECT MAX(s.started_at) FROM runs s WHERE s.status='succeeded'
-                       AND COALESCE(s.provider,'anthropic')=COALESCE(r.provider,'anthropic')), '')
+                       AND $_sk=$_rk), '')
                  ORDER BY 1;" | paste -sd, -)"
   BACKOFF="$(db "SELECT p FROM (SELECT COALESCE(r.provider,'anthropic') p, COUNT(*) n FROM runs r
                  WHERE r.status='failed' AND r.started_at > datetime('now','-30 minutes')
@@ -164,6 +174,25 @@ fi
 provider_gate(){
   case ",$COOLING," in *",$1,"*|*",all,"*) echo "cooling — $1 hit its usage cap within 90m"; return;; esac
   case ",$BACKOFF," in *",$1,"*|*",all,"*) echo "backing off — 2+ failed $1 runs in 30m";; esac
+}
+# account_gate <project> <role> -> why the role is withheld ('' = some account in its plan is free).
+# Reads the role's attempt plan (router --account-attempts: accounts and their providers).
+account_gate(){
+  local plan acct prov accts="" provs="" free=0 pfree=0 line
+  plan="$(python3 "$SELF/router.py" --account-attempts "$DAIS_HOME" "$1" "$2" 2>/dev/null)"
+  [ -n "$plan" ] || { provider_gate anthropic; return; }
+  while IFS='|' read -r _ acct prov _; do
+    [ -n "$acct" ] || continue
+    accts="${accts:+$accts, }$acct"; provs="${provs:+$provs,}$prov"
+    case ",$COOLING," in *",$acct,"*|*",all,"*) ;; *) free=1;; esac
+    case ",$BACKOFF," in *",$prov,"*|*",all,"*) ;; *) pfree=1;; esac
+  done <<<"$plan"
+  if [ "$free" = 0 ]; then
+    case "$accts" in *,*) echo "cooling — every account ($accts) hit its usage cap within 90m";;
+                      *) echo "cooling — $accts hit its usage cap within 90m";; esac
+    return
+  fi
+  [ "$pfree" = 0 ] && echo "backing off — 2+ failed ${provs%%,*} runs in 30m"
 }
 withheld=0   # candidates a provider gate skipped this tick (paces the exit code below)
 
@@ -263,8 +292,7 @@ for proj in "${projects[@]}"; do
     # provider gate (see the capacity gates above): only resolve the role's provider when some
     # provider is actually cooling/backing off — it costs a python startup per candidate.
     if [ -n "$COOLING$BACKOFF" ]; then
-      cprov="$(python3 "$SELF/router.py" --agent-config "$DAIS_HOME" "$proj" "$cand" 2>/dev/null | sed -n 's/^provider=//p')"
-      gate="$(provider_gate "${cprov:-anthropic}")"
+      gate="$(account_gate "$proj" "$cand")"
       if [ -n "$gate" ]; then
         withheld=$((withheld+1))
         tlog "$gate; skipping $proj/$cand"

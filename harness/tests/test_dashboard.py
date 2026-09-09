@@ -20,7 +20,7 @@ CREATE TABLE tasks(id TEXT, project TEXT, title TEXT, status TEXT, assignee TEXT
   state_entered_at TEXT);
 CREATE TABLE runs(id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT, agent TEXT,
   task_id TEXT, status TEXT, summary TEXT, log_path TEXT, started_at TEXT, ended_at TEXT,
-  provider TEXT, input_tokens INTEGER, cost_usd REAL);
+  provider TEXT, account TEXT, input_tokens INTEGER, cost_usd REAL);
 CREATE TABLE run_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER, task_id TEXT,
   verb TEXT, at TEXT);
 """
@@ -441,6 +441,20 @@ class TestDataLayer(unittest.TestCase):
         snap3 = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 23:59:00")
         self.assertFalse(snap3.cap_state)
         self.assertEqual(snap3.cooling, [])
+
+    def test_snapshot_cooling_names_accounts(self):
+        # 5.4: cap state is per ACCOUNT (runs.account, 0015); a NULL account is the provider's implicit one
+        conn = _seed()
+        conn.execute("INSERT INTO runs(project,agent,status,log_path,started_at,provider,account) "
+                     "VALUES('acme','qa','capped','/tmp/c2.log','2026-06-26 20:44:00','anthropic','max-a')")
+        conn.execute("INSERT INTO runs(project,agent,status,log_path,started_at,provider,account) "
+                     "VALUES('acme','qa','capped','/tmp/c3.log','2026-06-26 20:44:00','openai',NULL)")
+        snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertEqual(snap.cooling, ["max-a", "openai"])
+        conn.execute("INSERT INTO runs(project,agent,status,log_path,started_at,provider,account) "
+                     "VALUES('acme','qa','succeeded','/tmp/c4.log','2026-06-26 20:44:30','anthropic','max-a')")
+        snap = d.load_snapshot(conn, root="/nonexistent", now="2026-06-26 20:45:00")
+        self.assertEqual(snap.cooling, ["openai"])                      # max-a's success clears max-a only
 
     # --- spend limits (plan 1.6) on the board ---------------------------------------------
     def _budget_root(self, project_yaml="", dais_yaml=""):
