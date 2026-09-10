@@ -1027,9 +1027,9 @@ class TestAccounts(unittest.TestCase):
         out = subprocess.run([sys.executable, os.path.join(os.path.dirname(router.__file__), "router.py"),
                               "--account-attempts", self.root, "demo", "qa"],
                              capture_output=True, text=True, env=dict(os.environ)).stdout.splitlines()
-        self.assertEqual(out, ["primary|max-b|anthropic|subscription|/tmp/max-b|",              # free first
-                               "primary|max-a|anthropic|subscription|%s|" % os.path.expanduser("~/.dais/accounts/max-a"),  # the capped member, as a probe
-                               "fallback|chatgpt|openai|subscription|/tmp/chatgpt|"])           # then the fallback tier
+        self.assertEqual(out, ["primary|max-b|anthropic|subscription|/tmp/max-b||",             # free first
+                               "primary|max-a|anthropic|subscription|%s||" % os.path.expanduser("~/.dais/accounts/max-a"),  # the capped member, as a probe
+                               "fallback|chatgpt|openai|subscription|/tmp/chatgpt||"])          # then the fallback tier (last field: a member's own model)
 
     # --- lint ---
     def test_lint_rejects_unknown_accounts_provider_mismatch_and_bad_pools(self):
@@ -1051,3 +1051,30 @@ class TestAccounts(unittest.TestCase):
         self._agent("qa", "auth: api\n")
         s = router.agent_setup(self.root, "demo", "qa")
         self.assertEqual((s["account"], s["auth"]), ("anthropic", "api"))
+
+    # --- mixed-provider pools: a member may carry its own model (`account:model`) -------------
+    def test_pool_member_may_name_its_model_and_attempts_carry_it(self):
+        with open(self.yfile, "a") as f:
+            f.write("  any: {members: [max-a, chatgpt:gpt-5.4]}\n")
+        ms = self.A.members("pool:any")
+        self.assertEqual([(a["name"], a.get("model", "")) for a in ms], [("max-a", ""), ("chatgpt", "gpt-5.4")])
+        self.assertEqual(self.A.order("pool:any"), ["max-a", "chatgpt"])
+        import subprocess
+        self._agent("qa", "account: pool:any\n")
+        out = subprocess.run([sys.executable, os.path.join(os.path.dirname(router.__file__), "router.py"),
+                              "--account-attempts", self.root, "demo", "qa"],
+                             capture_output=True, text=True, env=dict(os.environ)).stdout.splitlines()
+        self.assertEqual(out[0].split("|")[-1], "")                    # max-a: the role's model
+        self.assertEqual(out[1].split("|")[1:3] + out[1].split("|")[-1:], ["chatgpt", "openai", "gpt-5.4"])
+        self.assertEqual(router.agent_setup(self.root, "demo", "qa")["provider"], "anthropic")   # the first member's
+
+    def test_lint_rejects_a_mixed_pool_member_without_a_model(self):
+        import io, contextlib
+        with open(self.yfile, "a") as f:
+            f.write("  mixed: {members: [max-a, chatgpt]}\n")
+        self._agent("qa", "account: pool:mixed\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = router.lint(self.root, "demo")
+        self.assertEqual(rc, 1)
+        self.assertIn("pool 'mixed': member 'chatgpt' is on provider openai but the pool's first member is on anthropic — give it its own model (chatgpt:<model>)", buf.getvalue())

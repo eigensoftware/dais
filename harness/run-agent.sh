@@ -499,12 +499,12 @@ fi
 # another ACCOUNT is another credential, so it is always worth trying.
 ATTEMPTS=()
 for _pl in "${PLAN[@]}"; do
-  IFS='|' read -r _tier _acct _prov _kind _cfg _key <<<"$_pl"
+  IFS='|' read -r _tier _acct _prov _kind _cfg _key _mm <<<"$_pl"
   if [ "$_tier" = primary ]; then
     [ "$start_on_backup" = 1 ] && continue
-    ATTEMPTS+=("$_prov|$MODEL|$_acct|$_kind|$_cfg|$_key")
+    ATTEMPTS+=("$_prov|${_mm:-$MODEL}|$_acct|$_kind|$_cfg|$_key")   # a pool member's own model wins
   else
-    _m="$FALLBACK"; [ -n "$_m" ] || { [ "$_prov" = "$PROVIDER" ] && _m="$MODEL"; }
+    _m="${_mm:-$FALLBACK}"; [ -n "$_m" ] || { [ "$_prov" = "$PROVIDER" ] && _m="$MODEL"; }
     [ -n "$_m" ] || continue                       # a cross-provider fallback needs fallback_model
     [ "$AUTH" = api ] && [ "$_acct" = "$(_plan_field "${PLAN[0]}" 2)" ] && continue
     ATTEMPTS+=("$_prov|$_m|$_acct|$_kind|$_cfg|$_key")

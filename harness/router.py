@@ -709,9 +709,17 @@ def lint_project(root, project):
     import accounts as AC
     reg = AC.load()
     for pname, pool in reg["pools"].items():        # the accounts file itself (once per project lint)
-        for mname in pool["members"]:
+        first_prov = None
+        for mref in pool["members"]:
+            mname, _, mmodel = mref.partition(":")
             if mname not in reg["accounts"]:
                 errors.append("%s: pool '%s' names an unknown account '%s'" % (AC.accounts_file(), pname, mname))
+                continue
+            prov = reg["accounts"][mname]["provider"]
+            first_prov = first_prov or prov
+            if prov != first_prov and not mmodel:      # a mixed pool: model ids differ per provider
+                errors.append("%s: pool '%s': member '%s' is on provider %s but the pool's first member is on %s — "
+                              "give it its own model (%s:<model>)" % (AC.accounts_file(), pname, mname, prov, first_prov, mname))
         if pool["policy"] not in AC.POLICIES:
             errors.append("%s: pool '%s' has an unknown policy '%s' (expected %s)"
                           % (AC.accounts_file(), pname, pool["policy"], "|".join(AC.POLICIES)))
@@ -861,7 +869,7 @@ if __name__ == "__main__":
         import accounts as AC
         s = agent_setup(sys.argv[2], sys.argv[3], sys.argv[4])
         for tier, a in AC.attempts(s, runs_today=runs_today_by_account(sys.argv[2])):
-            print("|".join([tier, a["name"], a["provider"], a["kind"], a["config_dir"], a["key_env"]]))
+            print("|".join([tier, a["name"], a["provider"], a["kind"], a["config_dir"], a["key_env"], a.get("model", "")]))
         sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "--pack-meta":
         # run-agent's seam: `cli=…` and `key_var=…` for a provider pack ('' lines when unknown)

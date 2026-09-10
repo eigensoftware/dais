@@ -402,6 +402,11 @@ The account decides the provider and the auth kind, so `provider:`/`auth:` becom
 for each provider's implicit account (the ambient login), and a workspace without the file
 changes nothing.
 
+A pool may span providers only when the foreign member carries its own model, since model ids
+differ per provider: `members: [max-a, chatgpt:gpt-5.4]` (lint rejects a mixed pool without one).
+Use that only for a role that tolerates either model; the default pattern is a same-provider
+pool with a cross-provider fallback tier.
+
 A run tries the pool's free members first (same provider first, then the fallback tier), and a
 capped attempt marks that ACCOUNT for its window (`~/.dais/accounts/<name>.cooldown`; a later
 success clears it). The dispatcher's cooling gate keys on the account too: a role is withheld

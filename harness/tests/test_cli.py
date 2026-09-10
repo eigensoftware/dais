@@ -2000,6 +2000,25 @@ class TestPerRoleModelOverride(CliTest):
             self.assertTrue(os.path.exists(os.path.join(acc["DAIS_ACCOUNTS_DIR"], m + ".cooldown")), m)
         self.assertFalse(os.path.exists(os.path.join(acc["DAIS_ACCOUNTS_DIR"], "chatgpt.cooldown")))
 
+    def test_mixed_pool_member_runs_on_its_own_model(self):
+        acc = self._accounts("")
+        with open(acc["DAIS_ACCOUNTS_FILE"], "w") as f:
+            f.write(self._pool_yaml(acc["_dir"]) + "  any: {members: [max-a, chatgpt:gpt-5.4]}\n")
+        argv = os.path.join(self.root, "codex-argv")
+        claude = ('echo \'{"type":"assistant","message":{"content":[{"type":"text","text":"You\\u0027ve hit your usage limit"}]}}\'\n')
+        codex = ('printf "%s\\n" "$@" > "' + argv + '"\n'
+                 'echo \'{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"ok"}}\'\n'
+                 'echo \'{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":1}}\'\n')
+        self._set_role("qa", "account: pool:any\nmodel: claude-fable-5\n")
+        env = {"PATH": self._tmpbin(fake_codex=codex, fake_claude=claude), "HOME": self._fake_home(),
+               "DAIS_ACCOUNTS_FILE": acc["DAIS_ACCOUNTS_FILE"], "DAIS_ACCOUNTS_DIR": acc["DAIS_ACCOUNTS_DIR"]}
+        r = self._run_agent("qa", env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        row = q(self.root, "SELECT status, provider, account, model FROM runs ORDER BY id DESC LIMIT 1")
+        self.assertEqual(tuple(row), ("succeeded", "openai", "chatgpt", "gpt-5.4"))
+        args = open(argv).read().split("\n")
+        self.assertEqual(args[args.index("-m") + 1], "gpt-5.4")
+
     def test_a_success_clears_the_accounts_own_marker(self):
         acc = self._accounts("")
         with open(acc["DAIS_ACCOUNTS_FILE"], "w") as f:

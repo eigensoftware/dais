@@ -169,7 +169,13 @@ def members(ref, reg=None):
         pool = reg["pools"].get(ref[5:])
         if not pool:
             return []
-        return [a for a in (resolve(m, reg) for m in pool["members"]) if a]
+        out = []
+        for m in pool["members"]:
+            name, _, model = m.partition(":")          # `account:model` — a member on another provider
+            a = resolve(name, reg)
+            if a:
+                out.append(dict(a, model=model))
+        return out
     a = resolve(ref, reg)
     return [a] if a else []
 
@@ -258,12 +264,14 @@ def attempts(setup, now=None, runs_today=None, reg=None):
     """The tiers for one run: [(tier, account dict)] — 'primary' members first (same provider),
     then the fallback tier's, when the role has a fallback model."""
     reg = reg or load()
-    out = [("primary", resolve(n, reg)) for n in order(setup["account"], now, runs_today, reg)]
+    def _with_model(ref, n):                   # keep a pool member's own model on the attempt
+        return next((a for a in members(ref, reg) if a["name"] == n), resolve(n, reg))
+    out = [("primary", _with_model(setup["account"], n)) for n in order(setup["account"], now, runs_today, reg)]
     # the fallback tier runs the fallback MODEL, so the same account may appear again (a model
     # swap on one credential is the historical fallback); only an identical tier is dropped
     if setup.get("fallback_model") or (setup.get("fallback_account") and setup["fallback_account"] != setup["account"]):
         for n in order(setup["fallback_account"], now, runs_today, reg):
-            out.append(("fallback", resolve(n, reg)))
+            out.append(("fallback", _with_model(setup["fallback_account"], n)))
     return [(t, a) for t, a in out if a]
 
 
