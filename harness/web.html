@@ -70,7 +70,7 @@
   <label class="muted">theme <select id="theme"><option value="">system</option><option value="light">light</option><option value="dark">dark</option></select></label>
   <span id="clock" class="muted"></span>
 </header>
-<nav class="tabs"><button data-tab="board" class="on">board</button><button data-tab="machine">machine</button><button data-tab="charts">charts</button><button data-tab="runs">runs</button><button data-tab="cost">cost</button><button data-tab="retro">retro</button></nav>
+<nav class="tabs"><button data-tab="board" class="on">board</button><button data-tab="machine">machine</button><button data-tab="charts">charts</button><button data-tab="runs">runs</button><button data-tab="cost">cost</button><button data-tab="retro">retro</button><button data-tab="settings">settings</button></nav>
 <main>
   <aside class="card rail" id="rail"></aside>
   <section class="card" id="center"></section>
@@ -245,8 +245,31 @@
     }).catch(() => $('#center').innerHTML = '<span class="muted">charts unavailable</span>');
   }
   function renderRuns() {
-    const runs = (snap.recent_runs || []); $('#center').innerHTML = '<table><tr><th>started</th><th>run</th><th>status</th><th>dur</th><th>model</th><th>tokens</th><th>cost</th><th>task</th></tr>' +
-      runs.map(r => `<tr><td class="muted">${esc((r.started_at || '').slice(5, 16))}</td><td>${esc(r.agent)}</td><td>${esc(r.status)}</td><td>${r.dur_min != null ? r.dur_min + 'm' : ''}</td><td class="muted">${esc((r.model || '').replace('claude-', ''))}</td><td>${tokens(r.input_tokens)}</td><td>${r.cost_usd != null ? '$' + r.cost_usd.toFixed(2) : ''}</td><td class="muted">${esc(r.task_id || '')}</td></tr>`).join('') + '</table>';
+    const runs = (snap.recent_runs || []); $('#center').innerHTML = '<table><tr><th>started</th><th>run</th><th>status</th><th>dur</th><th>provider</th><th>model</th><th>tokens</th><th>cost</th><th>task</th></tr>' +
+      runs.map(r => { const prov = r.provider || ''; const acct = (r.account && r.account !== prov) ? ' · ' + r.account : '';   // the account only when it is a named one
+        return `<tr><td class="muted">${esc((r.started_at || '').slice(5, 16))}</td><td>${esc(r.agent)}</td><td>${esc(r.status)}</td><td>${r.dur_min != null ? r.dur_min + 'm' : ''}</td><td class="muted">${esc(prov + acct)}</td><td class="muted">${esc((r.model || '').replace('claude-', ''))}</td><td>${tokens(r.input_tokens)}</td><td>${r.cost_usd != null ? '$' + r.cost_usd.toFixed(2) : ''}</td><td class="muted">${esc(r.task_id || '')}</td></tr>`; }).join('') + '</table>';
+  }
+  function renderSettings() {
+    // read-only: the resolved config per role (router.agent_setup, the one authority), the
+    // workspace knobs, and the accounts registry. Editing stays in the files, on purpose.
+    api('settings').then(r => r.json()).then(s => {
+      const cols = ['provider', 'model', 'effort', 'account', 'fallback_model', 'fallback_provider', 'access', 'trigger', 'context', 'mcp', 'plugins', 'max_turns', 'max_budget_usd', 'max_minutes', 'resume', 'playbook'];
+      const short = { fallback_model: 'fallback', fallback_provider: 'fb provider', max_turns: 'turns', max_budget_usd: 'budget $', max_minutes: 'minutes' };
+      let h = `<h4>workspace · ${esc(s.workspace.name || '')}</h4><div class="sub">parallel ${esc(s.workspace.parallel)} · notify ${s.workspace.notify ? 'on' : 'off'}${s.workspace.daily_budget ? ' · daily budget ' + esc(s.workspace.daily_budget) : ''}${s.workspace.quiet_hours ? ' · quiet hours ' + esc(s.workspace.quiet_hours) : ''} · packs: ${esc(s.packs.join(', '))}</div>`;
+      const named = s.accounts.filter(a => !a.implicit);
+      h += '<h4>accounts</h4>' + (named.length ? '<table><tr><th>account</th><th>provider</th><th>kind</th><th>credential</th><th>window</th></tr>' + named.map(a => `<tr><td>${esc(a.name)}</td><td>${esc(a.provider)}</td><td>${esc(a.kind)}</td><td class="muted">${esc(a.credential)}</td><td class="muted">${esc(a.window || '~5h')}</td></tr>`).join('') + '</table>' : '<div class="sub">none named — every role runs on its provider\'s ambient login (~/.dais/accounts.yaml)</div>');
+      if (s.pools.length) h += '<div class="sub">pools: ' + s.pools.map(p => `${esc(p.name)} = ${esc(p.members.join(', '))} (${esc(p.policy)})`).join(' · ') + '</div>';
+      for (const p of s.projects) {
+        h += `<h4>${esc(p.name)} <span class="muted">· ${esc(p.machine)}</span></h4><div style="overflow-x:auto"><table><tr><th>role</th>` + cols.map(c => `<th>${esc(short[c] || c)}</th>`).join('') + '</tr>';
+        for (const [role, cfg] of Object.entries(p.roles)) h += `<tr><td><strong>${esc(role)}</strong></td>` + cols.map(c => {
+          let v = cfg[c] == null ? '' : String(cfg[c]);
+          if (c === 'fallback_provider' && !cfg.fallback_model) v = '';          // the default equals the provider: noise without a fallback model
+          return `<td class="${['provider', 'model', 'access'].includes(c) ? '' : 'muted'}" style="white-space:nowrap">${esc(v.replace('claude-', ''))}</td>`; }).join('') + '</tr>';
+        h += '</table></div>';
+      }
+      h += '<div class="sub">read-only — roles live in projects/&lt;p&gt;/agents/&lt;role&gt;.md (frontmatter) and project.yaml; accounts in ~/.dais/accounts.yaml</div>';
+      $('#center').innerHTML = h;
+    }).catch(() => $('#center').innerHTML = '<span class="muted">unavailable</span>');
   }
   function renderReport(kind) {
     const extra = kind === 'cost' ? '?by=role&since=7d' : '?since=30d';
@@ -300,13 +323,13 @@
       post('fire', body).then(r => { $('#modal').classList.remove('on'); toast(r.ok ? (r.body.output || 'fired') : ('refused: ' + (r.body.error || r.code))); refresh(); });
     };
   }
-  function render() { if (!snap) return; renderHeader(); renderRail(); ({board: renderBoard, machine: renderMachine, charts: renderCharts, runs: renderRuns, cost: () => renderReport('cost'), retro: () => renderReport('retro')})[tab](); }
+  function render() { if (!snap) return; renderHeader(); renderRail(); ({board: renderBoard, machine: renderMachine, charts: renderCharts, runs: renderRuns, cost: () => renderReport('cost'), retro: () => renderReport('retro'), settings: renderSettings})[tab](); }
   function refresh() { api('snapshot').then(r => r.json()).then(s => { snap = s; render(); if (selected) loadSide(); }); }
   document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => { document.querySelectorAll('nav.tabs button').forEach(x => x.classList.remove('on')); b.classList.add('on'); tab = b.dataset.tab; render(); });
   $('#pause').onclick = () => post('loop', {action: 'pause'}).then(r => { toast(r.body.output || 'paused'); refresh(); });
   $('#resume').onclick = () => post('loop', {action: 'resume'}).then(r => { toast(r.body.output || 'resumed'); refresh(); });
   // live: one SSE stream; the board re-renders on each frame (the side panel only on selection or actions)
-  try { const es = new EventSource('./api/events'); es.onmessage = ev => { snap = JSON.parse(ev.data); if (!['machine', 'charts', 'cost', 'retro'].includes(tab)) render(); else renderHeader(); }; es.onerror = () => setTimeout(refresh, 3000); } catch (e) { refresh(); setInterval(refresh, 5000); }
+  try { const es = new EventSource('./api/events'); es.onmessage = ev => { snap = JSON.parse(ev.data); if (!['machine', 'charts', 'cost', 'retro', 'settings'].includes(tab)) render(); else renderHeader(); }; es.onerror = () => setTimeout(refresh, 3000); } catch (e) { refresh(); setInterval(refresh, 5000); }
   refresh();
 })();
 </script>

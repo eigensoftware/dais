@@ -12,6 +12,7 @@ Routes (all under /<token>/; a wrong token is a 404 everywhere):
   GET  /api/machine/<project> states, edges, live counts, bands
   GET  /api/cost?by=&since=   the ledger report (text) · GET /api/retro?since= the retro (text)
   GET  /api/series?days=14    the charts' data: daily tokens by role, the 24h run timeline, gate stats, tiles
+  GET  /api/settings          the resolved config, read-only: every role's provider/model/account/caps, the workspace knobs, the accounts
   POST /api/fire              {task, verb, confirm?, typed?, attest?[], verify?[], notes?, verdict?}
   POST /api/task              {task, notes? | priority? | title? | pr? | budget_lift?}
   POST /api/loop              {action: pause | resume}
@@ -102,6 +103,46 @@ def machine_json(root, project):
                                                 (project,))}
     return {"name": m.get("name"), "states": m.get("states", {}), "edges": m.get("edges", []),
             "counts": counts, "bands": MC.bands(m), "roles": m.get("roles", {})}
+
+
+def settings_json(root):
+    """The resolved configuration, read-only (interface round 2): what every role in every
+    active project runs on — router.agent_setup's answer, the one authority — plus the
+    workspace knobs (dais.yaml) and the accounts registry (names, providers, kinds; a
+    config dir path or a key variable NAME, never a secret)."""
+    import router
+    import accounts as AC
+    import board as B
+    wsy = os.path.join(root, "dais.yaml")
+    ytext = open(wsy).read() if os.path.exists(wsy) else ""
+    ws = {"name": B.workspace_name(root),
+          "parallel": router._yaml_line(ytext, "parallel") or "1",
+          "notify": bool(router._yaml_line(ytext, "notify")),
+          "daily_budget": router._yaml_line(ytext, "daily_budget"),
+          "quiet_hours": router._yaml_line(ytext, "quiet_hours")}
+    reg = AC.load()
+    implicit = set(router.provider_packs())
+    accts = [{"name": n, "provider": a["provider"], "kind": a["kind"],
+              "credential": a["config_dir"] if a["kind"] == "subscription" else ("$" + a["key_env"] if a["key_env"] else ""),
+              "window": a["window"], "implicit": n in implicit}
+             for n, a in reg["accounts"].items()]
+    pools = [{"name": n, "members": p["members"], "policy": p["policy"]} for n, p in reg["pools"].items()]
+    keys = ("provider", "model", "effort", "account", "fallback_provider", "fallback_model", "fallback_account",
+            "access", "trigger", "context", "mcp", "plugins", "max_turns", "max_budget_usd", "max_minutes",
+            "resume", "playbook", "concurrency", "isolation", "model_by_priority", "effort_by_priority",
+            "model_provider", "base_url", "local")
+    projects = []
+    pdir = os.path.join(root, "projects")
+    for name in sorted(os.listdir(pdir)) if os.path.isdir(pdir) else []:
+        if not os.path.exists(os.path.join(pdir, name, "project.yaml")) or B.project_archived(root, name):
+            continue
+        roles = {}
+        for r in router.cast(root, name):
+            st = router.agent_setup(root, name, r["name"])
+            roles[r["name"]] = {k: st.get(k, "") for k in keys}
+        projects.append({"name": name, "roles": roles,
+                         "machine": os.path.basename(MC.project_machine_path(root, name))})
+    return {"workspace": ws, "accounts": accts, "pools": pools, "packs": sorted(implicit), "projects": projects}
 
 
 def series_json(root, days=14):
@@ -250,6 +291,8 @@ def make_server(root, host, port, token):
                 if len(parts) == 3 and parts[1] == "machine":
                     m = machine_json(root, parts[2])
                     return self._send(200, m) if m else self._send(404, {"error": "no project"})
+                if path == "/api/settings":
+                    return self._send(200, settings_json(root))
                 if path == "/api/series":
                     dd = qs.get("days", ["14"])[0]
                     return self._send(200, series_json(root, int(dd) if dd.isdigit() else 14))

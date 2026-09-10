@@ -173,5 +173,40 @@ class WebTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 404)
 
 
+
+
+    # --- interface round 2 (2026-09-10): run provenance + the read-only settings view ---------
+    def test_settings_json_resolves_every_role(self):
+        s = self._get("/api/settings")
+        demo = {p["name"]: p for p in s["projects"]}["demo"]
+        eng = demo["roles"]["engineer"]
+        self.assertEqual((eng["provider"], eng["access"]), ("anthropic", "edit"))
+        for k in ("model", "effort", "account", "fallback_model", "fallback_provider", "fallback_account", "trigger",
+                  "context", "mcp", "plugins", "max_turns", "max_budget_usd", "max_minutes", "resume", "playbook",
+                  "concurrency", "isolation", "model_by_priority", "effort_by_priority"):
+            self.assertIn(k, eng, k)
+        self.assertIn("qa", demo["roles"])
+        self.assertIn("workspace", s)
+        self.assertIn("parallel", s["workspace"]); self.assertIn("accounts", s)
+        self.assertNotIn("config_dir_secret", json.dumps(s))     # nothing but names, paths, and env-var NAMES
+
+    def test_page_has_a_settings_tab(self):
+        html = self._get("/", raw=True)
+        self.assertIn('data-tab="settings"', html)
+        self.assertIn("renderSettings", html)
+
+    def test_run_rows_carry_provider_and_account(self):
+        import sqlite3
+        conn = sqlite3.connect(os.path.join(self.root, "dais.db"))
+        conn.execute("INSERT INTO runs(project,agent,status,started_at,ended_at,provider,account,model) "
+                     "VALUES('demo','qa','succeeded',datetime('now','-3 days'),datetime('now','-3 days','+2 minutes'),'openai','chatgpt','gpt-5.4')")   # old enough to leave today's tiles alone
+        conn.commit(); conn.close()
+        s = self._get("/api/snapshot")
+        r = next(x for x in s["recent_runs"] if x["agent"] == "demo/qa" and x["model"] == "gpt-5.4")
+        self.assertEqual((r["provider"], r["account"]), ("openai", "chatgpt"))
+        html = self._get("/", raw=True)
+        self.assertIn("<th>provider</th>", html)
+
+
 if __name__ == "__main__":
     unittest.main()

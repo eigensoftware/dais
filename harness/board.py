@@ -100,6 +100,8 @@ class Run:
     claim: str = None         # the task this run picked up (verb='claim'), if any — else None
     task_id: str = None       # the task PINNED at dispatch (runs.task_id) — the trigger, set before
                               # any claim; the RUNNING view prefers it over a re-derived guess
+    provider: str = None      # runs.provider (0007) — which pack the run launched on
+    account: str = None       # runs.account (0015) — which credential; None = the provider's implicit one
     input_tokens: int = None  # the ledger (0008): prompt tokens the run consumed, or None
     cost_usd: float = None    # the ledger: claude-reported dollars, or None (codex / pre-0008)
 
@@ -384,6 +386,9 @@ def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
     ucol = ",cost_usd" if _has_column(conn, "runs", "cost_usd") else ""           #  test dbs add one)
     lcol = tcol + ucol
     mcol = ",model" if _has_column(conn, "runs", "model") else ""    # migration 0006
+    pcol = ",provider" if _has_column(conn, "runs", "provider") else ""   # 0007
+    acol = ",account" if _has_column(conn, "runs", "account") else ""     # 0015
+    xcol = mcol + pcol + acol                                        # the run-row extras, one select
     # Projects to render = those configured on disk (a dir under projects/ with a project.yaml —
     # the marker lint requires; the roles file is legacy and optional) UNIONed with any project
     # referenced by a task. The union keeps a configured-but-taskless project visible in the
@@ -413,11 +418,12 @@ def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
                 verdict=(r["verdict"] if vcol else None), check_results=(r["check_results"] if ccol else None),
                 blocked_on=(r["blocked_on"] if dep else None)))
         run_rows = conn.execute(
-            "SELECT id,started_at,ended_at,agent,status,summary,log_path,task_id" + mcol + lcol + " FROM runs "
+            "SELECT id,started_at,ended_at,agent,status,summary,log_path,task_id" + xcol + lcol + " FROM runs "
             "WHERE project=? ORDER BY id DESC LIMIT ?", (name, recent)).fetchall()
         proj_runs = [Run(id=r["id"], started_at=r["started_at"], agent=r["agent"],
                          status=r["status"], summary=r["summary"],
                          log_path=r["log_path"], project=name, task_id=r["task_id"],
+                         provider=(r["provider"] if pcol else None), account=(r["account"] if acol else None),
                          model=(r["model"] if mcol else None),
                          input_tokens=(r["input_tokens"] if tcol else None),
                          cost_usd=(r["cost_usd"] if ucol else None),
@@ -479,13 +485,14 @@ def load_snapshot(conn, root=HOME, now=None, recent=6, now_local=None):
     if journal["workspace"] and (newest is None or journal["workspace"]["ts"] > newest["ts"]):
         newest = journal["workspace"]
     grows = conn.execute(
-        "SELECT id,started_at,ended_at,project,agent,status,summary,log_path,task_id" + mcol + lcol + " FROM runs "
+        "SELECT id,started_at,ended_at,project,agent,status,summary,log_path,task_id" + xcol + lcol + " FROM runs "
         "ORDER BY id DESC LIMIT ?", (recent,)).fetchall()
     recent_runs = [Run(id=r["id"], started_at=r["started_at"],
                        agent=f"{r['project']}/{r['agent']}",
                        status=r["status"], summary=r["summary"],
                        log_path=r["log_path"], project=r["project"], task_id=r["task_id"],
                        model=(r["model"] if mcol else None),
+                       provider=(r["provider"] if pcol else None), account=(r["account"] if acol else None),
                        input_tokens=(r["input_tokens"] if tcol else None),
                        cost_usd=(r["cost_usd"] if ucol else None),
                        dur_min=minutes_between(r["started_at"], r["ended_at"]))
