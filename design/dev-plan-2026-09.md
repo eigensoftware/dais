@@ -118,7 +118,7 @@ with no founder action.
 | # | Item | Effort |
 |---|---|---|
 | 6.1 | Multi-spawn effects with `blocked_on` chains: one approval fans out an initiative | 0.5 |
-| 6.2 | Shared board across machines: replicated `dais.db`, distributed tick lock | 3+ |
+| 6.2 | ~~Shared board across machines~~ — PARKED 2026-09-09: no user need (one login per provider needs no second machine). A draft spec (one board host, workers over ssh) lives in git history at a54355d if it ever returns | — |
 
 ## Sequencing rules
 
